@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 数据库文件不入库（含真实名单，必须留在本机）
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# 演示用临时产物
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
