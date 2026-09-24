@@ -78,6 +78,29 @@ def main() -> None:
             f"，例：{name_of(conn, items[0].object_id)}"
         )
 
+    print("\n--- AI 消解建议（M2 最小改动搜索）---")
+    from scheduler.solver import m2 as solver
+
+    results = solver.resolve(conn, info["org_id"], d0, d6, cfg=cfg, max_plans=3)
+    for r in results:
+        c = r.conflict
+        slots_txt = "、".join(f"{WEEKDAY[d - 1]}第{i}节" for d, i in decode_mask(c.mask))
+        print(
+            f"\n冲突：{c.date} {slots_txt}\n"
+            f"  『{title_of(conn, c.schedule_a)}』 × 『{title_of(conn, c.schedule_b)}』\n"
+            f"  对象：{name_of(conn, c.object_id)}（{c.role}）"
+        )
+        for i, p in enumerate(r.plans, 1):
+            print(f"  方案{i}：{p.describe()}")
+        if not r.plans:
+            print("  （无可行方案，需要放宽约束或手工调整）")
+
+    # 一键消解：迭代应用，每应用一个就重新扫描（避免多个方案互相打架）
+    applied, remaining = solver.resolve_and_apply(conn, info["org_id"], d0, d6, cfg=cfg)
+    print(f"\n一键消解：应用了 {len(applied)} 个方案，剩余冲突 {remaining} 处")
+    for p in applied:
+        print("  ✓ " + p.moves[0].describe())
+
     print("\n--- 某位教师的空闲时段 ---")
     t = info["teacher_ids"][0]
     print(f"教师：{name_of(conn, t)}，本周占用 {total_load(entries, t)} 节")
