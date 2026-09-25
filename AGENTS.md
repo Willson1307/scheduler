@@ -40,7 +40,7 @@
 |---|---|
 | **Ryan_L_F** | `src/scheduler/authz.py` + `schema.sql` 末尾追加<br>`src/server/auth.py`、`api_login.py`、`api_groups.py`<br>`src/server/api_objects.py`、`api_schedules.py`、`api_conflicts.py`、`api_resolve.py`<br>`src/server/api_demands.py`、`api_nl.py`、`nl/**`<br>`tests/test_authz.py`、`test_server_auth.py`、`test_server_groups.py`、`test_server_api.py`、`test_server_resolve.py`、`test_nl.py` |
 | **独此一嘉** | `src/server/config.py`、`http_api.py`、`routes.py`、`static.py`、`telemetry.py`<br>`web/**`<br>`scripts/doctor.py`、`run_server.py`、`smoke.py`、`telemetry_report.py`<br>`deploy/**`、`docs/05-*`、`PLAN.md`<br>`tests/test_server_core.py`、`test_telemetry.py` |
-| **王思勋（队长）** | 文档：`docs/01-项目描述-可直接复制.md`、`docs/06-权限模型.md`、`docs/08-试用组织数据口径.md`、README 进度表<br>**叶子实现**：`scripts/build_trial_org.py`、`tests/test_contract.py`<br>生成物（不入 git）：`data/trial.db`、`data/scrub.salt`<br>⚠️ **队长只接叶子任务**，见下方三条判据 |
+| **王思勋（队长）** | 文档：`docs/01-项目描述-可直接复制.md`、`docs/06-权限模型.md`、`docs/08-试用组织数据口径.md`、`docs/09-夏冬作息方案.md`、README 进度表<br>**叶子实现**：`scripts/build_trial_org.py`、`tests/test_contract.py`<br>生成物（不入 git）：`data/trial.db`、`data/scrub.salt`<br>⚠️ **队长只接叶子任务**，见下方三条判据 |
 
 **给队长分配任务的三条判据**（2026-09-25 定）：
 
