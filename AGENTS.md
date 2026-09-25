@@ -1,7 +1,7 @@
 # 项目指令（AGENTS.md）
 
 > 本文件是**给 AI 与队员共同遵守的硬约束**。任何会话打开本仓库都会读到它。
-> 配套《构建计划 v4.6》：**队长本机** `C:/Users/41271/.workbuddy/plans/electric-pulse-darwin-4_-j6-kG.md`
+> 配套《构建计划 v4.7（🛑 暂停开工中）》：**队长本机** `C:/Users/41271/.workbuddy/plans/electric-pulse-darwin-4_-j6-kG.md`
 > （队员无此路径也无妨——**执行口径以任务卡为准**，计划只作背景，冲突时以本文件为准）。
 > 冲突时**以本文件为准**（计划会变，硬约束不变）。
 
