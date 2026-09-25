@@ -37,6 +37,7 @@
 |---|---|---|---|
 | `occupancy.py` 的周期展开逻辑 | 支持 `schedule_exceptions`（临时取消/改点 + 调休 `as_of`） | Ryan | 31 项老测试全绿 + 新增用例；改动仅限**读取例外的展开分支**，不得改位号公式 |
 | `schema.sql` 末尾追加 | `schedule_exceptions` 表、`data_revision` 表 | Ryan | 纯追加，不动已有表 |
+| **`m2.py` 新增函数**（多方案 top-N） | `GET /api/resolve` 返回 top-3 | Ryan | 🔴 **只许新增函数，现有任何一行都不得改**；`resolve()` / `resolve_and_apply()` 的行为必须**逐字节不变**（31 项老测试 + `smoke.py` 全绿） |
 
 > 🔴 例外表必须被 `expand_periodic()` **和** `hard_violations()` **同时读取**。
 > 只改一处 = "占用显示空着、排课时按有课处理"，把本项目要解决的核心缺陷重新引入。
