@@ -55,9 +55,9 @@
 
 | 范围 | 用途 | 执行人 | 条件 |
 |---|---|---|---|
-| `occupancy.py` 的周期展开逻辑 | 支持 `schedule_exceptions`（临时取消/改点 + 调休 `as_of`） | Ryan | 31 项老测试全绿 + 新增用例；改动仅限**读取例外的展开分支**，不得改位号公式 |
-| `schema.sql` 末尾追加 | `schedule_exceptions` 表、`data_revision` 表 | Ryan | 纯追加，不动已有表 |
-| **`m2.py` 新增函数**（多方案 top-N） | `GET /api/resolve` 返回 top-3 | Ryan | 🔴 **只许新增函数，现有任何一行都不得改**；`resolve()` / `resolve_and_apply()` 的行为必须**逐字节不变**（31 项老测试 + `smoke.py` 全绿） |
+| `occupancy.py` 的周期展开逻辑 | 支持 `schedule_exceptions`（临时取消/改点 + 调休 `as_of`） | 张晋嘉（后端） | 31 项老测试全绿 + 新增用例；改动仅限**读取例外的展开分支**，不得改位号公式 |
+| `schema.sql` 末尾追加 | `schedule_exceptions` 表、`data_revision` 表 | 张晋嘉（后端） | 纯追加，不动已有表 |
+| **`m2.py` 新增函数**（多方案 top-N） | `GET /api/resolve` 返回 top-3 | 张晋嘉（后端） | 🔴 **只许新增函数，现有任何一行都不得改**；`resolve()` / `resolve_and_apply()` 的行为必须**逐字节不变**（31 项老测试 + `smoke.py` 全绿） |
 
 > 🔴 例外表必须被 `expand_periodic()` **和** `hard_violations()` **同时读取**。
 > 只改一处 = "占用显示空着、排课时按有课处理"，把本项目要解决的核心缺陷重新引入。
@@ -67,16 +67,28 @@
 
 ## 4. 文件所有权（三人并行 · 唯一写者原则）
 
+> 🔴 **2026-09-30 队长决定：后端 / 前端对调。**
+> **张晋嘉（独此一嘉）＝ 后端**｜**汤涵洋溢（Ryan_L_F）＝ 前端**（理由：汤更擅长前端）。
+> 本节已按新分工重写，**旧版分工（Ryan=后端、独此一嘉=前端）作废**。
+> 与报名材料附件3 六（一）分工表表述一致（张晋嘉=后端、汤涵洋溢=前端）。
+
 | 负责人 | 独占文件 / 目录 |
 |---|---|
-| **Ryan_L_F** | `src/scheduler/authz.py` + `schema.sql` 末尾追加<br>`src/server/auth.py`、`api_login.py`、`api_groups.py`<br>`src/server/api_objects.py`、`api_schedules.py`、`api_conflicts.py`、`api_resolve.py`<br>`src/server/api_demands.py`、`api_nl.py`、`nl/**`<br>`tests/test_authz.py`、`test_server_auth.py`、`test_server_groups.py`、`test_server_api.py`、`test_server_resolve.py`、`test_nl.py` |
-| **独此一嘉** | `src/server/config.py`、`http_api.py`、`routes.py`、`static.py`、`telemetry.py`<br>`web/**`<br>`scripts/doctor.py`、`run_server.py`、`smoke.py`、`telemetry_report.py`<br>`deploy/**`、`docs/05-*`、`PLAN.md`<br>`tests/test_server_core.py`、`test_telemetry.py` |
+| **张晋嘉（独此一嘉）· 后端** | `src/scheduler/authz.py` + `schema.sql` 末尾追加<br>`src/server/config.py`、`http_api.py`、`routes.py`、`static.py`、`telemetry.py`<br>`src/server/auth.py`、`api_login.py`、`api_groups.py`、`api_objects.py`、`api_schedules.py`、`api_conflicts.py`、`api_resolve.py`、`api_demands.py`、`api_nl.py`<br>`nl/**`<br>`scripts/doctor.py`、`run_server.py`、`telemetry_report.py`<br>`deploy/**`、`docs/05-*`、`docs/07-API契约.md`、`PLAN.md`<br>`tests/test_authz.py`、`test_server_auth.py`、`test_server_groups.py`、`test_server_api.py`、`test_server_resolve.py`、`test_nl.py`、`test_server_core.py`、`test_telemetry.py` |
+| **汤涵洋溢（Ryan_L_F）· 前端** | `web/**`（周视图、冲突列表、一键消解、审批流界面）<br>`scripts/smoke.py`（**端到端自检**：启动 → 登录 → 切组 → 看到冲突 → 一键消解 → 冲突下降）<br>`docs/17-现场演示脚本.md`（新建：5 分钟演示的操作路径与解说词） |
 | **王思勋（队长）** | 文档：`docs/01-项目描述-可直接复制.md`、`docs/06-权限模型.md`、`docs/08-试用组织数据口径.md`、`docs/09-夏冬作息方案.md`、README 进度表<br>**叶子实现**：`scripts/build_trial_org.py`、`tests/test_contract.py`<br>生成物（不入 git）：`data/trial.db`、`data/scrub.salt`<br>⚠️ **队长只接叶子任务**，见下方三条判据 |
+
+**前后端边界（🔴 唯一写者原则下的三条硬线）**：
+
+1. **`static.py` 归后端**（它在 `src/server/` 下、随服务进程跑），前端**只写 `web/**`**。
+   前端改了页面 → 由后端重启服务生效；**前端不得改 `static.py`**。
+2. **`routes.py` 仍是后端独占**，且**禁止手工改**（约定式自动注册，见下方两条跨人约定）。
+3. **`smoke.py` 归前端**，刻意不让后端自己测自己的接口（抽检独立性，见队长三条判据第 2 条）。
 
 **给队长分配任务的三条判据**（2026-09-25 定）：
 
 1. **叶子任务** —— 不被别人依赖，也不依赖别人的产出不在关键路径上。
-2. **不在自己的抽检范围内** —— 若产出物恰好会被自己抽检，该核验环节换人交叉执行（例：试用组织数据的脱敏核验由 Ryan 跑）。
+2. **不在自己的抽检范围内** —— 若产出物恰好会被自己抽检，该核验环节换人交叉执行（例：试用组织数据的脱敏核验由**汤涵洋溢（前端）**跑，不由队长本人跑）。
 3. **必须有独占文件** —— 文件名错开，绝不与他人同目录。
 
 > ⚠️ 因此 `scripts/doctor.py`、`smoke.py`、`telemetry_report.py` 仍属独此一嘉，**队长不要建同名文件**。
@@ -92,15 +104,18 @@
 
 ## 5. 分支（每人只在自己的分支上推，`main` 只接受 PR）
 
+> 🔴 **2026-09-30 按新分工重排归属**（分支名不变，只换负责人；
+> 仓库当前**只有 `main`，8 个分支均未创建**，改动零成本）：
+
 ```
-feat/server-core     独此一嘉  S1–S4
-feat/authz-domain    Ryan      T2a 领域层（不依赖服务层，可立即开工）
-feat/server-authz    Ryan      T2b 登录鉴权 + /api/groups
-feat/server-api      Ryan      S6–S9 + S18
-feat/web             独此一嘉  S10–S12
-feat/nl              Ryan      S17 + S19 + S20
-feat/ops             独此一嘉  S13 + S14
-feat/deploy          独此一嘉  S15 + S16
+feat/server-core     张晋嘉（后端）  S1–S4  服务端骨架
+feat/authz-domain   张晋嘉（后端）  T2a 领域层授权（不依赖服务层，可立即开工）
+feat/server-authz   张晋嘉（后端）  T2b 登录鉴权 + /api/groups
+feat/server-api     张晋嘉（后端）  S6–S9 + S18
+feat/nl             张晋嘉（后端）  S17 + S19 + S20（🔴 工期紧时第一顺位砍 S20 GLM 适配器）
+feat/ops            张晋嘉（后端）  S13 + S14
+feat/deploy         张晋嘉（后端）  S15 + S16
+feat/web            汤涵洋溢（前端） S10–S12 + 审批流界面 + smoke.py + 演示脚本
 ```
 
 ---
