@@ -19,3 +19,6 @@ htmlcov/
 .vscode/
 .idea/
 .DS_Store
+
+# AI 工作区（自动化 memory 等，不入仓库）
+.workbuddy/
