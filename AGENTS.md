@@ -95,7 +95,11 @@
 |---|---|
 | **张晋嘉（独此一嘉）· 后端** | `src/scheduler/authz.py` + `schema.sql` 末尾追加 + `object_graph.py` 的 `rebuild_closure()`（**仅限此函数**）<br>`src/server/config.py`、`http_api.py`、`routes.py`、`static.py`、`telemetry.py`<br>`src/server/auth.py`、`api_login.py`、`api_groups.py`、`api_objects.py`、`api_schedules.py`、`api_conflicts.py`、`api_resolve.py`、`api_demands.py`、`api_nl.py`、`api_exceptions.py`<br>`nl/**`<br>`scripts/doctor.py`、`run_server.py`、`telemetry_report.py`<br>`docs/07-API契约.md`、`PLAN.md`<br>`tests/test_authz.py`、`test_server_auth.py`、`test_server_groups.py`、`test_server_api.py`、`test_server_resolve.py`、`test_nl.py`、`test_server_core.py`、`test_telemetry.py` |
 | **汤涵洋溢（Ryan_L_F）· 前端** | `web/**`（周视图、冲突列表、一键消解、审批流界面）<br>`scripts/smoke.py`（**端到端自检**：启动 → 登录 → 切组 → 看到冲突 → 一键消解 → 冲突下降）<br>`deploy/**`（**2026-10-02 队长决定：B6 部署就绪包由后端移交给前端**）<br>`docs/17-现场演示脚本.md`（新建：5 分钟演示的操作路径与解说词） |
-| **王思勋（队长）** | 文档：`docs/01-项目描述-可直接复制.md`、`docs/06-权限模型.md`、`docs/08-试用组织数据口径.md`、`docs/09-夏冬作息方案.md`、README 进度表<br>**叶子实现**：`scripts/build_trial_org.py`、`tests/test_contract.py`<br>生成物（不入 git）：`data/trial.db`、`data/scrub.salt`<br>**审查类**：契约符合性测试（L2）、三次人工抽检（L3）、安全基线终检 CP-H<br>**拓展设计类**：新特性先出设计稿与取舍，再决定要不要做、归谁做<br>⚠️ **队长只接叶子任务**，见下方三条判据 |
+| **王思勋（队长）** | 文档：`docs/01-项目描述-可直接复制.md`、`docs/06-权限模型.md`、`docs/08-试用组织数据口径.md`、`docs/09-夏冬作息方案.md`、README 进度表<br>**叶子实现**：`scripts/build_trial_org.py`、`tests/test_contract.py`<br>**演示工具**：`scripts/reset_demo.py`（演示库重置 + 沙盒模式，2026-10-02 从 B7 拆出）<br>**材料文案**：`报名材料/展板文案.md`、`_make_figs.py`（生成物 `报名材料/figs/fig4-*.png`）<br>生成物（不入 git）：`data/trial.db`、`data/scrub.salt`<br>**审查类**：契约符合性测试（L2）、三次人工抽检（L3）、安全基线终检 CP-H<br>**拓展设计类**：新特性先出设计稿与取舍，再决定要不要做、归谁做<br>⚠️ **队长只接叶子任务**，见下方三条判据 |
+
+> 🔵 **2026-10-02 队长补充：给队长派活只派「Agent 能自己跑完」的**
+> 队长用 Agent 执行，所以派给他的卡必须满足：**产出是文件或脚本，Agent 写完就能验收**。
+> 需要本人出面、动手、跑腿的（签字、拍照、打印、发老师、现场排练）**集中到少数几张卡**，不摊开。
 
 **前后端边界（🔴 唯一写者原则下的三条硬线）**：
 
