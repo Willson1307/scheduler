@@ -48,9 +48,27 @@
 ## 3. 领域层红线（🔴 最高优先级）
 
 - `src/scheduler/` 下的**现有文件只读**，一行都不得改。
-- **唯一例外**：新增 `src/scheduler/authz.py` + 在 `schema.sql` **末尾追加** `group_roles` 建表语句
-  （任务卡 T2a，走 E2 流程，**需队长批准**，且完成后 **31 项原有测试必须全绿**）。
 - `tests/test_b0.py`、`tests/test_b4.py` 只读——这是回归底线。
+
+**✅ 领域层例外 · 队长 2026-10-02 全部批准（张晋嘉可直接实施，无需再问）**：
+
+| # | 破例范围 | 用途 | 性质 | 硬条件 |
+|---|---|---|---|---|
+| ① | **新增** `src/scheduler/authz.py` | 权限层（B2） | 纯新增，不碰现有文件 | 完成后 31 项老测试全绿 |
+| ② | `schema.sql` **末尾追加** `group_roles` 建表语句 | 权限表（B2） | 纯追加，不动已有表 | 列名必须 `level`（`GRANT` 是 SQL 保留字） |
+| ③ | **修改** `object_graph.py` 的 `rebuild_closure()` | 修 P0-1（B0） | 🔴 唯一一处允许改现有文件 | 见下方 P0-1 说明 |
+
+**③ 的具体要求**（别自作主张扩大范围）：
+
+- 现状：`rebuild_closure()` 先 `DELETE depth>0` 再 `SELECT depth=1`，而 `depth=1 ⊂ depth>0`
+  → 直接边被自己删光 → BFS 无起点 → **整张闭包表被清空**（实测 depth>0 行数 6→0）。
+- 触发条件极普通：`remove_edge`（把成员从社团移除这类操作）。
+- 危害是**静默**的：不报错，只是查不到从属关系 → 组不再占用成员时间 → 冲突检测大面积**漏报**。
+- 允许改的范围：**仅限 `rebuild_closure()` 函数体**。修法二选一：只 `DELETE depth>1`（保留直接边），
+  或先 `SELECT depth=1` 存下再 `DELETE`。**不得顺手改同文件其他任何函数。**
+- 验收：`python -m unittest discover -s tests` 31 项全绿 + 新增一条回归用例
+  （建 3 层链 → `remove_edge` 移除一条无关的叶边 → 闭包表非空且层级正确）。
+- 任何一项绿不了 → **立即 revert**，不排查不停留。
 
 **✅ 已批准的 E2 例外（队长 2026-09-25 批准，可直接实施）**：
 
@@ -75,9 +93,9 @@
 
 | 负责人 | 独占文件 / 目录 |
 |---|---|
-| **张晋嘉（独此一嘉）· 后端** | `src/scheduler/authz.py` + `schema.sql` 末尾追加<br>`src/server/config.py`、`http_api.py`、`routes.py`、`static.py`、`telemetry.py`<br>`src/server/auth.py`、`api_login.py`、`api_groups.py`、`api_objects.py`、`api_schedules.py`、`api_conflicts.py`、`api_resolve.py`、`api_demands.py`、`api_nl.py`<br>`nl/**`<br>`scripts/doctor.py`、`run_server.py`、`telemetry_report.py`<br>`deploy/**`、`docs/05-*`、`docs/07-API契约.md`、`PLAN.md`<br>`tests/test_authz.py`、`test_server_auth.py`、`test_server_groups.py`、`test_server_api.py`、`test_server_resolve.py`、`test_nl.py`、`test_server_core.py`、`test_telemetry.py` |
-| **汤涵洋溢（Ryan_L_F）· 前端** | `web/**`（周视图、冲突列表、一键消解、审批流界面）<br>`scripts/smoke.py`（**端到端自检**：启动 → 登录 → 切组 → 看到冲突 → 一键消解 → 冲突下降）<br>`docs/17-现场演示脚本.md`（新建：5 分钟演示的操作路径与解说词） |
-| **王思勋（队长）** | 文档：`docs/01-项目描述-可直接复制.md`、`docs/06-权限模型.md`、`docs/08-试用组织数据口径.md`、`docs/09-夏冬作息方案.md`、README 进度表<br>**叶子实现**：`scripts/build_trial_org.py`、`tests/test_contract.py`<br>生成物（不入 git）：`data/trial.db`、`data/scrub.salt`<br>⚠️ **队长只接叶子任务**，见下方三条判据 |
+| **张晋嘉（独此一嘉）· 后端** | `src/scheduler/authz.py` + `schema.sql` 末尾追加 + `object_graph.py` 的 `rebuild_closure()`（**仅限此函数**）<br>`src/server/config.py`、`http_api.py`、`routes.py`、`static.py`、`telemetry.py`<br>`src/server/auth.py`、`api_login.py`、`api_groups.py`、`api_objects.py`、`api_schedules.py`、`api_conflicts.py`、`api_resolve.py`、`api_demands.py`、`api_nl.py`、`api_exceptions.py`<br>`nl/**`<br>`scripts/doctor.py`、`run_server.py`、`telemetry_report.py`<br>`docs/07-API契约.md`、`PLAN.md`<br>`tests/test_authz.py`、`test_server_auth.py`、`test_server_groups.py`、`test_server_api.py`、`test_server_resolve.py`、`test_nl.py`、`test_server_core.py`、`test_telemetry.py` |
+| **汤涵洋溢（Ryan_L_F）· 前端** | `web/**`（周视图、冲突列表、一键消解、审批流界面）<br>`scripts/smoke.py`（**端到端自检**：启动 → 登录 → 切组 → 看到冲突 → 一键消解 → 冲突下降）<br>`deploy/**`（**2026-10-02 队长决定：B6 部署就绪包由后端移交给前端**）<br>`docs/17-现场演示脚本.md`（新建：5 分钟演示的操作路径与解说词） |
+| **王思勋（队长）** | 文档：`docs/01-项目描述-可直接复制.md`、`docs/06-权限模型.md`、`docs/08-试用组织数据口径.md`、`docs/09-夏冬作息方案.md`、README 进度表<br>**叶子实现**：`scripts/build_trial_org.py`、`tests/test_contract.py`<br>生成物（不入 git）：`data/trial.db`、`data/scrub.salt`<br>**审查类**：契约符合性测试（L2）、三次人工抽检（L3）、安全基线终检 CP-H<br>**拓展设计类**：新特性先出设计稿与取舍，再决定要不要做、归谁做<br>⚠️ **队长只接叶子任务**，见下方三条判据 |
 
 **前后端边界（🔴 唯一写者原则下的三条硬线）**：
 
@@ -92,7 +110,15 @@
 2. **不在自己的抽检范围内** —— 若产出物恰好会被自己抽检，该核验环节换人交叉执行（例：试用组织数据的脱敏核验由**汤涵洋溢（前端）**跑，不由队长本人跑）。
 3. **必须有独占文件** —— 文件名错开，绝不与他人同目录。
 
+**🔵 2026-10-02 队长补充：两类任务默认归队长，不要派给队员**
+
+- **审查类**（判断"做得对不对"）：契约符合性测试、人工抽检、安全基线终检、PR 审核。
+  理由：谁做谁就不能审自己，队长是唯一不写代码的人。
+- **拓展设计类**（决定"还要不要做"）：新特性、新接口、新表的**设计稿与取舍**，先由队长出，
+  确认后再决定归谁实现。**队员不要自己拍板新增范围** —— 想加东西先提，队长定。
+
 > ⚠️ 因此 `scripts/doctor.py`、`smoke.py`、`telemetry_report.py` 仍属独此一嘉，**队长不要建同名文件**。
+> （`deploy/**` 已于 2026-10-02 移交给前端，见上表。）
 
 **两条跨人约定（必须遵守）**：
 
@@ -109,14 +135,15 @@
 > 仓库当前**只有 `main`，8 个分支均未创建**，改动零成本）：
 
 ```
-feat/fix-p0         张晋嘉（后端）  修 P0 三缺陷（🔴 需队长批准领域层例外才能开工）
+feat/fix-p0         张晋嘉（后端）  修 P0 三缺陷（✅ 领域层例外 2026-10-02 已批准，可开工）
 feat/server-core    张晋嘉（后端）  S1–S4  服务端骨架（含周末 enabled=1、演示日期可注入）
-feat/authz-domain   张晋嘉（后端）  B2 领域层 authz.py + group_roles（🔴 merge 前队长批准）
+feat/authz-domain   张晋嘉（后端）  B2 领域层 authz.py + group_roles（✅ 已批准）
 feat/server-authz   张晋嘉（后端）  B2 登录鉴权 + /api/groups
 feat/server-api     张晋嘉（后端）  S6–S9 + S18
 feat/nl             张晋嘉（后端）  S17 + S18 + S19 + S20（🔴 工期紧时第一顺位砍 S20 GLM 适配器）
 feat/ops            张晋嘉（后端）  S14 埋点后端（telemetry.py + /api/ping）
-feat/deploy         张晋嘉（后端）  S15 + S16（待定是否移交前端）
+feat/api-exceptions 张晋嘉（后端）  B9 临时微调 /api/exceptions（CP-D 之后开工）
+feat/deploy         汤涵洋溢（前端） ✅ 2026-10-02 移交：S15 + S16
 feat/web            汤涵洋溢（前端） S10–S12 + 组切换器 + smoke.py（S13）+ 演示脚本
 ```
 
