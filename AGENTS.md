@@ -8,6 +8,48 @@
 
 ---
 
+## 0. 新人开工三步（🔴 第一次参与必读）
+
+1. **clone 到本地**（只需做一次）
+   ```bash
+   git clone https://github.com/Willson1307/scheduler.git
+   cd scheduler
+   ```
+   - 仓库是 **Private**，clone 时会弹 GitHub 授权，用浏览器登录点通过
+   - ⚠️ **别让 AI 代跑 clone** —— 授权弹窗会卡死（AI 不会自己点登录）
+
+2. **建自己的分支**
+   ```bash
+   git checkout -b feat/server-core   # 后端张晋嘉（B0 用 feat/fix-p0）
+   git checkout -b feat/web           # 前端汤涵洋溢
+   ```
+
+3. **WorkBuddy 里选工作空间** = 刚才 clone 的 `scheduler` 目录
+   - 🔴 不选的话代码会写在临时目录，**git 管不到、提交不了**
+   - 验证：让 AI 写完跑 `git status`，能看到变动就是对的
+
+**分支对照表**
+
+| 分支 | 负责人 | 内容 |
+|---|---|---|
+| `feat/fix-p0` | 张晋嘉 | B0 修三个静默缺陷 |
+| `feat/server-core` | 张晋嘉 | B1 服务端骨架 |
+| `feat/authz-domain` / `feat/server-authz` | 张晋嘉 | B2 权限层 |
+| `feat/server-api` | 张晋嘉 | B3 业务 API、B4 消解 API（**两者并行**） |
+| `feat/nl` / `feat/ops` | 张晋嘉 | B5 自然语言入口、埋点后端 |
+| `feat/api-exceptions` | 张晋嘉 | B9 临时微调 |
+| `feat/web` | 汤涵洋溢 | F1–F5 前端全线与自检 |
+| `feat/deploy` | 汤涵洋溢 | F6 部署就绪包 |
+
+**排障**
+
+| 现象 | 解决 |
+|---|---|
+| `CONNECT tunnel failed, 502` | `git config --local http.proxy ""` + `git config --local https.proxy ""` |
+| `Recv failure: Connection was reset` | github.com 时通时不通。**照常 commit**，隔几分钟重试，最多 2 次 |
+
+---
+
 ## 1. 项目一句话
 
 把课表（周期事务）与活动（一次性事务）归一化到同一套时间占用模型，
