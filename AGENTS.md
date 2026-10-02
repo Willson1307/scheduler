@@ -109,15 +109,18 @@
 > 仓库当前**只有 `main`，8 个分支均未创建**，改动零成本）：
 
 ```
-feat/server-core     张晋嘉（后端）  S1–S4  服务端骨架
-feat/authz-domain   张晋嘉（后端）  T2a 领域层授权（不依赖服务层，可立即开工）
-feat/server-authz   张晋嘉（后端）  T2b 登录鉴权 + /api/groups
+feat/fix-p0         张晋嘉（后端）  修 P0 三缺陷（🔴 需队长批准领域层例外才能开工）
+feat/server-core    张晋嘉（后端）  S1–S4  服务端骨架（含周末 enabled=1、演示日期可注入）
+feat/authz-domain   张晋嘉（后端）  B2 领域层 authz.py + group_roles（🔴 merge 前队长批准）
+feat/server-authz   张晋嘉（后端）  B2 登录鉴权 + /api/groups
 feat/server-api     张晋嘉（后端）  S6–S9 + S18
-feat/nl             张晋嘉（后端）  S17 + S19 + S20（🔴 工期紧时第一顺位砍 S20 GLM 适配器）
-feat/ops            张晋嘉（后端）  S13 + S14
-feat/deploy         张晋嘉（后端）  S15 + S16
-feat/web            汤涵洋溢（前端） S10–S12 + 审批流界面 + smoke.py + 演示脚本
+feat/nl             张晋嘉（后端）  S17 + S18 + S19 + S20（🔴 工期紧时第一顺位砍 S20 GLM 适配器）
+feat/ops            张晋嘉（后端）  S14 埋点后端（telemetry.py + /api/ping）
+feat/deploy         张晋嘉（后端）  S15 + S16（待定是否移交前端）
+feat/web            汤涵洋溢（前端） S10–S12 + 组切换器 + smoke.py（S13）+ 演示脚本
 ```
+
+> 🔴 **S13 `smoke.py` 在 `feat/web`，不在 `feat/ops`**——刻意让前端做端到端自检，后端不自测自。
 
 ---
 
