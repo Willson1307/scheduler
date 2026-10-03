@@ -181,7 +181,7 @@ def remove_edge(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None
 
 def rebuild_closure(conn: sqlite3.Connection) -> None:
     """按直接边（depth = 1 的边）全量重算闭包表。"""
-    conn.execute("DELETE FROM object_edges WHERE depth > 0")
+    conn.execute("DELETE FROM object_edges WHERE depth > 1")
     conn.execute(
         "INSERT OR IGNORE INTO object_edges(ancestor_id, descendant_id, depth)"
         " SELECT id, id, 0 FROM objects"
@@ -195,14 +195,14 @@ def rebuild_closure(conn: sqlite3.Connection) -> None:
     # BFS：从每个节点出发按层扩散
     for start in [r["id"] for r in conn.execute("SELECT id FROM objects").fetchall()]:
         seen: dict[str, int] = {}
-        frontier = [(start, 1)]
+        frontier = [(start, 0)]
         while frontier:
             nxt = []
             for node, depth in frontier:
                 for child in adj.get(node, []):
                     if child in seen or child == start:
                         continue
-                    seen[child] = depth
+                    seen[child] = depth + 1
                     nxt.append((child, depth + 1))
             for node, depth in frontier:
                 conn.execute(
