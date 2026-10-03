@@ -46,7 +46,7 @@
 | 现象 | 解决 |
 |---|---|
 | `CONNECT tunnel failed, 502` | `git config --local http.proxy ""` + `git config --local https.proxy ""` |
-| `Recv failure: Connection was reset` | github.com 时通时不通。**照常 commit**，隔几分钟重试，最多 2 次 |
+| `Recv failure: Connection was reset` | github.com 时通时不通。**照常 commit**（本地不会丢），**隔 2–5 分钟再试，通常一次就成**。连续失败 3–4 次是常态，**不是配额用尽**（详见 §5「`git push` 失败的处理」——本行是 v1 旧文案，已由 §5 修正） |
 
 ---
 
