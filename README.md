@@ -105,7 +105,8 @@ src/scheduler/            【领域层 · 红线：现有文件只读】
 src/server/               🚧 在建：HTTP 服务层（标准库 http.server）
 web/                      🚧 在建：前端单页（原生 JS，无构建步骤、零外链）
 tests/                    test_b0.py + test_b4.py = 31 项
-scripts/                  demo.py；🚧 在建 doctor.py / run_server.py / smoke.py
+scripts/                  demo.py（历史演示）；demo_cli.py（★ 现场/降级保底演示，四段输出、23→0）
+                          🚧 在建 doctor.py / run_server.py / smoke.py
 docs/                     架构、边界、API 契约、任务卡、模型选型
 AGENTS.md                 ★ 项目硬约束（红线 / 文件所有权 / 提交规范）
 ```
