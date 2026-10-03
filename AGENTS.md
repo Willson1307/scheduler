@@ -47,6 +47,7 @@
 |---|---|
 | `CONNECT tunnel failed, 502` | `git config --local http.proxy ""` + `git config --local https.proxy ""` |
 | `Recv failure: Connection was reset` | github.com 时通时不通。**照常 commit**（本地不会丢），**隔 2–5 分钟再试，通常一次就成**。连续失败 3–4 次是常态，**不是配额用尽**（详见 §5「`git push` 失败的处理」——本行是 v1 旧文案，已由 §5 修正） |
+| `错误码 6004` / `429`（模型限频） | **不是积分耗尽，是该模型档位的限频窗口**。⛔ 勿切本地 `qwen2.5:3b`（会漏红线）；✅ 非安全卡切 DeepSeek-V4-Pro 顶，安全卡等窗口。完整处置见 `docs/23 §5.5` |
 
 ---
 
