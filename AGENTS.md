@@ -201,7 +201,13 @@ feat/ops            张晋嘉（后端）  S14 埋点后端（telemetry.py + /ap
 feat/api-exceptions 张晋嘉（后端）  B9 临时微调 /api/exceptions（CP-D 之后开工）
 feat/deploy         汤涵洋溢（前端） ✅ 2026-10-02 移交：S15 + S16
 feat/web            汤涵洋溢（前端） S10–S12 + 组切换器 + smoke.py（S13）+ 演示脚本
+feat/captain        王思勋（队长）   🆕 2026-10-03 新增：L2 / L5 / L8 / L11 / L12–L14
 ```
+
+> 🆕 **队长分支 `feat/captain`（2026-10-03 补）**——此前分支表里漏了队长，但他的卡要产出文件。
+> 用法：每张队长卡开新对话时先 `git checkout feat/captain && git pull`，做完 commit + push。
+> ⚠️ 队长卡片里写 `报名材料/...` 的（L9 展板文案、L15 答辩 Q&A、L16 章程自查表）
+> 在**项目根**而不在 `scheduler/` 仓库内，**不进 git、不用切分支**。
 
 > 🔴 **S13 `smoke.py` 在 `feat/web`，不在 `feat/ops`**——刻意让前端做端到端自检，后端不自测自。
 
