@@ -75,9 +75,15 @@
 | 响应 200 | `[{"id","kind","name","parent_ids":[...]}]` |
 | 说明 | 只返回**当前组闭包内**的对象 |
 
-✅ **已定（队长 2026-10-01）：按原本定义**。`kind ∈ {organization, group, user, resource}`
-（与 `schema.sql` 中 `objects.kind` 既有定义一致，不新增、不自创）。
-⚠️ 将来若新增取值 → 属**非破坏性变更**，前端按 §12 用默认样式降级渲染。
+✅ **已定（队长 2026-10-03 修正）**：`kind ∈ {group, user, resource}` —— **只有三个值**。
+（依据：`schema.sql` 中 `objects.kind` 的 CHECK 约束与注释均为三值，`organization` 是**独立表** `organizations`，不进 `objects`。）
+
+> 🔴 **勘误说明（2026-10-03）**：本节原写「四值（含 organization）」并标注「按原本定义」，**该结论有误** ——
+> 它把"`schema.sql` 一致"当成了依据，但实际 `schema.sql:36` 注释与 `schema.sql:45` CHECK 都只允许三值。
+> 若后端按四值实现并写入 `kind="organization"`，会被 CHECK 约束直接拒绝（`IntegrityError`）。
+> **正确做法：组织本身不进 `objects`，其对应的"根组"以 `kind="group"` 出现在 `/api/groups` 结果中。**
+
+⚠️ 将来若新增取值 → 属**非破坏性变更**（须同步改 `schema.sql` CHECK），前端按 §12 用默认样式降级渲染。
 
 ---
 
