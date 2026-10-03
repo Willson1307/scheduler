@@ -422,3 +422,238 @@ def apply_plan(conn: sqlite3.Connection, plan: Plan, cfg: SlotConfig, all_days: 
                 (format(m, "x"), mv.schedule_id),
             )
     conn.commit()
+
+
+# ===========================================================================
+# B4（S9）：/api/resolve 的领域层支撑 —— 🔴 只新增，未改上面任何一行
+# ===========================================================================
+
+
+def day_slots_mask(slots: list[tuple[int, int]]) -> int:
+    """把某一天的 (dow, period) 列表压成「单日掩码」。
+
+    约定（docs/07 §5 / §6.1）：period N 对应位 N（1-based），
+    即 0x2 = 第1节、0x8 = 第3节、0x6 = 第1+2节。
+    与 slots.bit 的「0-based 周掩码」不同：API 响应里 date 已单独给出，
+    掩码只需表达「这一天哪几节」，故用更紧凑的单日位表示。
+    """
+    mask = 0
+    for _dow, period in slots:
+        mask |= 1 << period
+    return mask
+
+
+def movable_schedule_ids(conn: sqlite3.Connection, group_id: str) -> set[str]:
+    """以 group_id 为视角的「可动日程」集合。
+
+    一条日程可动 ⟺ 它的任一参与者或资源落在 group_id 的闭包内（含自身）。
+    闭包表 object_edges 含 depth=0 自反边，故 group_id 自身也算在内。
+    返回集合；供 API 层做「可动集合过滤」（动了不可动日程的方案一律排除）。
+    """
+    ids: set[str] = set()
+    for row in conn.execute(
+        "SELECT DISTINCT p.schedule_id AS sid"
+        " FROM schedule_participants p"
+        " JOIN object_edges e ON e.descendant_id = p.object_id"
+        " WHERE e.ancestor_id = ?",
+        (group_id,),
+    ).fetchall():
+        ids.add(row["sid"])
+    for row in conn.execute(
+        "SELECT DISTINCT r.schedule_id AS sid"
+        " FROM schedule_resources r"
+        " JOIN object_edges e ON e.descendant_id = r.resource_id"
+        " WHERE e.ancestor_id = ?",
+        (group_id,),
+    ).fetchall():
+        ids.add(row["sid"])
+    return ids
+
+
+def filter_movable(
+    results: list[ResolveResult],
+    movable_ids: set[str] | None = None,
+) -> tuple[list[Plan], int]:
+    """把 resolve 的结果扁平化为方案列表，并按可动集合过滤。
+
+    返回 (保留的方案列表, 被过滤掉的方案数)。
+    movable_ids=None 表示不过滤（全体可动）。
+    只保留「所有 move 都落在可动日程上」的方案。
+    """
+    plans: list[Plan] = []
+    filtered_out = 0
+    for r in results:
+        for p in r.plans:
+            if movable_ids is not None and not all(
+                mv.schedule_id in movable_ids for mv in p.moves
+            ):
+                filtered_out += 1
+            else:
+                plans.append(p)
+    return plans, filtered_out
+
+
+def _plan_key(plan: Plan) -> str:
+    """方案去重键（docs/07 §6.1 硬要求③）：所有 move 的 (schedule_id, from, to)。"""
+    parts = []
+    for mv in plan.moves:
+        frm = "|".join(f"{w},{i}" for w, i in sorted(mv.old_slots))
+        to = "|".join(f"{w},{i}" for w, i in sorted(mv.new_slots))
+        parts.append(
+            f"{mv.schedule_id}:{mv.old_date.isoformat()}:{frm}"
+            f"->{mv.new_date.isoformat()}:{to}"
+        )
+    return ";".join(parts)
+
+
+def top_plans(plans: list[Plan], n: int = 3) -> list[Plan]:
+    """去重 + 按代价升序，取前 n（跨冲突聚合后的 top-N 预览）。"""
+    seen: set[str] = set()
+    out: list[Plan] = []
+    for p in sorted(plans, key=lambda p: p.cost):
+        k = _plan_key(p)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(p)
+        if len(out) >= n:
+            break
+    return out
+
+
+def plan_impact(conn: sqlite3.Connection, plan: Plan) -> dict:
+    """影响面（docs/07 §6.1 硬要求②）：改了几条日程、涉及几个对象。
+
+    对象 = 直接参与者 + 资源（不展开组成员，否则会把「改一个班」算成几十人）。
+    """
+    sched_ids = {mv.schedule_id for mv in plan.moves}
+    obj_ids: set[str] = set()
+    for sid in sched_ids:
+        for row in conn.execute(
+            "SELECT object_id FROM schedule_participants WHERE schedule_id = ?", (sid,)
+        ).fetchall():
+            obj_ids.add(row["object_id"])
+        for row in conn.execute(
+            "SELECT resource_id FROM schedule_resources WHERE schedule_id = ?", (sid,)
+        ).fetchall():
+            obj_ids.add(row["resource_id"])
+    return {"schedule_count": len(sched_ids), "object_count": len(obj_ids)}
+
+
+def plan_diff_text(conn: sqlite3.Connection, plan: Plan) -> str:
+    """人话描述（docs/07 §6.1 硬要求①）：改了什么、影响谁。"""
+    impact = plan_impact(conn, plan)
+    if len(plan.moves) == 1:
+        mv = plan.moves[0]
+        verb = "调课" if mv.periodic else "改期"
+        return f"{verb}「{mv.title}」（影响 {impact['object_count']} 个对象）"
+    return f"调整 {impact['schedule_count']} 条日程（影响 {impact['object_count']} 个对象）"
+
+
+def _group_size(conn: sqlite3.Connection, group_id: str) -> int:
+    """组内学生人数（kind='user' 的后代数量）。"""
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM object_edges e"
+        " JOIN objects o ON o.id = e.descendant_id"
+        " WHERE e.ancestor_id = ? AND e.depth > 0 AND o.kind = 'user'",
+        (group_id,),
+    ).fetchone()
+    return row["c"] if row else 0
+
+
+def plan_warnings(
+    conn: sqlite3.Connection, plan: Plan, cfg: SlotConfig | None = None
+) -> list[dict]:
+    """软约束警告（docs/07 §6.2）：容量不足等，不阻止方案，仅提示。
+
+    capacity IS NULL 时不检查也不告警（AGENTS §9c）。
+    """
+    warnings: list[dict] = []
+    for mv in plan.moves:
+        resources = [
+            row["resource_id"]
+            for row in conn.execute(
+                "SELECT resource_id FROM schedule_resources WHERE schedule_id = ?",
+                (mv.schedule_id,),
+            ).fetchall()
+        ]
+        targets = [
+            row["object_id"]
+            for row in conn.execute(
+                "SELECT object_id FROM schedule_participants"
+                " WHERE schedule_id = ? AND role = 'target'",
+                (mv.schedule_id,),
+            ).fetchall()
+        ]
+        for rid in resources:
+            rrow = conn.execute(
+                "SELECT name, capacity FROM objects WHERE id = ?", (rid,)
+            ).fetchone()
+            if rrow is None or rrow["capacity"] is None:
+                continue
+            for tid in targets:
+                trow = conn.execute(
+                    "SELECT kind FROM objects WHERE id = ?", (tid,)
+                ).fetchone()
+                if trow is None or trow["kind"] != "group":
+                    continue
+                size = _group_size(conn, tid)
+                if size > rrow["capacity"]:
+                    warnings.append(
+                        {
+                            "type": "capacity",
+                            "message": (
+                                f"{rrow['name']} 容量 {rrow['capacity']}，"
+                                f"容纳不下 {size} 人"
+                            ),
+                        }
+                    )
+    return warnings
+
+
+def resolve_and_apply_filtered(
+    conn: sqlite3.Connection,
+    org_id: str,
+    date_from: date,
+    date_to: date,
+    movable_ids: set[str] | None = None,
+    *,
+    cfg: SlotConfig | None = None,
+    window_days: int = 5,
+    max_rounds: int = 24,
+    max_plans: int = 8,
+) -> tuple[int, int, int]:
+    """一键消解（带可动集合过滤）。与 resolve_and_apply 同构：
+
+    每轮「找冲突 → 过滤掉动了不可动日程的方案 → 应用最优 → 重扫」，
+    直到无可行方案或冲突数不再下降。
+
+    返回 (applied 数量, 剩余冲突数, 被过滤掉的方案数)。
+    movable_ids=None 时行为与 resolve_and_apply 一致（全体可动）。
+    max_plans 默认 8（大于 resolve_and_apply 内部的 1）：过滤会剔除「移动
+    锁定日程」的方案，需要足够多的候选才能保证「移动可动日程」的方案仍在其中。
+    """
+    cfg = cfg or load_slot_config(conn, org_id)
+    all_days = _days(date_from, date_to)
+    applied = 0
+    filtered_out = 0
+    prev = len(find_conflicts(build_occupancy(conn, org_id, date_from, date_to, cfg=cfg)))
+
+    for _ in range(max_rounds):
+        results = resolve(
+            conn, org_id, date_from, date_to,
+            cfg=cfg, window_days=window_days, max_plans=max_plans,
+        )
+        plans, fo = filter_movable(results, movable_ids)
+        filtered_out += fo
+        if not plans:
+            break
+        best = min(plans, key=lambda p: p.cost)
+        apply_plan(conn, best, cfg, all_days)
+        applied += 1
+        now = len(find_conflicts(build_occupancy(conn, org_id, date_from, date_to, cfg=cfg)))
+        if now >= prev:  # 没有变好就停，避免来回震荡
+            break
+        prev = now
+    remaining = len(find_conflicts(build_occupancy(conn, org_id, date_from, date_to, cfg=cfg)))
+    return applied, remaining, filtered_out
