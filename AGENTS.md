@@ -174,6 +174,7 @@
 > 反过来，后端也不得自己判定"安全已经合格"。
 
 > ⚠️ 因此 `scripts/doctor.py`、`smoke.py`、`telemetry_report.py` 仍属独此一嘉，**队长不要建同名文件**。
+> （但队长**另有**自己的 `scripts/` 文件：`reset_demo.py` L8、`demo_cli.py` L11、`build_trial_org.py` L5 —— 互不冲突。）
 > （`deploy/**` 已于 2026-10-02 移交给前端，见上表。）
 
 **两条跨人约定（必须遵守）**：
