@@ -188,3 +188,28 @@ SELECT s.id, s.org_id, s.kind, s.title, s.created_by, s.created_at,
        o.start_at, o.end_at, o.group_id
 FROM schedules s
 JOIN schedule_once o ON o.schedule_id = s.id;
+
+-- ---------------------------------------------------------------------------
+-- 组级授权表（B2 · 权限层）
+--   设计意图（AI 生成，供答辩讲解）：
+--     1. 「权限按组」而非「全局角色一把梭」——领导身份体现在管的哪个组，
+--        不在全局角色（AGENTS §9）。全局角色（users.role）只当天花板。
+--     2. 列名是 level 而非 grant——GRANT 是 SQL 保留字（docs/06 §1）。
+--     3. level 四档语义（审批流下重定义）：view 看 / propose 提请求 /
+--        approve 批下级请求 / own 改组结构+批永久改。
+--        「任何人都不直接改数据」由 B8 审批流落地，本表只判能不能看/进组。
+--     4. UNIQUE(org_id, group_id, user_id)：一人一组一行，再授不同档 =
+--        覆盖（upsert），不并存。多路径取 max 来自对象图 DAG，不来自本表多行。
+--     5. 不做负权限 deny（docs/06 §1：DAG 多父下语义不自洽）——收回 = 删行。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS group_roles (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    group_id    TEXT NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    level       TEXT NOT NULL CHECK (level IN ('view', 'propose', 'approve', 'own')),
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (org_id, group_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_group_roles_user ON group_roles(user_id);
+CREATE INDEX IF NOT EXISTS idx_group_roles_group ON group_roles(group_id);
