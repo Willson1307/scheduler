@@ -129,11 +129,25 @@ def resolve_org(conn: sqlite3.Connection, group: str | None) -> str:
 
 
 def require_group(query: dict) -> str:
-    """B3 三接口共用的「必须给group」校验。
+    """严格要求「必须给 group」，缺失时 raise 400。
 
-    契约docs/07 §1：三个接口的 group **缺省= 所在最高组**。
-    MVP 阶段单组织演示库，缺省取第一个组即可，但**必须显式校验缺失**，
-    不能静默落到「全体」——那会让用户看到别的班级的课表。
+    🔴🔴 **当前零调用方——保留仅供未来「必须限定组」的接口使用。**
+    三个 B3 接口都**不用**它，理由如下（2026-10-04 三个实现者独立核实一致，
+    不是单来源判断）：
+
+      契约 `tests/test_contract.py:211/233/284` 调用
+      `GET /api/objects`、`/api/schedules`、`/api/conflicts` 时
+      **都不带 group 参数**，且断言 200。
+      若这里 raise 400，会把契约自己的测试全部打成失败。
+
+    也就是说契约给 group 的缺省定义是「**缺省 = 所在最高组**」，
+    不是「缺省 = 全体」。MVP是单组织演示库，三个实现统一选择
+    `parse_group()`（可缺省）→ 缺省走 `resolve_org(None)` 取第一个组织，
+    这与契约测试的期望一致。
+
+    ⚠️ 本函数**不要**在B2 鉴权接入后被当成「安全边界」用——
+    它的语义只是「参数校验」，不校验调用者有没有权看这个组。
+    组织隔离要靠 `resolve_org` + `authz`（见 B2 卡 rhJz9F 的跨组织越权修复）。
     """
     group = parse_group(query)
     if not group:
@@ -177,7 +191,42 @@ def day_mask_hex(mask: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def aggregate_conflicts(conflicts) -> tuple[list[dict], int]:
+def side_payload(conn, schedule_id: str, object_id: str, cdate: date, slots) -> dict:
+    """冲突项的 a / b 两侧 —— 🔴 **字段必须给全，一个不能少**。
+
+    契约 docs/07 §5（队长 2026-10-01 拍板「数据给全」）
+    + `tests/test_contract.py:299-311` 逐字段断言 8 个键，少一个就红：
+
+        schedule_id / object_id / object_name / object_kind
+        title / date / slots / readable
+
+    🔴 **为什么必须给全（少一个就会返工）**：
+      - 缺 object_name / title → 前端显示不出「数学」这两个字
+      - 缺 schedule_id / object_id → 点了「消解」没法告诉后端改哪一条
+      - 缺 readable → 前端要自己解掩码（**禁止**，AGENTS §8 前端不做位运算）
+    这条是契约级硬要求，不是可选项。
+    """
+    row = conn.execute(
+        "SELECT o.id AS object_id, o.name AS object_name, o.kind AS object_kind "
+        "FROM objects o WHERE o.id = ?",
+        (object_id,),
+    ).fetchone()
+    title = conn.execute(
+        "SELECT title FROM schedules WHERE id = ?", (schedule_id,)
+    ).fetchone()
+    return {
+        "schedule_id": schedule_id,
+        "object_id": (row["object_id"] if row else object_id),
+        "object_name": (row["object_name"] if row else None),
+        "object_kind": (row["object_kind"] if row else None),
+        "title": (title["title"] if title else None),
+        "date": cdate.isoformat(),
+        "slots": slots_hex(slots),
+        "readable": readable(slots),
+    }
+
+
+def aggregate_conflicts(conn, conflicts) -> tuple[list[dict], int]:
     """原始冲突列表 → (items, raw_count)。
 
     聚合键 = (schedule_a, schedule_b, date, mask) —— 即「同一个日程对、
@@ -207,9 +256,10 @@ def aggregate_conflicts(conflicts) -> tuple[list[dict], int]:
         schedule_a, schedule_b, cdate, mask = key
         slots = decode_mask(mask)
         items.append({
-            "a": {"schedule_id": schedule_a, "role": rep.role},
-            "b": {"schedule_id": schedule_b},
+            "a": side_payload(conn, schedule_a, rep.object_id, cdate, slots),
+            "b": side_payload(conn, schedule_b, rep.object_id, cdate, slots),
             "object_id": rep.object_id,
+            "role": rep.role,
             "date": cdate.isoformat(),
             "slots": slots_hex(slots),
             "raw_count": len(group),
@@ -231,7 +281,7 @@ def conflict_payload(conn: sqlite3.Connection, org_id: str, cfg) -> dict:
     date_from, date_to = resolve_window(cfg)
     slot_cfg = load_slot_config(conn, org_id)
     report = scan(conn, org_id, date_from, date_to, cfg=slot_cfg)
-    items, raw_count = aggregate_conflicts(report.conflicts)
+    items, raw_count = aggregate_conflicts(conn, report.conflicts)
     return {
         "count": len(items),
         "raw_count": raw_count,
