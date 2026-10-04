@@ -96,10 +96,22 @@ def _request(method: str, path: str, body=None, token=None, timeout=5.0):
 _TOKEN = None
 _DEFAULT_GROUP = None
 _LOGIN_ERR = None
+# 🔴 服务端的「今天」。config.py 的铁律是「凡是需要今天的地方一律读 cfg.today，
+# 禁止直接调 date.today()」——测试同样受这条约束约束：服务可用 --today /
+# SCHEDULER_TODAY 注入演示日期（现场演示要能复现同一结果），若测试用机器日期
+# 断言，服务一注入日期就误报失败。2026-10-04 实测踩过：服务 --today 2026-09-08
+# 时 test_default_week 报 `2026-09-07 != 2026-09-28`，看起来像实现 bug，
+# 实际是测试用错了日期来源。改为向 /api/health 的 server_date 要答案。
+_SERVER_DATE = None
+
+
+def server_today() -> date:
+    """服务端视角的「今天」。拿不到时退回机器日期（并由调用方断言去暴露异常）。"""
+    return _SERVER_DATE if _SERVER_DATE is not None else date.today()
 
 
 def setUpModule():
-    global _TOKEN, _DEFAULT_GROUP, _LOGIN_ERR
+    global _TOKEN, _DEFAULT_GROUP, _LOGIN_ERR, _SERVER_DATE
     # 1) 健康探测：连不上 → 服务未启动，整体跳过（保持 discover 干净）。
     try:
         st, body = _request("GET", "/api/health", timeout=3.0)
@@ -113,6 +125,10 @@ def setUpModule():
         raise unittest.SkipTest(
             f"服务未就绪：GET /api/health 返回 {st} {body!r}，期望 200 {{\"ok\": true}}。"
         )
+    # 1.5) 记下服务端「今天」——供涉及"本周/缺省"口径的测试断言使用。
+    # health 多返了 server_date 正是为了这个（详见 api_health.py 注释与 docs/20 §5.2.2）。
+    if _is_iso_date(body.get("server_date")):
+        _SERVER_DATE = date.fromisoformat(body["server_date"])
     # 2) 登录一次，供需要鉴权的测试复用；失败只记原因，交由 TestLogin 如实标红。
     try:
         st, body = _request("POST", "/api/login", {"login": "admin", "password": "admin123"})
@@ -262,9 +278,11 @@ class TestSchedules(_Authed):
         self.assertEqual(monday.weekday(), 0, "week 缺省应以周一为起点")
         for i, d in enumerate(days):
             self.assertEqual(date.fromisoformat(d), monday + timedelta(days=i), "days 应连续")
-        today = date.today()
+        today = server_today()
         self.assertEqual(
-            monday, today - timedelta(days=today.weekday()), "week 缺省应=本周（含今天的那一周）"
+            monday,
+            today - timedelta(days=today.weekday()),
+            "week 缺省应=本周（含服务端今天的那一周）",
         )
 
     def test_week_param_normalizes_to_monday(self):
@@ -405,6 +423,14 @@ class TestResolve(_Authed):
 # ---------------------------------------------------------------------------
 class TestDemands(_Authed):
     def test_demands_echoes_raw_text(self):
+        # ⚠️ 已知缺口（2026-10-04）：/api/demands 属 B5（意图解析），
+        # 契约 §7 已冻结但src/ 下零实现 → 本项 404 标红。
+        #
+        # 🔴 这里**故意不** skip、不 expectedFailure：模块 docstring 的设计原则是
+        # 「服务已启动但接口未实现 → 如实标红，把后端卡住」。给它加 skip 等于
+        # 把红灯变绿灯，B5 就再也没人会注意到——这正是本项目吃过 6 次的
+        # 「静默失效」套路。红灯本身是提醒，不是缺陷。
+        # B5 落地后本项应自动转绿，无需改测试。
         raw = "下周三下午实验室A我要用，必须安排两节课"
         data = self._json200("POST", "/api/demands", {"raw_text": raw, "hard": True})
         self.assertIsInstance(data, dict)

@@ -292,18 +292,30 @@ class TestConflictAggregation(unittest.TestCase):
 
 
 class TestGroupResolution(unittest.TestCase):
-    """组解析口径。"""
+    """组解析口径。
 
-    def setUp(self):
+    🔴 建库放 setUpClass而不是 setUp：本类 4 项全是**纯读断言**，不写库。
+    2026-10-04 实测逐项建库时每项4.6–5.8s、合计 25s，占全量 281s 的一大块；
+    改一次建库后本类耗时降到 0.1s 以内。判定依据是「是否写库」，不是「测几个方法」。
+    """
+
+    @classmethod
+    def setUpClass(cls):
         import tempfile
-        self.tmp = tempfile.TemporaryDirectory()
-        self.conn, self.org_id, self.root, self.grade, self.cls, self.admin = _build_small_db(
-            os.path.join(self.tmp.name, "small.db")
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.conn, cls.org_id, cls.root, cls.grade, cls.cls, cls.admin = _build_small_db(
+            os.path.join(cls.tmp.name, "small.db")
         )
 
-    def tearDown(self):
-        self.conn.close()
-        self.tmp.cleanup()
+    @classmethod
+    def tearDownClass(cls):
+        cls.conn.close()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        self.conn = self.__class__.conn
+        self.org_id = self.__class__.org_id
+        self.cls = self.__class__.cls
 
     def test_resolve_org_by_group(self):
         self.assertEqual(K.resolve_org(self.conn, self.cls), self.org_id)
