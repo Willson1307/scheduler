@@ -38,9 +38,10 @@
      200 + 结果非空。若改用 `b3_kernels.require_group`（缺失即 400），
      会把契约自己的测试打成 400。
      🔴 但「缺省 = 所在最高组」不能实现成「全体对象」——那会让用户看到
-     别的班级。折中：缺省时取**该组织的根组**（is_root=1），
-     见 `_default_root_group`。⚠️ 该函数注释里写明了 B2 补鉴权后的
-     待改点（按登录用户沿祖先链定位）。
+     别的班级。B2 补鉴权后，缺省走 `K.resolve_authorized_org` →
+     `authz.default_group_id(conn, user_id)` 定位**登录用户自己的默认组**
+     （docs/07 §1「缺省=所在最高组」），不再取「该组织根组」，也绝不取
+     「第一个组织」（多组织下会跨组织泄漏）。
      与 `/api/conflicts` 的宽松口径（`K.parse_group`）保持一致。
   B. 父的排序：契约未规定。本实现按 (父名, 父id) 升序，只为**确定性**。
   C. 额外字段（depth / is_root / parent_names）依据契约 §12「允许加字段，
@@ -56,6 +57,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from . import auth
 from . import b3_kernels as K
 from . import config
 from .http_api import ApiError
@@ -100,25 +102,6 @@ def _load_rows(conn: sqlite3.Connection, group_id: str, org_id: str) -> list:
     return conn.execute(_SQL_OBJECTS_IN_GROUP, (group_id, org_id)).fetchall()
 
 
-def _default_root_group(conn: sqlite3.Connection, org_id: str) -> str:
-    """group 缺省时用的组 = 该组织的根组（is_root=1）。
-
-    ORDER BY name 而不是不加排序：组织理论上可能有多个 is_root=1
-    （脏数据），此时取字典序最小者，保证同一请求两次调用落到的组一致。
-
-    找不到根组 → 404。宁可明确报错，也不要静默返回空数组：
-    空数组会被前端渲染成「没有对象」，把数据问题伪装成业务状态。
-    """
-    row = conn.execute(
-        "SELECT id FROM objects WHERE org_id = ? AND kind = 'group' AND is_root = 1 "
-        "ORDER BY name LIMIT 1",
-        (org_id,),
-    ).fetchone()
-    if row is None:
-        raise ApiError(404, f"组织 {org_id} 没有根组（is_root=1 的 group）")
-    return row["id"]
-
-
 def _build_items(rows: list) -> list[dict]:
     """扁平行 → 契约 §3 的对象数组。
 
@@ -154,38 +137,35 @@ def _build_items(rows: list) -> list[dict]:
     return items
 
 
+@auth.require_auth
 def list_objects(method: str, path: str, query: dict, body: bytes, headers: dict, context=None):
     """GET /api/objects?group=<id> → 200（契约 docs/07 §3）。
 
     成功 200： [{"id","kind","name","parent_ids":[...], ...}]
-    group 不存在 → 404（K.resolve_org）
-    group 指向的不是一个组 → 400（本文件校验，见下）
+    未登录 → 401（@require_auth）
+    越权（group 不在用户 authorized_groups）→ 403（K.resolve_authorized_org）
+    group 不存在 → 404；group 指向的不是一个组 → 400（本文件校验，见下）
 
     🔴 group 缺省**不报错**（契约 §3 表格把 group 标为「可选」，
     且 test_contract.py:211 就是不带 group 的 `GET /api/objects`，
-    断言 200 且结果非空）——用 require_group 会把契约自己的测试打成 400。
-    缺省语义见 `_default_root_group`。
+    断言 200 且结果非空）。缺省时走 `K.resolve_authorized_org` →
+    `authz.default_group_id` 定位用户自己的默认组（docs/07 §1「缺省=所在最高组」），
+    **不再取第一个组织**（多组织下会返回别家数据）。
     """
     # 🔴 用宽松口径（parse_group）而非 K.require_group：契约 §3 表格标
     #    「可选」，且 test_contract.py:211 是不带 group 的调用。
-    #    缺省时必须落到「一个具体的组」（该组织根组）而不是全体对象——
-    #    否则用户会看到别的班级的对象。
+    #    缺省时必须落到「用户自己的一个具体组」（authz.default_group_id）
+    #    而不是全体对象/第一个组织——否则用户会看到别的班级/组织的数据。
+    user_id = context["user_id"]
     group = K.parse_group(query)
 
     conn = config.open_db()
     try:
-        # 组 → org_id（不存在即 404）。取 org_id 有两个用途：
-        #   ① 闭包查询按 org_id 做组织隔离；
-        #   ② 组不存在时立刻 404，而不是返回空数组（空数组会被前端当成
-        #      「这个组没有对象」，比报错更难解释）。
-        org_id = K.resolve_org(conn, group)
-
-        if group is None:
-            # 契约 §1「缺省 = 所在最高组」。MVP 单组织演示库下，
-            # 该组织的根组就是「所在最高组」；B2 补鉴权后这里要改成
-            # 按登录用户沿祖先链定位（与 /api/groups 的 default_group_id 同源），
-            # 不能继续「取根组」——多组织 + 多角色时会返回别人的组。
-            group = _default_root_group(conn, org_id)
+        # 越权校验 + 组 → org_id（越权 403；组不存在 404）。
+        # 取 org_id 有两个用途：① 闭包查询按 org_id 做组织隔离；
+        # ② 组不存在时立刻 404，而不是返回空数组（空数组会被前端当成
+        #    「这个组没有对象」，比报错更难解释）。
+        group, org_id = K.resolve_authorized_org(conn, user_id, group)
 
         # group 参数（显式传入时）必须真的是「组」。resolve_org 只校验
         # 「对象存在」，传一个 student 的 id 也能过；那时返回的是

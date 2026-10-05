@@ -32,6 +32,7 @@ import threading
 import time
 from collections import deque
 
+from . import auth
 from . import b3_kernels as K
 from . import config
 from .http_api import ApiError
@@ -195,6 +196,7 @@ def _enrich(conn, payload: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
+@auth.require_auth
 def list_conflicts(method, path, query, body, headers, context=None):
     """GET /api/conflicts?group=<id>（docs/07 §5）。
 
@@ -206,24 +208,25 @@ def list_conflicts(method, path, query, body, headers, context=None):
     无冲突时返回 count=0 / raw_count=0 / items=[]，**不报错**
     （「没有冲突」是正常业务状态，不是异常）。
 
-    错误码：429 限频超限 / 404 组或组织不存在（由内核 resolve_org 抛）。
+    错误码：401 未登录（@require_auth）/ 403 越权 group（K.resolve_authorized_org）
+    / 429 限频超限 / 404 组或组织不存在。
     """
     if _rate_limited(_client_token(headers)):
         raise ApiError(429, "请求过于频繁，请稍后再试")
 
-    # 🔴 group 用**宽松**口径（K.parse_group + K.resolve_org）而非
-    #    K.require_group：契约 §5 表格把 group 标为「可选」，
-    #    且 test_contract.py:284 就是 `GET /api/conflicts`（**不带 group**）——
-    #    用 require_group 会直接 400，把契约自己的测试打挂。
-    #    缺省时 resolve_org 取第一个组织，MVP 单组织演示库即等价于
-    #    契约 §1 说的「所在最高组」。多组织上线后需 B2 鉴权按登录用户定位，
-    #    不能继续「取第一个」。
+    # 🔴 group 用**宽松**口径（K.parse_group）而非 K.require_group：
+    #    契约 §5 表格把 group 标为「可选」，且 test_contract.py:284 就是
+    #    `GET /api/conflicts`（**不带 group**）——用 require_group 会直接 400。
+    #    缺省时经 K.resolve_authorized_org 用 authz.default_group_id 定位
+    #    用户自己的组（不再取第一个组织，杜绝跨组织泄漏）。
+    user_id = context["user_id"]
     group = K.parse_group(query)
     cfg = config.get_current_config()
 
     conn = config.open_db()
     try:
-        org_id = K.resolve_org(conn, group)
+        # 越权校验 + group → org_id（越权 403，组不存在 404）
+        _group, org_id = K.resolve_authorized_org(conn, user_id, group)
         payload = K.conflict_payload(conn, org_id, cfg)
         return _enrich(conn, payload)
     finally:

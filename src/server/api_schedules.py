@@ -78,6 +78,7 @@ import re
 import sqlite3
 from datetime import date, timedelta
 
+from . import auth
 from . import b3_kernels as K
 from . import config
 from .http_api import ApiError
@@ -207,31 +208,33 @@ def _grid(conn: sqlite3.Connection, org_id: str, monday: date) -> dict[str, str]
 # ---------------------------------------------------------------------------
 
 
+@auth.require_auth
 def list_schedules(method, path, query, body, headers, context=None):
     """GET /api/schedules?group=&week= → 200（契约 docs/07 §4）。
 
     成功 200： {"objects":[{"id","kind","name"}], "days":["2026-09-07",...],
                 "grid":{"<object_id>|<date>":"0x000006",...}}
-    week 格式非法 → 400；group 不存在 → 404（K.resolve_org）。
+    未登录 → 401（@require_auth）；越权 group → 403（K.resolve_authorized_org）
+    week 格式非法 → 400；group 不存在 → 404。
 
     `group` 用 `K.parse_group`（可缺省）而**不是** `K.require_group`。
     🔴 真实理由是**契约测试裸调**：`tests/test_contract.py:233` 的
     `_schedules()` 五个调用点全都不带 group，而 `test_response_structure`
     断言 200 + 非空——用 `require_group`（缺失即 400）会直接把它打挂。
     契约 §4 表格本身也标的是「group（可选）」。
-    ⚠️ B3 三接口现已统一为「可缺省」（`/api/objects` 原按「必须给」实现，
-    因同一份测试裸调而改为 `parse_group`），故本文件不再拿§3 当对照依据。
-    缺省时 `K.resolve_org(None)` 取第一个组织。
+    缺省时经 `K.resolve_authorized_org` 用 `authz.default_group_id` 定位
+    用户自己的组（不再取第一个组织）。
     """
     cfg = config.get_current_config()
+    user_id = context["user_id"]
     group = K.parse_group(query)
     monday = _parse_week(query, cfg)
 
     conn = config.open_db()
     try:
-        # group → org_id：不存在即 404，而不是返回空 grid
-        # （空 grid 会被前端当成「这周没课」，比报错更难解释）。
-        org_id = K.resolve_org(conn, group)
+        # 越权校验 + group → org_id：不存在即 404，越权 403，
+        # 而不是返回空 grid（空 grid 会被前端当成「这周没课」，比报错更难解释）。
+        _group, org_id = K.resolve_authorized_org(conn, user_id, group)
 
         grid = _grid(conn, org_id, monday)
         object_ids = {key.split(_KEY_SEP)[0] for key in grid}

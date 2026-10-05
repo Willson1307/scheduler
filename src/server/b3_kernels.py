@@ -128,6 +128,35 @@ def resolve_org(conn: sqlite3.Connection, group: str | None) -> str:
     return row["id"]
 
 
+def resolve_authorized_org(
+    conn: sqlite3.Connection,
+    user_id: str,
+    group: str | None,
+) -> tuple[str, str]:
+    """校验请求的 group（可 None）在用户授权范围内，返回 (effective_group_id, org_id)。
+
+    越权判定（docs/21 §1.1 B2-1）：请求的 group 不在
+    `authz.authorized_groups(conn, user_id)` 内 → 403（越权，区别于 404「不存在」）。
+
+    group=None 时**不再取「第一个组织」**（`resolve_org(None)` 是跨组织泄漏出口，
+    uuid4 随机序下多组织非确定性返回别家数据），改用
+    `authz.default_group_id(conn, user_id)` 定位用户自己的默认组（docs/07 §1
+    「缺省 = 所在最高组」）——默认组也走同一套校验，不能因「没传 group」绕过。
+
+    B2 卡 rhJz9F 已抓到「可跨组织消解他组织课表」的 P0，本函数是同一个出口的修复。
+    """
+    from scheduler import authz
+
+    gids = authz.authorized_groups(conn, user_id)
+    if group is None:
+        group = authz.default_group_id(conn, user_id)
+        if group is None:
+            raise ApiError(403, "无任何组访问权限")
+    elif group not in gids:
+        raise ApiError(403, "无权访问该组")
+    return group, resolve_org(conn, group)
+
+
 def require_group(query: dict) -> str:
     """严格要求「必须给 group」，缺失时 raise 400。
 

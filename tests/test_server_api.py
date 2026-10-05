@@ -344,6 +344,18 @@ class TestObjectsAndSchedules(unittest.TestCase):
         cls.db_path = os.path.join(cls.tmp.name, "demo.db")
         cls.conn = _build_demo_db(cls.db_path)
         cls.org_id = K.resolve_org(cls.conn, None)
+        # B3 三接口接入鉴权后，直接调 handler 必须带 token（否则 @require_auth
+        # 返回 401）。签发 admin token：admin 在 authz.authorized_groups 里
+        # 短路返回全部组，故下面 3 个用例查任何组都能过组校验。
+        from server import auth
+        _admin = cls.conn.execute(
+            "SELECT id, login, role, object_id FROM users WHERE role='admin' LIMIT 1"
+        ).fetchone()
+        cls._auth_headers = {
+            "authorization": "Bearer " + auth.issue_token(
+                _admin["id"], _admin["login"], _admin["role"], _admin["object_id"]
+            )
+        }
         # 🔴 db_path 必须与 set_current_config 的一致：接口内部用
         # config.open_db()（读进程级配置），测试自己用 cls.conn 是另一条连接。
         # 两者指向同一个文件才对得上。
@@ -371,7 +383,7 @@ class TestObjectsAndSchedules(unittest.TestCase):
         if group_id is None:
             self.skipTest("演示库无班级组")
         res = api_objects.list_objects(
-            "GET", "/api/objects", {"group": [group_id["id"]]}, b"", {}
+            "GET", "/api/objects", {"group": [group_id["id"]]}, b"", self._auth_headers
         )
         self.assertIsInstance(res, list, "必须是顶层数组（契约 §3）")
         required = {"id", "kind", "name", "parent_ids"}
@@ -400,7 +412,7 @@ class TestObjectsAndSchedules(unittest.TestCase):
         if group_id is None:
             self.skipTest("演示库无班级组")
         res = api_schedules.list_schedules(
-            "GET", "/api/schedules", {"group": [group_id["id"]]}, b"", {}
+            "GET", "/api/schedules", {"group": [group_id["id"]]}, b"", self._auth_headers
         )
         self.assertIn("grid", res)
         self.assertIn("days", res)
@@ -427,11 +439,11 @@ class TestObjectsAndSchedules(unittest.TestCase):
         if group_id is None:
             self.skipTest("演示库无班级组")
         a = json.dumps(
-            api_schedules.list_schedules("GET", "/api/schedules", {"group": [group_id["id"]]}, b"", {}),
+            api_schedules.list_schedules("GET", "/api/schedules", {"group": [group_id["id"]]}, b"", self._auth_headers),
             ensure_ascii=False, sort_keys=True,
         )
         b = json.dumps(
-            api_schedules.list_schedules("GET", "/api/schedules", {"group": [group_id["id"]]}, b"", {}),
+            api_schedules.list_schedules("GET", "/api/schedules", {"group": [group_id["id"]]}, b"", self._auth_headers),
             ensure_ascii=False, sort_keys=True,
         )
         self.assertEqual(a, b, "两次调用不一致 → 前端会闪烁")
