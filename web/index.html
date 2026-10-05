@@ -236,6 +236,8 @@
   .side .nm { font-weight: 700; }
   .side .ti { color: var(--c-text-dim); font-size: var(--fs-sm); }
   .side .mt { font-size: var(--fs-xs); color: var(--c-text-dim); }
+  /* 冲突条目尾部的槽位透传行（在 .side 之外，故单独给样式） */
+  li > .mt { font-size: var(--fs-xs); color: var(--c-text-dim); margin-top: 4px; }
   .vs-mark { align-self: center; font-weight: 700; color: var(--c-danger); }
 
   .kind {
@@ -261,6 +263,12 @@
   .kv div { padding: 1px 0; }
 
   .note { font-size: var(--fs-xs); color: var(--c-text-dim); margin: 6px 0 0; }
+  /* 🔴 .note 用的是 <p>（display:block），不是 .banner 那种 div。
+     之前只有 .banner[hidden] 这一条隐藏规则，导致 showBanner() 给 .note 设
+     hidden=true 时**不生效**——口径说明会在没数据时也占一行空白。
+     写这条兜底：所有用到 hidden 属性的元素都该有这条。
+     （本项目第 8 次静默失效的同类：视觉层的 hidden 也不报错，只是默默不对） */
+  [hidden] { display: none !important; }
   .mocktag {
     display: inline-block; padding: 1px 8px; border-radius: 8px;
     background: var(--c-warn-l); color: var(--c-warn);
