@@ -1,7 +1,15 @@
 """scripts/smoke.py —— 端到端自检（降级链 L1 层，对应 docs/20 §1）。
 
 运行：
-    python scripts/smoke.py
+    python scripts/smoke.py                 # 常规端到端自检（8 项）
+    python scripts/smoke.py --offline       # 断网演练：拦截一切非本机连接，断言 0 次外联
+    python scripts/smoke.py --offline-probe # 仅跑拦截探针：证明守护真的会拦（不真发请求）
+
+断网演练口径（如实，不夸大）：
+  --offline 统计的是**本脚本自身进程**发起的对外连接（getaddrinfo / create_connection /
+  socket.connect 三个 C 层入口全部拦截）。子进程 run_server.py 是独立进程、不受本进程
+  monkeypatch 影响（它只 bind 127.0.0.1 + sqlite3，不主动外联），**不**计入本次统计，
+  故本脚本不宣称「整机零外联」。对应 docs/21 §2 R2「断网可跑」。
 
 用途与设计意图（答辩口径）：
   1. 网页层（L0）失败时的第一道兜底：一条命令跑完整流程——
@@ -22,9 +30,12 @@
 
 from __future__ import annotations
 
+import argparse
+import ipaddress
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -57,6 +68,9 @@ CHECKS: list[tuple[str, bool, str]] = []  # (名称, 是否通过, 说明)
 
 # 绕过系统代理：否则代理会拦 127.0.0.1 返回 502，把「服务未启动」误判成「服务异常」
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+# --offline 拦截到的「非本机连接」目标（自检进程口径，见文件头说明）
+OFFLINE_ATTEMPTS: list[tuple] = []
 
 
 def check(name: str, ok: bool, detail: str = "") -> bool:
@@ -180,7 +194,118 @@ def _summary() -> int:
     return 0
 
 
-def main() -> int:
+# ─────────────────────── 断网演练（--offline）───────────────────────
+#
+# 拦截点必须三层（缺一不能拦住域名外发）：
+#   urllib.request → http.client.HTTPConnection.connect → self._create_connection
+#     → socket.create_connection → socket.getaddrinfo（DNS 就在这里）→ sock.connect(ip)
+# 只拦 socket.connect 时 DNS 已真实发出；只拦 getaddrinfo 又拦不住字面 IP 直连。
+
+_LOOPBACK_NAMES = ("localhost", "localhost.localdomain", "ip6-localhost")
+
+
+def _is_loopback(host: object) -> bool:
+    """本机地址判定：None（AI_PASSIVE 绑定语义）、localhost、127.x、::1、[::1]。"""
+    if host is None:
+        return True
+    if not isinstance(host, str):
+        return False
+    h = host.strip()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    if h.lower() in _LOOPBACK_NAMES or h == "::1":
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False  # 域名 / 内网 IP / 0.0.0.0 → 按外联处理（安全默认）
+
+
+def _block_offline(target: object) -> None:
+    OFFLINE_ATTEMPTS.append(target if isinstance(target, tuple) else (target,))
+    raise OSError(f"断网模式：已拦截对非本机地址 {target!r} 的连接")
+
+
+def _install_offline_guard() -> None:
+    """monkeypatch 三个 C 层入口，非本机一律拦下（抛 OSError）。
+
+    注：socket.socket 是 socket.py 里的 Python 堆类，可安全赋 connect；
+    不要 patch _socket.socket（C 类型，不可赋值）。
+    """
+    orig_gai = socket.getaddrinfo
+    orig_cc = socket.create_connection
+    orig_conn = socket.socket.connect
+
+    def guard_gai(host, port, *args, **kwargs):
+        if _is_loopback(host):
+            return orig_gai(host, port, *args, **kwargs)
+        _block_offline((host, port))
+
+    def guard_cc(address, *args, **kwargs):
+        if isinstance(address, tuple) and _is_loopback(address[0]):
+            return orig_cc(address, *args, **kwargs)
+        _block_offline(address)
+
+    def guard_conn(self, address):
+        if isinstance(address, tuple) and _is_loopback(address[0]):
+            return orig_conn(self, address)
+        _block_offline(address)
+
+    socket.getaddrinfo = guard_gai
+    socket.create_connection = guard_cc
+    socket.socket.connect = guard_conn
+
+
+def _offline_probe() -> int:
+    """跑 3 条拦截自检，证明守护真的生效；均不真正发出请求（守护先于请求安装）。
+
+    判定依据是 OFFLINE_ATTEMPTS 计数增量，而非「是否抛 OSError」——否则真实的
+    网络不可达也会抛 OSError，会被误当成「已拦截」（假阳性）。
+    """
+    print("-" * 62)
+    print("断网演练探针（--offline-probe）：验证拦截生效，均不真正发出请求")
+    cases: list[tuple[str, object]] = [
+        ("socket.create_connection(('example.com', 80))",
+         lambda: socket.create_connection(("example.com", 80), timeout=5)),
+        ("socket.connect(('192.0.2.1', 80))  # RFC5737 保留址，永不可路由",
+         lambda: socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(("192.0.2.1", 80))),
+        ("socket.getaddrinfo('example.com', 80)",
+         lambda: socket.getaddrinfo("example.com", 80)),
+    ]
+    ok = 0
+    for label, call in cases:
+        before = len(OFFLINE_ATTEMPTS)
+        try:
+            call()  # type: ignore[operator]
+        except OSError as exc:
+            if len(OFFLINE_ATTEMPTS) > before:      # 确由守护拦下，而非真实网络错误
+                ok += 1
+                print(f"[OK  ] {label} 已拦截 —— {exc}", flush=True)
+            else:
+                print(f"[FAIL] {label} 抛错但非守护所拦（疑似真实网络错误）🔴 {exc}", flush=True)
+        else:
+            print(f"[FAIL] {label} 未被拦截 🔴", flush=True)
+    print(
+        f"拦截探针：{ok}/{len(cases)} 通过 {'✅' if ok == len(cases) else '🔴'}"
+        f"（共拦截 {len(OFFLINE_ATTEMPTS)} 次外部尝试，0 次真正发出）",
+        flush=True,
+    )
+    return 0 if ok == len(cases) else 1
+
+
+def _parse_args(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(
+        prog="smoke.py",
+        description="端到端自检（L1）；--offline 为断网演练（docs/21 §2 R2）",
+    )
+    parser.add_argument("--offline", action="store_true",
+                        help="断网演练：拦截一切非本机连接，断言本进程 0 次外联")
+    parser.add_argument("--offline-probe", action="store_true",
+                        help="仅运行拦截探针后退出（自动启用断网守护）")
+    return parser.parse_args(argv)
+
+
+def _run() -> int:
     workdir = tempfile.mkdtemp(prefix="scheduler-smoke-")
     db_path = os.path.join(workdir, "smoke.db")
 
@@ -328,6 +453,23 @@ def main() -> int:
     finally:
         server.close()
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    if args.offline or args.offline_probe:
+        _install_offline_guard()
+    if args.offline_probe:
+        return _offline_probe()
+    try:
+        code = _run()
+    finally:
+        # 无论 _run() 从哪个 return 返回，断网行都是最后一行输出
+        if args.offline:
+            print(f"断网模式：本次运行 {len(OFFLINE_ATTEMPTS)} 次外部连接", flush=True)
+    if args.offline and OFFLINE_ATTEMPTS:
+        code = 1  # 断网断言：本进程不得有任何对外连接尝试
+    return code
 
 
 if __name__ == "__main__":
