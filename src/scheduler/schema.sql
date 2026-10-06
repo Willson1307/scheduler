@@ -213,3 +213,22 @@ CREATE TABLE IF NOT EXISTS group_roles (
 );
 CREATE INDEX IF NOT EXISTS idx_group_roles_user ON group_roles(user_id);
 CREATE INDEX IF NOT EXISTS idx_group_roles_group ON group_roles(group_id);
+
+-- ---------------------------------------------------------------------------
+-- S14 埋点事件表（docs/08-试用组织数据口径.md 是字段口径唯一来源）
+-- ---------------------------------------------------------------------------
+-- 只出聚合数、永不外发；trial_code 为稳定短码（人数去重）、session_id 每会话随机
+-- （时长）；payload 只放结构化参数，禁止姓名/班级名/课表内容；org_kind 隔离演示点击。
+CREATE TABLE IF NOT EXISTS event_log (
+    id          TEXT PRIMARY KEY,
+    ts          TEXT NOT NULL,             -- 秒级 ISO 时间
+    trial_code  TEXT NOT NULL DEFAULT '',  -- 稳定短码 T01..；demo/未匹配=''
+    session_id  TEXT NOT NULL,             -- 前端每会话随机串
+    event       TEXT NOT NULL,             -- task_start/task_success/task_abandon/survey
+    payload     TEXT NOT NULL DEFAULT '{}',-- JSON 字符串（结构化参数）
+    org_id      TEXT NOT NULL,
+    org_kind    TEXT NOT NULL CHECK (org_kind IN ('trial', 'demo')),
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_event_log_org ON event_log(org_id, org_kind);
+CREATE INDEX IF NOT EXISTS idx_event_log_session ON event_log(session_id);
