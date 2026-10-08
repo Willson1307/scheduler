@@ -22,3 +22,6 @@ htmlcov/
 
 # AI 工作区（自动化 memory 等，不入仓库）
 .workbuddy/
+
+# 运行期日志（调试/崩溃日志，不入库）
+*.log
