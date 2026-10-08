@@ -13,8 +13,12 @@ POST /api/resolve                → 执行一键消解（迭代）
      remaining_after / rounds / filtered_out_count（+ termination 三态）。
   3. 可动集合（AGENTS §3 例外 / docs/07）：group 决定哪些日程「可动」，
      动了不可动日程的方案一律过滤，保证将来 B2 鉴权接入后越权不越界。
-  4. 限频：进程内滑动窗口，按 token 计数；context=None（B4 未登录）时
-     以 Authorization 头取 token，缺省归入匿名桶。
+  4. 限频：进程内滑动窗口，按 token 计数（B4 跟进 rjsdbj 已接入 @require_auth，
+     未登录 401；限频以 Authorization 头取 token，缺省归入匿名桶）。
+  5. 鉴权（B4 跟进 rjsdbj，照 P0 卡 a21588b 的 B3 范式）：
+     @require_auth 拦 401；`_scope` 走 `K.resolve_authorized_org` 拦跨组织 403
+     （GET 预览与 POST 执行同口径，杜绝「读泄漏 + 写越权」），
+     movable 一律按 effective_group 闭包（越权不越界）。
 
 签名约定（写死，不得改）：
   handle(method, path, query, body, headers, context=None)
@@ -29,6 +33,8 @@ import time
 from collections import deque
 from datetime import timedelta
 
+from . import auth
+from . import b3_kernels as K
 from . import config
 from .http_api import ApiError, json_body
 
@@ -99,17 +105,23 @@ def _parse_group(query: dict) -> str | None:
     return group or None
 
 
-def _scope(conn, group: str | None) -> tuple[str, set[str] | None]:
-    """解析 group 参数 → (org_id, movable_ids)。movable_ids=None 表示全体可动。"""
-    if group:
-        row = conn.execute("SELECT org_id FROM objects WHERE id = ?", (group,)).fetchone()
-        if row is None:
-            raise ApiError(404, "组不存在")
-        return row["org_id"], m2.movable_schedule_ids(conn, group)
-    row = conn.execute("SELECT id FROM organizations ORDER BY id LIMIT 1").fetchone()
-    if row is None:
-        raise ApiError(404, "无组织数据")
-    return row["id"], None  # 无 group → 不限制可动集合
+def _scope(conn, user_id: str, group: str | None) -> tuple[str, set[str]]:
+    """鉴权 + 解析 group 参数 → (org_id, movable_ids)。
+
+    🔴 跨组织越权出口（B4 跟进 rjsdbj，照 P0 卡 a21588b 的 B3 范式修复）：
+      - 原实现 `SELECT id FROM organizations ORDER BY id LIMIT 1` 完全无鉴权，
+        且 org id 是 uuid4，多组织下非确定性返回**别家**数据——
+        GET 泄漏别组织可动集合，POST 直接**改写**别组织课表（IDOR 写越权）。
+      - 现一律走 `K.resolve_authorized_org`：group 不在 authorized_groups → 403；
+        group=None 时用 authz.default_group_id 定位用户自己的默认组（同口径）。
+
+    movable 语义（B2 鉴权接入后收紧，与文件头「越权不越界」预留意图对齐）：
+      可动集合一律按 effective_group 闭包计算（含默认组）。
+      admin 默认组 = 根组 → 闭包覆盖全组织，行为与旧「None=全体可动」一致；
+      低权限用户默认组下只能动自己组闭包内的日程。
+    """
+    effective_group, org_id = K.resolve_authorized_org(conn, user_id, group)
+    return org_id, m2.movable_schedule_ids(conn, effective_group)
 
 
 def _resolve_window(cfg):
@@ -138,6 +150,7 @@ def _format_plan(conn, plan, index: int) -> dict:
     }
 
 
+@auth.require_auth
 def resolve_get(method, path, query, body, headers, context=None):
     if _rate_limited(_client_token(headers)):
         raise ApiError(429, "请求过于频繁，请稍后再试")
@@ -149,7 +162,7 @@ def resolve_get(method, path, query, body, headers, context=None):
 
     conn = config.open_db()
     try:
-        org_id, movable_ids = _scope(conn, group)
+        org_id, movable_ids = _scope(conn, context["user_id"], group)
         slot_cfg = load_slot_config(conn, org_id)
         results = m2.resolve(
             conn, org_id, date_from, date_to,
@@ -172,6 +185,7 @@ def resolve_get(method, path, query, body, headers, context=None):
         conn.close()
 
 
+@auth.require_auth
 def resolve_post(method, path, query, body, headers, context=None):
     if _rate_limited(_client_token(headers)):
         raise ApiError(429, "请求过于频繁，请稍后再试")
@@ -190,7 +204,7 @@ def resolve_post(method, path, query, body, headers, context=None):
 
     conn = config.open_db()
     try:
-        org_id, movable_ids = _scope(conn, group)
+        org_id, movable_ids = _scope(conn, context["user_id"], group)
         slot_cfg = load_slot_config(conn, org_id)
         remaining_before = scan(conn, org_id, date_from, date_to, cfg=slot_cfg).count
 
