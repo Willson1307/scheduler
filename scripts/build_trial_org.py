@@ -35,6 +35,7 @@ from datetime import date, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from scheduler.authz import grant_role  # noqa: E402
 from scheduler.db import connect, init_db  # noqa: E402
 from scheduler.object_graph import (  # noqa: E402
     add_edge,
@@ -182,6 +183,33 @@ def build() -> dict:
         rid = create_object(conn, org_id, "resource", room_name(r), capacity=50)
         add_edge(conn, root_id, rid)
         room_ids.append(rid)
+
+    # 🔴 2026-10-10 修复第 12 处静默失效：教师账号登录后「授权组为空、默认组 None」。
+    # 根因：脚本只create_user 建账号，从未调grant_role 写 group_roles 授权行。
+    # 表现：管理员能登录（role='admin' 全组织短路，看不出问题），
+    #      但 12 个教师 trial_t01..t12 全部拿到空授权列表 → 试用老师看到空系统、
+    #      组切换器空白、一键消解按钮拿不到 group → **试用当天才会发现**。
+    # 授权口径（docs/06）：教师对自己实际任教的班级有 'view'；
+    # 排课相关给 'own'（可提议改课）。这里按「任教关系」精确授权，不给全组织。
+    #   tid -> 他教的 cid 集合（与下面 create_periodic 的分配口径完全一致）
+    teacher_teaching: dict[str, list[str]] = {tid: [] for tid in teacher_ids}
+    for ci, cid in enumerate(class_ids):
+        for si, (subj, dow, idx) in enumerate(SUBJECTS):
+            tid = teacher_ids[(ci * len(SUBJECTS) + si) % TEACHERS]
+            if cid not in teacher_teaching[tid]:
+                teacher_teaching[tid].append(cid)
+    # 冲突演示课涉及的两位教师也授权到对应班级，否则他们看不到要消解的冲突
+    teacher_teaching[teacher_ids[3]].append(class_ids[0])
+    if len(class_ids) > 1:
+        teacher_teaching[teacher_ids[7]].append(class_ids[1])
+
+    for tid in teacher_ids:
+        u = conn.execute("SELECT id FROM users WHERE object_id=?", (tid,)).fetchone()
+        uid = u["id"] if u else None
+        if not uid:
+            raise RuntimeError(f"教师对象 {tid} 没有对应的 users 行，无法授权")
+        for cid in teacher_teaching[tid]:
+            grant_role(conn, org_id, cid, uid, "own")
 
     # 课表：每班 5 门课，教师轮换分配（同一节次用不同教师，避免假冲突）
     for ci, cid in enumerate(class_ids):
