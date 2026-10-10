@@ -81,6 +81,9 @@
   .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
   .field > label { font-size: var(--fs-xs); color: var(--c-text-dim); }
   .field.grow { flex: 1 1 220px; }
+  /* 登录栏内嵌一行表单（F3b）：登录后整行收起，身份提示保留 */
+  .login-row { display: flex; flex-wrap: wrap; gap: var(--sp); align-items: flex-end; }
+  .login-row[hidden] { display: none; }
 
   select, button, input {
     font: inherit;
@@ -295,6 +298,31 @@
        绝不让用户误以为「没有冲突」 -->
   <div id="fatal" class="banner error" role="alert" aria-live="assertive" hidden></div>
 
+  <!-- ---------- 登录（F3b）：B3/B4 接入鉴权后（P0 r13kE9），未登录一律 401 ----------
+       登录成功后只收起表单（loginForm），身份提示（loginWho）保留显示——
+       现场演示时评委要能一眼看出「当前以谁的身份操作」。 -->
+  <div id="loginSec" class="toolbar" hidden>
+    <div id="loginForm" class="login-row">
+      <div class="field">
+        <label for="loginName">登录名</label>
+        <input id="loginName" type="text" autocomplete="username" size="14">
+      </div>
+      <div class="field">
+        <label for="loginPwd">密码</label>
+        <input id="loginPwd" type="password" autocomplete="current-password" size="14">
+      </div>
+      <div class="field">
+        <label>&nbsp;</label>
+        <button id="loginBtn" class="primary" type="button">登录</button>
+      </div>
+    </div>
+    <div class="field grow">
+      <label>状态</label>
+      <div id="loginWho" class="note">未登录：接口统一要求 Bearer token（docs/07 通用约定），登录后自动加载数据。</div>
+    </div>
+  </div>
+  <div id="loginErr" class="banner error" role="alert" aria-live="assertive" hidden></div>
+
   <!-- ---------- 组切换器 ---------- -->
   <div class="toolbar">
     <div class="field grow">
@@ -352,7 +380,8 @@
   </footer>
 </div>
 
-<!-- 版本号与后端 config.ASSET_VERSION 对齐；相对路径，无外链 -->
-<script src="app.js?v=20261003"></script>
+<!-- 版本号与后端 config.ASSET_VERSION 对齐；相对路径，无外链。
+     F3b 改了 app.js → 递增此版本号强制浏览器拿新文件（配合 no-cache + ETag）。 -->
+<script src="app.js?v=20261010"></script>
 </body>
 </html>
