@@ -217,11 +217,18 @@ def authorized_groups(
         return [r["id"] for r in rows]
 
     # 后代（含自身）= WHERE ancestor_id IN (用户有直接授权的组)
+    # 🔴 2026-10-10 修复：必须过滤 o.kind='group'。
+    # 原实现只取 descendant_id，而闭包表里含 kind='user' 的学生对象
+    #（班级 → 学生 也是一条边）→ 教师登录后组列表混进 28 个学生对象，
+    # 组切换器出现「示例学生03-15」这种根本不是组的条目。
+    # 该缺陷在试用库里因 group_roles 之前为空而被掩盖（教师根本进不去），
+    # 一旦修好授权立刻暴露 —— 属于「修A 牵出 B」的连锁。
     rows = conn.execute(
         "SELECT DISTINCT e.descendant_id AS gid "
         "FROM object_edges e "
         "JOIN group_roles gr ON gr.group_id = e.ancestor_id "
-        "WHERE gr.user_id = ? "
+        "JOIN objects o ON o.id = e.descendant_id "
+        "WHERE gr.user_id = ? AND o.kind = 'group' "
         "ORDER BY e.descendant_id",
         (user_id,),
     ).fetchall()
