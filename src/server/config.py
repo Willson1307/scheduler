@@ -38,7 +38,11 @@ from scheduler.seeds import seed_demo  # noqa: E402
 
 #: 静态资源版本号（AGENTS §8）：前端引用形如 app.js?v=<ASSET_VERSION>。
 #: 发版时改这一处即可让所有浏览器拿到新文件（配合 no-cache + ETag）。
-ASSET_VERSION = "20261003"
+#: 🔴 2026-10-10修正：F3b 改了 app.js 后 index.html 侧已递增到 20261011，
+#:    但本值漏改→两侧不一致。该不同步**不报错**，只会「改了前端偶尔不生效」，
+#:    属静默失效，现场 10/23 演示时最难排查。
+#:    改动此值时必须同步核对：grep -n 'app.js?v=' web/index.html
+ASSET_VERSION = "20261011"
 
 #: 默认数据库：与队长 L8 沙盒演示库同路径，现场「删 data/ → 一条命令 →
 #: 30 秒可演示」的闭环由本模块的自动初始化兜底（CP-G）。
