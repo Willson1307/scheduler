@@ -388,6 +388,61 @@ function extractMessage(body) {
 }
 
 /* =============================================================================
+ * 2b. 埋点（S14：POST /api/ping）
+ * -----------------------------------------------------------------------------
+ * 🔴 事件三元组缺一不可：task_start（完成率分母）/ task_success（分子）/ task_abandon。
+ *    缺 task_start 就永远算不出任务完成率的分母——这是赛事必交的四类数据之一
+ *    （docs/08 §3.2）。
+ * 🔴 合规：payload 只放结构化参数（数值 / 枚举），严禁姓名、班级名、登录名
+ *    （docs/08 §6）。trial_code 与 org_kind 由后端从登录名推导，前端绝不传。
+ *    这里传的 group 是组 ID（如 g_c1），不是组名。
+ * fire-and-forget：打点失败静默，绝不阻断主流程（埋点是观测，不是业务）。
+ * ========================================================================== */
+
+/** 会话级随机串（每次打开页面生成一个，docs/08 §3.1，供后端算平均使用时长）。 */
+function newSessionId() {
+  if (window.crypto && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return 's-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+
+/**
+ * 上报一条埋点事件。返回 Promise 但不 await（调用方不必等它）。
+ * 🔴 三种情况不打点：mock 模式（无后端）、未登录（后端要求鉴权 401）。
+ */
+function ping(event, payload) {
+  if (USE_MOCK) return Promise.resolve();
+  if (!state.token) return Promise.resolve();
+  const body = { event: event, session_id: state.sessionId, payload: payload || {} };
+  if (state.groupId) body.group = state.groupId;
+  return fetch('/api/ping', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json', Accept: 'application/json' }),
+    body: JSON.stringify(body),
+    keepalive: true,   // 关页时 pagehide 里的上报也能送达
+  }).catch(function () { /* 打点失败静默：埋点不得影响主流程 */ });
+}
+
+/** task_start 已发、尚未 success/abandon 时进入「进行中」，关页或超时要补 abandon。 */
+function markTaskActive() {
+  state.taskActive = true;
+  state.taskStartedAt = Date.now();
+  clearTimeout(state.taskTimer);
+  // 90 秒无操作兜底 → task_abandon（docs/08 §3.2 的「超时」触发，说明剩下的去哪了）
+  state.taskTimer = setTimeout(function () {
+    if (state.taskActive) {
+      state.taskActive = false;
+      ping('task_abandon', { reason: 'timeout' });
+    }
+  }, 90000);
+}
+
+/** 任务已出结果（成功或出错都算有结论），清「进行中」标记与超时定时器。 */
+function markTaskDone() {
+  state.taskActive = false;
+  clearTimeout(state.taskTimer);
+}
+
+/* =============================================================================
  * 3. 宽容解析层（契约 §12.2 五条）
  * -----------------------------------------------------------------------------
  * ① 未知字段 → 忽略（本文件从不校验 schema，从不因多出字段抛错）
@@ -896,6 +951,10 @@ const state = {
   lastResult: null,
   token: '',         // F3b：登录后的 Bearer token（仅内存，不落盘，刷新需重登）
   user: null,        // /api/login 返回的 user 对象（仅用于显示登录身份）
+  sessionId: '',     // F5：会话级随机串（埋点平均时长用，boot() 时生成一次）
+  taskActive: false, // F5：task_start 已发、尚未 success/abandon
+  taskStartedAt: 0,  // F5：task_start 时刻（ms）
+  taskTimer: 0,      // F5：90 秒无操作超时定时器 id
 };
 
 const $ = function (id) { return document.getElementById(id); };
@@ -1079,12 +1138,25 @@ async function doResolve(btn) {
   main.disabled = true;
   main.textContent = '消解中…';
 
+  // F5 埋点：点下「一键消解」的瞬间记 task_start（完成率分母，docs/08 §3.2）
+  ping('task_start', { mode: 'minimal' });
+  markTaskActive();
+
   try {
     const body = await apiPost('/api/resolve', withGroup({ mode: 'minimal' }), { plan_index: 0 });
     state.lastResult = body;
+    // F5 埋点：方案成功写回记 task_success（完成率分子）。payload 只带数值，无名字。
+    ping('task_success', {
+      applied: intOrNull(body, 'applied'),
+      remaining_after: intOrNull(body, 'remaining_after'),
+    });
+    markTaskDone();
     renderResolveResult(body);
     await loadAll();   // 重新拉数据，让周视图与冲突列表反映消解后的真实状态
   } catch (e) {
+    // F5 埋点：失败/取消记 task_abandon（单独说明，不是失败，docs/08 §3.2）
+    ping('task_abandon', { reason: 'error' });
+    markTaskDone();
     clear($('resBox'));
     $('resBox').appendChild(el('div', {
       cls: 'banner error',
@@ -1121,9 +1193,17 @@ function bindEvents() {
   [$('loginName'), $('loginPwd')].forEach(function (inp) {
     inp.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') doLogin(); });
   });
+  // F5 埋点：关页时若任务仍在进行，补 task_abandon（docs/08 §4.3 beforeunload 兜底）
+  window.addEventListener('pagehide', function () {
+    if (state.taskActive) {
+      state.taskActive = false;
+      ping('task_abandon', { reason: 'page_hide' });
+    }
+  });
 }
 
 function boot() {
+  state.sessionId = newSessionId();   // F5：每次打开页面生成一个会话串（埋点时长统计用）
   const tag = $('srcTag');
   if (USE_MOCK) {
     tag.hidden = false;
