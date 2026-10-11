@@ -3,8 +3,12 @@
 用途与设计意图（答辩口径）：
   1. 令牌用标准库 hmac+secrets 签名（无状态、断网可用、零第三方依赖）：
      payload=<base64(json)> . sig=<base64(hmac_sha256(payload, SECRET))>。
-     无状态 = 重启不依赖外部存储；SECRET 进程级随机，重启后旧令牌失效
-     （本地工具可接受，用户重新登录即可）。
+     无状态 = 重启不依赖外部存储；SECRET 持久化在 <仓库根>/data/.auth_secret
+     （data/ 整目录已 gitignore，密钥不出本机），重启后旧令牌**仍然有效**，
+     修复「重启即全员 401 重新登录」（rPm5gf 问题 9.1）。
+     密钥来源优先级：环境变量 SCHEDULER_AUTH_SECRET（64 位 hex，测试/多实例
+     场景）> data/.auth_secret 文件（首次自动生成，权限 0600）> 进程级随机
+     （文件系统不可写时的兜底，此时退回旧行为：重启令牌失效）。
   2. require_auth 装饰器在 handler 层拦截（不改 http_api.py 的固定分发）：
      读 Authorization: Bearer <token> → 校验 → 填充 context；未登录返回 401。
      这样 B2 只碰自己的独占文件，http_api 的 context=None 硬编码不动。
@@ -22,14 +26,60 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import time
 from typing import Any, Callable
 
 # ---------------------------------------------------------------------------
-# 进程级签名密钥（重启失效，本地工具可接受）
+# 签名密钥：环境变量 > data/.auth_secret 文件 > 进程级随机（兜底）
 # ---------------------------------------------------------------------------
-_SECRET = secrets.token_bytes(32)
+
+
+def _secret_file_path() -> str:
+    """<仓库根>/data/.auth_secret（src/server/auth.py 上溯三级 = 仓库根）。
+
+    data/ 整目录在 .gitignore（含真实库文件），密钥落这里不会入库、不出本机。
+    🔴 路径锚定文件位置而非当前工作目录，与 config.repo_root() 同一手法。
+    """
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(repo_root, "data", ".auth_secret")
+
+
+def _load_or_create_secret() -> bytes:
+    """加载持久化密钥；不存在则生成并写盘（0600）；写不了盘则退回进程级随机。
+
+    修复（rPm5gf 问题 9.1）：原实现每次重启重新随机 → 全量 token 失效，
+    开发/演示中表现为「登录成功、过会儿 401 又让登录」。持久化后重启不失效。
+    """
+    env = os.environ.get("SCHEDULER_AUTH_SECRET", "")
+    if env:
+        try:
+            return bytes.fromhex(env)
+        except ValueError:
+            pass  # 非法 hex 忽略，走文件/随机
+    path = _secret_file_path()
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        if len(data) >= 32:
+            return data
+    except OSError:
+        pass  # 文件不存在/不可读 → 尝试生成
+    secret = secrets.token_bytes(32)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, secret)
+        finally:
+            os.close(fd)
+        return secret
+    except OSError:
+        return secret  # 写盘失败（只读介质等）→ 本次进程内使用，退回旧行为
+
+
+_SECRET = _load_or_create_secret()
 
 
 def issue_token(user_id: str, login: str, role: str, object_id: str) -> str:

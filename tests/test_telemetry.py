@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from scheduler import authz, object_graph as og  # noqa: E402
 from scheduler.db import connect, init_db, new_id  # noqa: E402
 from server import config, routes, telemetry  # noqa: E402
+from server import auth as server_auth  # noqa: E402
 from server.http_api import SchedulerHTTPServer  # noqa: E402
 import telemetry_report  # noqa: E402
 
@@ -402,6 +403,41 @@ class TelemetryUnitTest(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_trial_admin_pollution_excluded(self):
+        """rPm5gf 问题 11 回归：trial_admin（org_kind=trial 但 trial_code=''）的
+        task_start/success/abandon、survey、会话时长一律不计入聚合，
+        否则「完成率分母 > 人数」口径不自洽。"""
+        conn = self._fresh()
+        try:
+            org_id = _build_trial_org(conn)
+            # 正常试用教师 T01：1 start + 1 success + 1 份问卷 + 1 个会话
+            _insert_raw(conn, "2026-10-08T09:00:00", "T01", "s1", "task_start", {}, org_id, "trial")
+            _insert_raw(conn, "2026-10-08T09:01:00", "T01", "s1", "task_success", {}, org_id, "trial")
+            _insert_raw(conn, "2026-10-08T09:05:00", "T01", "s5", "survey", {"score": 4}, org_id, "trial")
+            # trial_admin（trial_code=''）污染数据：各类事件混入
+            _insert_raw(conn, "2026-10-08T09:00:00", "", "adm1", "task_start", {}, org_id, "trial")
+            _insert_raw(conn, "2026-10-08T09:00:30", "", "adm1", "task_success", {}, org_id, "trial")
+            _insert_raw(conn, "2026-10-08T09:00:40", "", "adm1", "task_abandon", {}, org_id, "trial")
+            _insert_raw(conn, "2026-10-08T09:02:00", "", "adm2", "survey", {"score": 1}, org_id, "trial")
+
+            agg = telemetry.aggregate(conn)
+
+            self.assertEqual(agg["participants"], 1)
+            c = agg["completion"]
+            self.assertEqual(c["starts"], 1)      # adm1 的 start 不计入
+            self.assertEqual(c["success"], 1)      # adm1 的 success 不计入
+            self.assertEqual(c["abandon"], 0)      # adm1 的 abandon 不计入
+            self.assertEqual(c["completion_rate"], 1.0)
+            d = agg["duration"]
+            self.assertEqual(d["session_count"], 1)  # adm1 会话不计入
+            self.assertEqual(d["avg_session_seconds"], 60.0)
+            s = agg["satisfaction"]
+            self.assertEqual(s["n"], 1)            # adm2 的 1 分问卷不计入
+            self.assertEqual(s["mean"], 4.0)
+            self.assertEqual(s["distribution"], {1: 0, 2: 0, 3: 0, 4: 1, 5: 0})
+        finally:
+            conn.close()
+
     def test_aggregate_no_personal_fields(self):
         conn = self._fresh()
         try:
@@ -416,6 +452,23 @@ class TelemetryUnitTest(unittest.TestCase):
             self.assertIsNone(_CJK_RE.search(blob))
         finally:
             conn.close()
+
+    def test_secret_persistent_across_reload(self):
+        """rPm5gf 问题 9.1 回归：密钥持久化在 data/.auth_secret，
+        模块重载（模拟服务重启）后旧令牌仍然有效，不再全量 401。"""
+        import importlib
+
+        token = server_auth.issue_token("u1", "t01", "teacher", "obj1")
+        self.assertIsNotNone(server_auth.verify_token(token))
+
+        importlib.reload(server_auth)  # 模拟重启：重新加载持久化密钥
+        try:
+            self.assertIsNotNone(
+                server_auth.verify_token(token),
+                "重启（reload）后旧令牌应仍有效（密钥持久化失效则此处为 None）",
+            )
+        finally:
+            importlib.reload(server_auth)  # 恢复模块原状，避免影响后续测试
 
     def test_assert_clean_red_then_green(self):
         conn = self._fresh()

@@ -151,7 +151,14 @@ def resolve_authorized_org(
     if group is None:
         group = authz.default_group_id(conn, user_id)
         if group is None:
-            raise ApiError(403, "无任何组访问权限")
+            # rPm5gf 问题 9.2：保持 403（安全边界不动——不做默认组兜底，
+            # 否则等于给未授权用户开数据口子），但把「能怎么办」写进报错，
+            # 避免「登录成功却 403」被当成系统故障。
+            raise ApiError(
+                403,
+                "该账号未被授权访问任何组（无 group_roles 授权行），"
+                "请联系管理员授权后重试，或改用管理员账号登录",
+            )
     elif group not in gids:
         raise ApiError(403, "无权访问该组")
     return group, resolve_org(conn, group)

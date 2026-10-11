@@ -181,13 +181,18 @@ def trial_participants(conn: sqlite3.Connection) -> int:
 
 
 def task_completion(conn: sqlite3.Connection) -> dict:
-    """任务完成率 = task_success / task_start；abandon 单独报（不是失败，docs/08 §3.2）。"""
+    """任务完成率 = task_success / task_start；abandon 单独报（不是失败，docs/08 §3.2）。
+
+    🔴 口径（rPm5gf 问题 11 修复）：必须过滤 trial_code != ''——trial 组织的
+    管理员 trial_admin（org_kind=trial 但 trial_code=''）的事件不计入，
+    否则「完成率分母 > 人数」口径不自洽。与 trial_participants 对齐。
+    """
     row = conn.execute(
         "SELECT "
         "SUM(CASE WHEN event = 'task_start' THEN 1 ELSE 0 END) AS starts, "
         "SUM(CASE WHEN event = 'task_success' THEN 1 ELSE 0 END) AS success, "
         "SUM(CASE WHEN event = 'task_abandon' THEN 1 ELSE 0 END) AS abandon "
-        "FROM event_log WHERE org_kind = 'trial'"
+        "FROM event_log WHERE org_kind = 'trial' AND trial_code != ''"
     ).fetchone()
     starts = row["starts"] or 0
     success = row["success"] or 0
@@ -210,10 +215,13 @@ def session_durations(conn: sqlite3.Connection) -> dict:
     有效区间 = 会话内相邻事件间隔 ≤ 5 分钟（MAX_GAP_SECONDS）的区间之和；
     超过 5 分钟的空闲整段不计；单次会话 < 5 秒（MIN_SESSION_SECONDS）不计（误触）。
     报告两个数：按会话平均、按人平均（docs/08 §1「两个数都给」）。
+
+    🔴 口径（rPm5gf 问题 11 修复）：过滤 trial_code != ''——trial_admin 的
+    会话不计入 session_count / 平均时长，与 trial_participants 对齐。
     """
     rows = conn.execute(
         "SELECT session_id, trial_code, ts FROM event_log "
-        "WHERE org_kind = 'trial' ORDER BY session_id, ts"
+        "WHERE org_kind = 'trial' AND trial_code != '' ORDER BY session_id, ts"
     ).fetchall()
 
     sessions: dict[str, list] = defaultdict(list)
@@ -246,9 +254,14 @@ def session_durations(conn: sqlite3.Connection) -> dict:
 
 
 def satisfaction(conn: sqlite3.Connection) -> dict:
-    """满意度：event='survey' 的 payload.score（1..5）→ 均值 + ≥4 占比 + 分布（docs/08 §4.2）。"""
+    """满意度：event='survey' 的 payload.score（1..5）→ 均值 + ≥4 占比 + 分布（docs/08 §4.2）。
+
+    🔴 口径（rPm5gf 问题 11 修复）：过滤 trial_code != ''——trial_admin 的
+    问卷不计入，否则管理员点几下就把满意度均值拉偏。与 trial_participants 对齐。
+    """
     rows = conn.execute(
-        "SELECT payload FROM event_log WHERE org_kind = 'trial' AND event = 'survey'"
+        "SELECT payload FROM event_log "
+        "WHERE org_kind = 'trial' AND trial_code != '' AND event = 'survey'"
     ).fetchall()
     scores: list[float] = []
     for r in rows:
