@@ -45,6 +45,10 @@ MIN_SESSION_SECONDS = 5
 
 _TRIAL_LOGIN_RE = re.compile(r"^trial_t(\d+)$")
 
+#: payload 字段白名单（docs/08 §3.1：payload 只放结构化参数）。当前口径只用到
+#: survey 事件的 score（1..5）；白名单外字段一律丢弃，杜绝姓名/班级名/课表内容入库。
+_PAYLOAD_WHITELIST = {"score"}
+
 
 # ---------------------------------------------------------------------------
 # 建表（幂等）
@@ -89,22 +93,45 @@ def org_of_user(conn: sqlite3.Connection, object_id: str) -> str:
 
 
 def org_kind_of(conn: sqlite3.Connection, org_id: str) -> str:
-    """组织 → trial/demo：该组织内存在 login 以 `trial_` 开头的用户即 trial，否则 demo。
+    """组织 → trial/demo：该组织内存在 login 匹配 `_TRIAL_LOGIN_RE`（即 trial_tNN）的教师即 trial，否则 demo。
+
+    与 derive_trial_code 共用同一个 `_TRIAL_LOGIN_RE` 判据，保证「谁能计入试用数据」
+    只有一套口径：trial_tNN → trial；trial_admin（管理员独立组织）不匹配 → demo，
+    从而被所有 `WHERE org_kind='trial'` 的聚合排除（2026-10-11 CP-H S4 修复）。
 
     demo 与 trial 的组织名都是「试用学校」（seeds.py 与 build_trial_org.py 同名），
-    无法按名区分；登录名前缀是两者唯一稳定差异（trial_admin/trial_tNN vs admin/tNN）。
+    无法按名区分；登录名形态是两者唯一稳定差异（trial_tNN vs admin/tNN/trial_admin）。
     """
-    row = conn.execute(
-        "SELECT 1 FROM users u JOIN objects o ON u.object_id = o.id "
-        "WHERE o.org_id = ? AND u.login LIKE 'trial\\_%' ESCAPE '\\' LIMIT 1",
+    rows = conn.execute(
+        "SELECT u.login FROM users u JOIN objects o ON u.object_id = o.id "
+        "WHERE o.org_id = ?",
         (org_id,),
-    ).fetchone()
-    return "trial" if row else "demo"
+    ).fetchall()
+    return "trial" if any(_TRIAL_LOGIN_RE.match(r["login"] or "") for r in rows) else "demo"
 
 
 # ---------------------------------------------------------------------------
 # 写入
 # ---------------------------------------------------------------------------
+
+
+def sanitize_payload(payload: dict) -> dict:
+    """按字段白名单过滤 payload（隐私边界的服务端强制点）。
+
+    - 白名单外字段（含姓名/班级名/课表内容等任意字符串）→ 丢弃，不报错
+      （前端多传无害，丢比拒更兼容）。
+    - score 必须是 int（`type(v) is int` 排除 bool）且 1..5，否则丢弃。
+      选「丢弃」而非「钳制」：钳制 99→5 是伪造满意度数据，丢弃让该条 survey 自然不计入。
+    """
+    if not isinstance(payload, dict):
+        return {}
+    out: dict = {}
+    for k in _PAYLOAD_WHITELIST:
+        if k == "score":
+            v = payload.get(k)
+            if type(v) is int and 1 <= v <= 5:
+                out[k] = v
+    return out
 
 
 def write_event(
@@ -130,7 +157,7 @@ def write_event(
             trial_code,
             session_id,
             event,
-            json.dumps(payload, ensure_ascii=False),
+            json.dumps(sanitize_payload(payload), ensure_ascii=False),
             org_id,
             org_kind,
         ),
