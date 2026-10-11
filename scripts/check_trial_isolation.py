@@ -69,19 +69,29 @@ ok = True
 for k in tokens:
     c = conflicts(tokens[k])
     same = (c["count"] == BASE_CNT[k] and c["raw_count"] == BASE_RAW[k])
-    print(f"  trial_{k}: count={c['count']} raw_count={c['raw_count']}"
-          f"　{'（与初始一致）' if same else '（⚠️ 变了！）'}")
     if k == "t01":
-        if c["raw_count"] != 0:
-            print("  FAIL T01 消解后仍有冲突")
-            ok = False
+        # 🔴 T01 是**预期要变**的那一个（它刚执行了消解）。
+        #    此前这里打「⚠️ 变了！」，把预期结果标成异常信号 → 误导读者，
+        #    且只断言 raw_count==0、漏了 count==0（count=0 但 raw_count>0 也算异常）。
+        #    两个数都必须为 0（2026-10-11 补）。
+        if c["count"] == 0 and c["raw_count"] == 0:
+            print(f"  trial_{k}: count={c['count']} raw_count={c['raw_count']}"
+                  f"　（预期归零 ✔）")
+            print(f"  PASS {k} 消解后 count 与 raw_count 双双归零")
         else:
-            print("  PASS T01 消解后冲突归零")
+            print(f"  trial_{k}: count={c['count']} raw_count={c['raw_count']}"
+                  f"　（⚠️ 应为 0/0）")
+            print(f"  FAIL {k} 消解后未完全归零（count={c['count']} raw_count={c['raw_count']}）")
+            ok = False
     else:
         if not same:
-            print(f"  FAIL trial_{k} 被 T01 影响了→ 组织隔离失效")
+            print(f"  trial_{k}: count={c['count']} raw_count={c['raw_count']}"
+                  f"　（⚠️ 变了！初始为 {BASE_CNT[k]}/{BASE_RAW[k]}）")
+            print(f"  FAIL trial_{k} 被 T01 影响了 → 组织隔离失效")
             ok = False
         else:
+            print(f"  trial_{k}: count={c['count']} raw_count={c['raw_count']}"
+                  f"　（与初始一致 ✔）")
             print(f"  PASS trial_{k} 未受 T01 影响")
 
 # 可见规模核对：缺省组 = default_group_id，其闭包 = 本班 + 该班全部学生（本组织数据）
