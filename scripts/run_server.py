@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import signal
+import socket
 import sys
 from dataclasses import replace
 from datetime import date, timedelta
@@ -31,6 +32,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from server import routes  # noqa: E402
 from server.config import ensure_database, load_config, set_current_config  # noqa: E402
 from server.http_api import SchedulerHTTPServer  # noqa: E402
+
+
+def _bind_family(host: str) -> int:
+    """按 host 决定 socket 地址族，交给 SchedulerHTTPServer 使用。
+
+    🔴 双栈监听（2026-10-11 云部署实测发现）：
+    云主机通常同时有 IPv4 与 IPv6。`--host 0.0.0.0` 只绑 IPv4，
+    纯 IPv6 网络的用户（部分校园网 / 移动网络）会连不上。
+    绑 `::`（AF_INET6）时，只要系统 `net.ipv6.bindv6only=0`（Linux 默认），
+    同一个套接字就同时接受 IPv4 映射地址 —— 一条监听覆盖两族，最省事。
+    """
+    return socket.AF_INET6 if ":" in host else socket.AF_INET
 
 
 def _map_ctrl_break_to_interrupt() -> None:
@@ -118,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     set_current_config(cfg)
 
     routes.get_routes()  # fail fast：扫描 + 路由冲突检查
-    server = SchedulerHTTPServer((cfg.host, cfg.port), cfg)
+    server = SchedulerHTTPServer((cfg.host, cfg.port), cfg, family=_bind_family(cfg.host))
     port = server.server_address[1]  # --port 0 时是实际分配端口
 
     print(

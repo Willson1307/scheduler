@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -62,9 +63,17 @@ class SchedulerHTTPServer(ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+    #: 🔴 backlog 必须显式放大（2026-10-11 部署实测发现）。
+    #: socketserver.TCPServer 默认 request_queue_size=5，公网试用时多个
+    #: 探测/并发连接会把 accept 队列塞满，后续请求直接 Connection refused
+    #: —— 服务端日志看不到这些请求，health 自检也照样全绿，属新一类静默失效。
+    #: 12 位教师可能同时打开页面，128 足够。
+    request_queue_size = 128
 
-    def __init__(self, address: tuple[str, int], cfg: ServerConfig):
+    def __init__(self, address: tuple[str, int], cfg: ServerConfig,
+                 family: int = socket.AF_INET):
         self.cfg = cfg
+        self.address_family = family
         super().__init__(address, RequestHandler)
 
 
