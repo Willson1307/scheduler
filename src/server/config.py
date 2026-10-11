@@ -82,6 +82,10 @@ class ServerConfig:
     web_root: str = field(default_factory=lambda: os.path.join(repo_root(), "web"))
     asset_version: str = ASSET_VERSION
     seed_if_missing: bool = True  # 库文件不存在时自动初始化演示数据
+    #: 演示模式（docs/17 §1 事故一加固）：True 时 run_server 把 today 固定到
+    #: 学期第 1 周（读库 terms.start_date），避免消解窗口随系统日期漂移、
+    #: 现场扫不到冲突还不报错。
+    demo: bool = False
 
 
 def _parse_today(value: str) -> date:
@@ -117,6 +121,14 @@ def load_config(argv: list[str] | None = None) -> ServerConfig:
         default=None,
         help="库文件不存在时也不自动初始化（报错退出，用于连已有库）",
     )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        default=None,
+        help="演示模式：把『今天』固定到学期第 1 周（读库 terms.start_date，"
+        "不硬编码日期），并打印当前窗口与本窗口冲突数——"
+        "根治『不带 --today 窗口漂移、冲突扫不到还不报错』的静默事故（docs/17 §1）",
+    )
     args = parser.parse_args(argv)
 
     env = os.environ
@@ -133,6 +145,7 @@ def load_config(argv: list[str] | None = None) -> ServerConfig:
     web_root = args.web or env.get("SCHEDULER_WEB") or os.path.join(repo_root(), "web")
 
     no_seed = args.no_seed if args.no_seed is not None else bool(env.get("SCHEDULER_NO_SEED"))
+    demo = args.demo if args.demo is not None else bool(env.get("SCHEDULER_DEMO"))
 
     return ServerConfig(
         host=host,
@@ -141,6 +154,7 @@ def load_config(argv: list[str] | None = None) -> ServerConfig:
         today=today,
         web_root=os.path.abspath(web_root),
         seed_if_missing=not no_seed,
+        demo=demo,
     )
 
 
