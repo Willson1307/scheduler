@@ -13,7 +13,10 @@
   4. 🔴 B1 红线二：演示日期可注入且可复现——同一日期两次初始化结果逐字一致；
      换日期则锚点随日期变；/api/health 的 server_date 反映注入值。
   5. HTTP 骨架：/api/health 200、尾斜杠归一、静态文件 ETag/304/404/防穿越。
-  6. Ctrl-C 3 秒退出（Windows 用 CTRL_BREAK_EVENT 注入，POSIX 用 SIGINT）。
+  6. 🔴 业务路由可达：期望清单（EXPECTED_ROUTES）对照 routes.scan() 无缺失，
+     且逐路由打真实 HTTP 断言非 404（401/403/400/405 都算已挂载）——根治
+     「main 上 /api/resolve 404 而 doctor 全绿」的事故二（docs/17 §7 / AGENTS §6.1）。
+  7. Ctrl-C 3 秒退出（Windows 用 CTRL_BREAK_EVENT 注入，POSIX 用 SIGINT）。
 
   全绿 exit 0；任何红项 exit 1。临时文件全部用 tempfile，跑完即清。
 """
@@ -41,6 +44,24 @@ DATE_A = "2026-10-10"
 DATE_B = "2027-03-01"
 MONDAY_OF_A = "2026-10-05"
 
+#: 🔴 期望路由清单（事故二加固）：routes.scan() 只能看见「已注册」的路由，
+#: 若某个 api_*.py 整个没合进 main（B4 的 /api/resolve 事故），遍历现存表
+#: 永远查不出缺失。故 doctor 显式登记应有的业务路由，缺一条即红。
+#: 🔴 新增 API 时必须同步本清单（同 ASSET_VERSION 的同步约定）。
+EXPECTED_ROUTES: frozenset[tuple[str, str]] = frozenset({
+    ("GET", "/api/health"),
+    ("POST", "/api/login"),
+    ("GET", "/api/groups"),
+    ("GET", "/api/objects"),
+    ("GET", "/api/schedules"),
+    ("GET", "/api/conflicts"),
+    ("GET", "/api/resolve"),
+    ("POST", "/api/resolve"),
+    ("POST", "/api/ping"),
+    ("POST", "/api/demands"),
+    ("GET", "/api/telemetry"),
+})
+
 CHECKS: list[tuple[str, bool, str]] = []  # (名称, 是否通过, 说明)
 
 
@@ -54,14 +75,28 @@ def check(name: str, ok: bool, detail: str = "") -> bool:
     return ok
 
 
-def http_get(url: str, headers: dict[str, str] | None = None, timeout: float = 5.0):
-    """GET，返回 (status, headers, body_bytes)。304 也正常返回，不抛异常。"""
-    req = urllib.request.Request(url, headers=headers or {})
+def http_request(url: str, method: str = "GET", headers: dict[str, str] | None = None,
+                 data: bytes | None = None, timeout: float = 5.0):
+    """任意 method 的 HTTP 请求，返回 (status, headers, body_bytes)。
+
+    4xx/5xx（HTTPError）也正常返回不抛异常；连接层失败（URLError/OSError）
+    返回 (None, {}, b"")。绕过系统代理（与 smoke.py 同款）——否则本机代理
+    可能拦 127.0.0.1 返回 502，把「服务未启动」误判成「服务异常」。
+    """
+    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers or {}), (e.read() if e.fp else b"")
+    except (urllib.error.URLError, OSError):
+        return None, {}, b""
+
+
+def http_get(url: str, headers: dict[str, str] | None = None, timeout: float = 5.0):
+    """GET，返回 (status, headers, body_bytes)。304 也正常返回，不抛异常。"""
+    return http_request(url, method="GET", headers=headers, timeout=timeout)
 
 
 class ServerProc:
@@ -237,6 +272,38 @@ def main() -> int:
         check("静态 404（JSON 错误响应）", s404 == 404, f"status={s404}")
         s500, _, _ = http_get(f"{base}/../server/config.py")  # 防目录穿越
         check("目录穿越防护（/../ → 404）", s500 == 404, f"status={s500}")
+
+        # ── 7b. 业务路由可达（docs/17 §7 / AGENTS §6.1 事故二加固）────
+        # 两层判据，缺一不可：
+        #   ① 期望路由清单 ⊆ routes.scan() 现存表——整个 api_*.py 没合进
+        #      main 时（B4 事故二），现存表里根本没这条，只遍历现存表永远
+        #      查不出缺失，必须对照 EXPECTED_ROUTES；
+        #   ② 对现存表每个 (method, path) 打真实 HTTP，断言非 404。
+        # 非 404 判据：401/403（未鉴权）、400（缺参数）、405 都说明路由已
+        # 挂载；只有 404 才是「接口不存在」。/api/health 已有专门检查，
+        # 仅 HTTP 探测时跳过。数值断言（23 处之类）是 smoke.py 的活。
+        missing = sorted(EXPECTED_ROUTES - set(table))
+        results: list[str] = []
+        route_ok = not missing
+        for (method, path), _handler in sorted(table.items()):
+            if (method, path) == ("GET", "/api/health"):
+                continue  # 通用探针，检查项 6 已覆盖
+            data = b"{}" if method in ("POST", "PUT", "PATCH", "DELETE") else None
+            st_r, _, _ = http_request(
+                f"{base}{path}", method=method, data=data,
+                headers={"Content-Type": "application/json"} if data else None,
+            )
+            results.append(f"{method} {path}={st_r}")
+            if st_r is None or st_r == 404:
+                route_ok = False
+        detail = "；".join(results)
+        if missing:
+            detail = "🔴 缺失：" + "、".join(f"{m} {p}" for m, p in missing) + "；" + detail
+        check(
+            "业务路由可达（期望清单齐全 + 逐路由真实请求非 404）",
+            route_ok,
+            detail,
+        )
     finally:
         server.close()
 
@@ -329,7 +396,7 @@ def _term_start(db_path: str) -> str | None:
 
 
 def _summary() -> int:
-    failed = [c for c in CHECKS if not c[0]]
+    failed = [c for c in CHECKS if not c[1]]  # c = (name, ok, detail)：红项判 ok 位
     print("-" * 62)
     if failed:
         print(f"体检结果：{len(CHECKS) - len(failed)}/{len(CHECKS)} 项通过，🔴 {len(failed)} 项未过：")
