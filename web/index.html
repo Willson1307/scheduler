@@ -180,6 +180,10 @@
     background: #f2f4f7; color: var(--c-text-dim);
     font-weight: 600; width: 62px;
   }
+  .grid td.occ {
+    background: var(--c-primary-l);
+    color: var(--c-primary);
+  }
   .grid td.hit {
     background: var(--c-danger-l);
     border-color: var(--c-danger-b);
@@ -351,8 +355,9 @@
     <div id="weekErr" class="banner error" role="alert" hidden></div>
     <div id="weekBox"></div>
     <p class="note">
-      格子内容来自后端下发的<code>readable</code>（可读节次），<b>前端不解码槽位掩码</b>；
-      下方「每日占用」按掩码原样透传显示（<code>0x…</code>），不做位运算、不做字符串比较。
+      占用格来自 <code>/api/schedules</code> 的 <code>grid</code>：前端对后端已归一化的单日掩码
+      （第 N 节 → bit N）做受控反解；红色冲突格由 <code>/api/conflicts</code> 的
+      <code>readable</code> 定位、叠加在占用格上。下方「每日占用」按掩码原样透传显示。
     </p>
   </section>
 
@@ -376,12 +381,12 @@
   </section>
 
   <footer>
-    本地运行 · 断网可用 · 零第三方依赖 · 前端不做位运算、动态文本一律 textContent
+    本地运行 · 断网可用 · 零第三方依赖 · 动态文本一律 textContent
   </footer>
 </div>
 
 <!-- 版本号与后端 config.ASSET_VERSION 对齐；相对路径，无外链。
      F3b 改了 app.js → 递增此版本号强制浏览器拿新文件（配合 no-cache + ETag）。 -->
-<script src="app.js?v=20261011"></script>
+<script src="app.js?v=20261012"></script>
 </body>
 </html>
