@@ -22,8 +22,34 @@ import re
 import sqlite3
 from datetime import date, timedelta
 
+from scheduler.db import init_db
 from scheduler.occupancy import build_occupancy, busy_mask
 from scheduler.slots import SlotConfig, decode_mask, load_slot_config
+
+
+# ---------------------------------------------------------------------------
+# 建表（幂等）
+# ---------------------------------------------------------------------------
+
+
+def ensure_demands(conn: sqlite3.Connection) -> None:
+    """确保 demands 表存在（幂等）。
+
+    🔴 与 telemetry.ensure_event_log 同款问题（2026-10-11 PR#5 审查实测发现）：
+    ensure_database 只在**库文件不存在**时 seed，已存在的 data/*.db（trial.db /
+    demo.db）**不会补进 schema.sql 新增的表**。缺表时 POST /api/demands 会
+    直接 500（sqlite3.OperationalError: no such table: demands），
+    而 /api/health 仍报200 → 典型的假绿灯。
+
+    照 ensure_event_log 范式：查 sqlite_master，缺失则 init_db。
+    **schema.sql 是 demands 的唯一 DDL 来源**，杜绝表结构在两处各写一遍的漂移。
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'demands'"
+    ).fetchone()
+    if row is None:
+        init_db(conn)
+
 
 # ---------------------------------------------------------------------------
 # 解析规则（本地 · 纯规则，可扩展）

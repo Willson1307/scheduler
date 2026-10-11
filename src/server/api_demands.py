@@ -49,6 +49,11 @@ def demand(method, path, query, body, headers, context=None):
     cfg = config.get_current_config()
     conn = config.open_db()
     try:
+        # 🔴 旧库兜底：已存在的 data/*.db 不会自动补 demands 表
+        # （ensure_database 只在库文件不存在时 seed）→ 缺表时本接口 500。
+        # 与 telemetry.ensure_event_log 同一范式，见 b5_kernels.ensure_demands。
+        B5.ensure_demands(conn)
+
         # 🔴 跨组织越权出口：group 不在 authorized_groups → 403（B3/B4 同口径）
         effective_group, org_id = B3.resolve_authorized_org(conn, context["user_id"], group)
 
