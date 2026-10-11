@@ -9,11 +9,14 @@
  *    现场必须断网能跑（赛事章程硬要求）。任何外链在断网时都会崩，
  *    所以只用原生 HTML/CSS/JS + 相对路径，零构建、零第三方依赖。
  *
- * 2)「为什么前端不解析槽位掩码？」
- *    掩码的位序由后端 slots.py 单点定义。本项目出过一次静默 bug：
- *    位序用错导致页面全部错位却不报错。所以前端**只透传展示**后端给的
- *    readable（可读节次）与 slots 十六进制串，绝不做 &、>>、parseInt(...,16)
- *    或字符串比较。要可读的节次，请后端在 readable 里给（契约 §5 已给全）。
+ * 2)「前端会不会又踩掩码位序的坑？」（F7 起，见 dayMaskPeriods）
+ *    不会。历史 bug 的根因是「周位序 vs 单日掩码」两套位序混用、整页错一位
+ *    且不报错。而 /api/schedules 的 grid 值**已是后端归一化后的单日 1-based
+ *    掩码**（period N → bit N；后端 api_schedules 已执行
+ *    day_mask_hex(m2.day_slots_mask(decode_mask(mask)))）。前端只在唯一一个
+ *    受控辅助函数 dayMaskPeriods() 里做 `v & (1 << p)` 反解节次，**绝不**碰
+ *    周位序、不做字符串比较、不自己拼 hex。要课程名/可读节次仍由后端在
+ *    readable 里给（契约 §5），本文件不另行解码。
  *
  * 3)「23 这个数字写在哪？」
  *    哪里都不写。count / raw_count / remaining_before / remaining_after
@@ -576,10 +579,13 @@ function showBanner(node, msg) {
  * 5. 渲染：周视图
  * -----------------------------------------------------------------------------
  * 数据来源与边界（重要，答辩会问）：
- *   · 表格尺寸← days.length ×节次数（不写死 5 / 10）
- *   · 格子里的课程名/班级名 ← /api/conflicts 的 readable + a/b 的title/object_name
- *     （后端已经替我们解好了可读节次，前端因此完全不需要碰掩码）
- *   · 每日占用 ← /api/schedules 的 grid["<object_id>|<date>"]，十六进制原样透传
+ *   · 表格尺寸 ← days.length × 节次数（不写死 5 / 10）
+ *   · 占用格（主线）← /api/schedules 的 grid["<object_id>|<date>"]，经
+ *     dayMaskPeriods() 反解单日掩码（bit N = 第 N 节）→ 画进格子；
+ *     格子文字 = 查看对象名（/api/schedules 不返回课程名，契约 §4）
+ *   · 冲突格（叠加层）← /api/conflicts 的 readable 定位，只在已有占用格上标红，
+ *     不决定格子是否存在
+ *   · 「每日占用」芯片 ← grid 的十六进制串原样透传（renderMasks，不反解）
  *
  * 🔴 关于节次数：契约未给节次列表字段，AGENTS §1b 又要求「每天几节」属规则数据化。
  *    这里的处理是——若响应里带了 periods 数组就按它的 .length 渲染，
@@ -587,6 +593,25 @@ function showBanner(node, msg) {
  *    换成 12 节的作息库不需要改这里，后端把 periods 给我即可。
  * ========================================================================== */
 const DEMO_PERIODS = 10;
+
+/**
+ * 把 grid 里的单日掩码 hex 反解成「哪些节被占用」。
+ * 🔴 F7 起前端唯一的掩码解码点：/api/schedules 的 grid 值已是后端归一化后的
+ *    「单日 1-based 掩码」——第 N 节 → bit N（1<<N），即 0x2=第1节、0x6=第1+2节。
+ *    这是 m2.day_slots_mask()（后端做 `1 << period`）的逆运算。
+ *    用 0-based（`1 << (p-1)`）或直接 format(mask,'x') 会「整页错一位且不报错」
+ *    （AGENTS §10.0 第 2 处静默失效）。
+ * @param hex  形如 "0x000006" 的十六进制串（宽容：缺失/非法 → 空结果，不抛错）
+ * @param limit 渲染的节次数（nPeriods，可能来自 periods.length，不写死 10）
+ */
+function dayMaskPeriods(hex, limit) {
+  const out = [];
+  if (typeof hex !== 'string' || !hex) return out;
+  let v = parseInt(hex.replace(/^0x/i, ''), 16);
+  if (!isFinite(v)) v = 0;
+  for (let p = 1; p <= limit; p++) if (v & (1 << p)) out.push(p);
+  return out;
+}
 
 function renderWeek(schedules, conflicts) {
   const box = $('weekBox');
@@ -619,7 +644,21 @@ function renderWeek(schedules, conflicts) {
   thead.appendChild(htr);
   table.appendChild(thead);
 
-  // 预先把冲突落格：key = "dayIndex|period"
+  // ---- 主线：以 schedules.grid 为准，反解出「查看对象」每天的占用节次 ----
+  // 🔴 格子是否存在只由 grid 决定；conflicts 只做叠加，不得决定格子是否存在。
+  const grid = (schedules && typeof schedules.grid === 'object' && schedules.grid) ? schedules.grid : {};
+  const objId = state.objectId;
+  const objName = objectName(objId);
+  const occ = new Map();   // key = "dayIndex|period" → true（该格有课/活动）
+  days.forEach(function (d, di) {
+    const hex = grid[objId + '|' + d];
+    if (typeof hex !== 'string' || !hex) return;
+    dayMaskPeriods(hex, nPeriods).forEach(function (p) {
+      occ.set(di + '|' + p, true);
+    });
+  });
+
+  // ---- 叠加层：冲突只按 (日期, 节次) 定位，供下面已占用的格子标红 ----
   const hits = new Map();
   arr(conflicts, 'items').forEach(function (it) {
     const when = conflictPlacement(it, days, nPeriods);
@@ -634,19 +673,32 @@ function renderWeek(schedules, conflicts) {
     });
   });
 
+  // ---- 空态兜底：该对象本周无任何占用 → 明确文案，不留白 ----
+  if (!occ.size) {
+    box.appendChild(el('div', {
+      cls: 'empty',
+      text: (objId ? '本周暂无排课（' + (objName || objId) + '）' : '本周暂无排课（未选择查看对象）') + '。',
+    }));
+    box.appendChild(renderMasks(schedules, days));
+    return;
+  }
+
   const tbody = el('tbody');
   for (let p = 1; p <= nPeriods; p++) {
     const tr = el('tr');
     tr.appendChild(el('th', { text: '第' + p + '节' }));
     for (let di = 0; di < days.length; di++) {
       const td = el('td');
-      const hit = hits.get(di + '|' + p);
+      const k = di + '|' + p;
+      if (!occ.has(k)) { tr.appendChild(td); continue; }
+      const hit = hits.get(k);
+      td.className = hit ? 'occ hit' : 'occ';
+      td.appendChild(el('span', { cls: 'who', text: objName || '（占用）' }));
       if (hit) {
-        td.className = 'hit';
         // 同一格可能撞多条，去重后逐条列出（.length 驱动，不写死条数）
         const seen = [];
         hit.texts.forEach(function (t) { if (seen.indexOf(t) < 0) seen.push(t); });
-        seen.forEach(function (t) { td.appendChild(el('span', { cls: 'who', text: t })); });
+        seen.forEach(function (t) { td.appendChild(el('span', { cls: 'vs', text: t })); });
       }
       tr.appendChild(td);
     }
