@@ -103,6 +103,16 @@ def _build_demo_org(conn, name="试用学校"):
     return org_id
 
 
+def _build_admin_only_org(conn, name="试用学校管理员"):
+    """建管理员独立组织（login 仅 trial_admin，无任何 trial_tNN）——照 build_trial_org --per-teacher 的第 13 组织。"""
+    org_id, root = og.create_organization(conn, name)
+    admin_obj = og.create_object(conn, org_id, "user", "示例管理员")
+    og.add_edge(conn, root, admin_obj)
+    og.create_user(conn, admin_obj, "trial_admin", "trial123", role="admin")
+    conn.commit()
+    return org_id
+
+
 def _insert_raw(conn, ts, trial_code, session_id, event, payload, org_id, org_kind):
     """直插一条带指定 ts 的事件（供确定性聚合测试）。"""
     conn.execute(
@@ -286,6 +296,54 @@ class TelemetryUnitTest(unittest.TestCase):
             demo_org = _build_demo_org(conn)
             self.assertEqual(telemetry.org_kind_of(conn, trial_org), "trial")
             self.assertEqual(telemetry.org_kind_of(conn, demo_org), "demo")
+        finally:
+            conn.close()
+
+        # 🔴 核心回归：管理员独立组织（仅 trial_admin，无 trial_tNN）不得判为 trial。
+        # 单独库避免与 _build_trial_org 里的 trial_admin 撞 login 唯一约束。
+        conn2 = self._fresh()
+        try:
+            admin_org = _build_admin_only_org(conn2)
+            self.assertEqual(telemetry.org_kind_of(conn2, admin_org), "demo")
+        finally:
+            conn2.close()
+
+    def test_payload_whitelist_drops_unknown_fields(self):
+        conn = self._fresh()
+        try:
+            org_id = _build_trial_org(conn)
+            # 直调 write_event（不走 HTTP）：证明白名单在核心里，不在适配层
+            telemetry.write_event(conn, org_id=org_id, trial_code="T01",
+                                  session_id="whitelist_s1", event="survey",
+                                  payload={"score": 4, "name": "张三", "class": "示例1班"},
+                                  org_kind="trial")
+            row = conn.execute(
+                "SELECT payload FROM event_log WHERE session_id = 'whitelist_s1'"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(json.loads(row["payload"]), {"score": 4})
+        finally:
+            conn.close()
+
+    def test_payload_score_out_of_range_dropped(self):
+        conn = self._fresh()
+        try:
+            org_id = _build_trial_org(conn)
+            # 合法边界 1 / 5 保留，越界与错误类型一律丢弃（不钳制）
+            for i, (raw, keep) in enumerate((({"score": 1}, True), ({"score": 5}, True),
+                                             ({"score": 0}, False), ({"score": 6}, False),
+                                             ({"score": 99}, False), ({"score": "5"}, False),
+                                             ({"score": True}, False), ({"score": None}, False),
+                                             ({"score": 3.5}, False))):
+                sid = f"score_{i}"
+                telemetry.write_event(conn, org_id=org_id, trial_code="T01",
+                                      session_id=sid, event="survey",
+                                      payload=raw, org_kind="trial")
+                row = conn.execute(
+                    "SELECT payload FROM event_log WHERE session_id = ?", (sid,)
+                ).fetchone()
+                expect = raw if keep else {}
+                self.assertEqual(json.loads(row["payload"]), expect, f"{sid} 过滤结果不符")
         finally:
             conn.close()
 
