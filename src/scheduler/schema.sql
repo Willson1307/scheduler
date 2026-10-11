@@ -232,3 +232,20 @@ CREATE TABLE IF NOT EXISTS event_log (
 );
 CREATE INDEX IF NOT EXISTS idx_event_log_org ON event_log(org_id, org_kind);
 CREATE INDEX IF NOT EXISTS idx_event_log_session ON event_log(session_id);
+
+-- ---------------------------------------------------------------------------
+-- S17 需求登记表（docs/07 §7：前端只传原话、后端解析、原话入库）
+-- ---------------------------------------------------------------------------
+-- 🔴 raw_text 原样存储（契约 §7.3）：解析错了可追溯、可人工纠正。
+-- parsed 存解析结果 JSON（结构化，仅供追溯/人工纠正，不替代 raw_text）。
+CREATE TABLE IF NOT EXISTS demands (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    group_id    TEXT REFERENCES objects(id) ON DELETE SET NULL,
+    user_id     TEXT REFERENCES users(id) ON DELETE SET NULL,
+    raw_text    TEXT NOT NULL,             -- 用户原话，原样保留
+    hard        INTEGER NOT NULL DEFAULT 0, -- 1=硬需求（必须满足） 0=软需求（尽量安排）
+    parsed      TEXT NOT NULL DEFAULT '{}', -- 解析结果 JSON 字符串
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_demands_org ON demands(org_id, created_at);
