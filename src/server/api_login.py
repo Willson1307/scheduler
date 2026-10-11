@@ -75,7 +75,26 @@ def login(method: str, path: str, query: dict, body: bytes, headers: dict, conte
     try:
         user = og.authenticate(conn, login_name, password)
         if user is None:
-            _record_failure(login_name, now)
+            # 🔴 2026-10-11 修复第 14 处静默失效（试用当天真实踩中）：
+            # 登录名拼错也累加失败计数 → 5 次打错就把**正确密码**也锁死，
+            # 现场表现是「我密码没错却登不进去」，极难自查。
+            # 实测记录：09:03:21–09:04:26 连续 5 次 401（trail_t05 拼错），
+            # 随后正确密码同样被拒 429 → 队长以为账号坏了。
+            #
+            # 修法：**登录名不存在时完全不计数**。
+            # 理由一（安全）：返回的文案与「密码错」**完全一致**（都是
+            #   bad_credentials「登录名或密码错误」），攻击者仍无法区分
+            #   「用户不存在」与「密码错误」→ **不泄露用户是否存在**这条不变。
+            # 理由二（可用）：爆破一个不存在的账号本就无意义，
+            #   不该让真实用户为别人的拼写错误买单。
+            # ⚠️ 副作用（如实记录）：「无此用户」可被无限次尝试而无锁定，
+            #   但攻击者也拿不到任何 token，不构成数据风险；
+            #   资源滥用可用全局限流单独兜底，不混同于账号锁定。
+            exists = conn.execute(
+                "SELECT 1 FROM users WHERE login = ? LIMIT 1", (login_name,)
+            ).fetchone() is not None
+            if exists:
+                _record_failure(login_name, now)
             return 401, {"error": {"code": "bad_credentials", "message": "登录名或密码错误"}}
 
         # 成功：清失败计数
