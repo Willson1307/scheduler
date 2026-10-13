@@ -24,6 +24,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
+from .db import init_db
 from .slots import SlotConfig, bit, hex_to_mask, load_slot_config, popcount
 
 
@@ -106,6 +107,43 @@ def week_parity_of(term: Term, d: date) -> int:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class DayExceptions:
+    """日期级例外的统一视图（load_exceptions 的返回值，P0-2 起）。
+
+    两类语义，分属两张表：
+      holidays = 放假（calendar_exceptions, kind='holiday'）：该日停课；
+      as_of    = 调休（schedule_exceptions, mode='as_of'）：该日按 as_of_dow
+                 周几的课表上课，键为 ISO 日期、值 1..7（与
+                 period_slots.day_of_week 同口径，省一次转换）。
+    """
+
+    holidays: set[str] = field(default_factory=set)
+    as_of: dict[str, int] = field(default_factory=dict)
+
+    def is_holiday(self, iso: str) -> bool:
+        return iso in self.holidays
+
+    @classmethod
+    def coerce(
+        cls, exceptions: "DayExceptions | dict[str, str] | None"
+    ) -> "DayExceptions":
+        """兼容三种入参：本类 / 旧格式 {ISO: kind} 字典 / None。
+
+        旧字典口径与 P0-2 之前的 expand_periodic 完全一致：
+        只有 'holiday' 生效，'makeup' 等其他值一律惰性（等于无例外、不报错）。
+        """
+        if exceptions is None:
+            return cls()
+        if isinstance(exceptions, cls):
+            return exceptions
+        out = cls()
+        for iso, kind in exceptions.items():
+            if kind == "holiday":
+                out.holidays.add(iso)
+        return out
+
+
 def expand_periodic(
     week_parity: int,
     slot_bitmap: int,
@@ -115,19 +153,29 @@ def expand_periodic(
     terms: list[Term],
     date_from: date,
     date_to: date,
-    exceptions: dict[str, str] | None = None,
+    exceptions: "DayExceptions | dict[str, str] | None" = None,
 ) -> dict[date, int]:
-    """周期日程 → {日期: 当天掩码}。"""
-    exceptions = exceptions or {}
+    """周期日程 → {日期: 当天掩码}。
+
+    exceptions 接受 load_exceptions() 返回的 DayExceptions（放假 + 调休统一
+    视图），也兼容旧格式 {ISO: kind} 字典。调休日（mode='as_of'）改按
+    as_of_dow 周几的槽位展开——位号公式不变，只是换了"查哪一天的课表"。
+    """
+    exc = DayExceptions.coerce(exceptions)
     vf, vt = _parse_date(valid_from), _parse_date(valid_to)
     out: dict[date, int] = {}
     d = date_from
     while d <= date_to:
-        if vf <= d <= vt and exceptions.get(d.isoformat()) != "holiday":
+        iso = d.isoformat()
+        if vf <= d <= vt and not exc.is_holiday(iso):
             t = pick_term(terms, d)
             if t is not None:
                 if week_parity == 0 or week_parity == week_parity_of(t, d):
-                    dow = d.isoweekday()
+                    # P0-2：调休日按 as_of_dow 的课表上（如周六调休按周一）；
+                    # 非调休日照旧用自然周几。位号公式（bit_index）不动。
+                    dow = exc.as_of.get(iso)
+                    if dow is None:
+                        dow = d.isoweekday()
                     day_mask = slot_bitmap & cfg.day_mask(dow)
                     if day_mask:
                         out[d] = day_mask
@@ -190,13 +238,66 @@ class Conflict:
         return decode_mask(self.mask)
 
 
-def load_exceptions(conn: sqlite3.Connection, org_id: str) -> dict[str, str]:
-    return {
-        r["date"]: r["kind"]
-        for r in conn.execute(
-            "SELECT date, kind FROM calendar_exceptions WHERE org_id = ?", (org_id,)
-        ).fetchall()
-    }
+def ensure_schedule_exceptions(conn: sqlite3.Connection) -> None:
+    """确保 schedule_exceptions 表存在（幂等，P0-2）。
+
+    已存在的 data/*.db 不会在启动时重建表（ensure_database 只在库缺失时
+    seed），故读前调用。用 sqlite_master 判断，缺失则跑 init_db——
+    schema.sql 是本表的唯一 DDL 来源，杜绝「表结构在 schema.sql 与代码里
+    各写一遍」的漂移。（范式：telemetry.ensure_event_log /
+    b5_kernels.ensure_demands；本项目第 7 处静默失效正是缺这一步。）
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schedule_exceptions'"
+    ).fetchone()
+    if row is None:
+        init_db(conn)
+
+
+def load_exceptions(conn: sqlite3.Connection, org_id: str) -> DayExceptions:
+    """同时读两张例外表（P0-2，队长 2026-10-12 拍板）：
+
+    - calendar_exceptions：只服务 kind='holiday'（「放假」是日历事实，老逻辑
+      保留不动）。旧表里的 makeup 行不再有任何效果——修前它本来也只是
+      惰性（周六照旧查周六槽位 → 掩码 0），调休一律改走新表。
+    - schedule_exceptions：本卡只消费 scope='day' 且 mode='as_of' 的行；
+      其他 mode（cancel/move/special）与 scope='schedule' 留给 B9，本卡忽略。
+
+    🔴 队长定死的语义：mode='as_of' 但 as_of_dow 为 NULL / 越界 / 同日多条
+    dow 互相矛盾 → 抛 ValueError，绝不静默跳过（P0-3 教训：假阴性——
+    系统说没冲突、实际有——直接毁掉本系统的全部价值主张）。
+    """
+    ensure_schedule_exceptions(conn)
+    exc = DayExceptions()
+    for r in conn.execute(
+        "SELECT date, kind FROM calendar_exceptions WHERE org_id = ?", (org_id,)
+    ).fetchall():
+        if r["kind"] == "holiday":
+            exc.holidays.add(r["date"])
+    for r in conn.execute(
+        "SELECT id, date, as_of_dow FROM schedule_exceptions"
+        " WHERE org_id = ? AND scope = 'day' AND mode = 'as_of'",
+        (org_id,),
+    ).fetchall():
+        if r["as_of_dow"] is None:
+            raise ValueError(
+                f"schedule_exceptions(id={r['id']}, date={r['date']}): "
+                f"mode='as_of' 但 as_of_dow 为 NULL——调休日必须指明按周几的课表上课，"
+                f"拒绝静默跳过（P0-3 语义）"
+            )
+        if not 1 <= r["as_of_dow"] <= 7:
+            raise ValueError(
+                f"schedule_exceptions(id={r['id']}, date={r['date']}): "
+                f"as_of_dow 必须在 1..7，实际为 {r['as_of_dow']}"
+            )
+        prev = exc.as_of.get(r["date"])
+        if prev is not None and prev != r["as_of_dow"]:
+            raise ValueError(
+                f"schedule_exceptions(date={r['date']}): 存在多条 as_of 且 dow 互相矛盾"
+                f"（{prev} vs {r['as_of_dow']}）——请先修正数据"
+            )
+        exc.as_of[r["date"]] = r["as_of_dow"]
+    return exc
 
 
 def build_occupancy(

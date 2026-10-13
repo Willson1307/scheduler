@@ -249,3 +249,39 @@ CREATE TABLE IF NOT EXISTS demands (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_demands_org ON demands(org_id, created_at);
+
+-- ---------------------------------------------------------------------------
+-- P0-2 调休 / 临时微调例外表（docs/12 §2.4 统一设计；队长 2026-10-12 拍板选 B）
+--
+-- 与 calendar_exceptions 的分工（两表语义不同，不是替代关系）：
+--   「放假」是日历事实（该日全校停课）→ 老表，只服务 kind='holiday'；
+--   「调课」是临时调整（该日改按别的课表上）→ 本表。
+--
+-- 允许一天多行（scope='schedule' 时单条日程 × 单日可有多条例外），
+-- 故不设 UNIQUE(org_id, date)——这是与 docs/12 原稿唯一的结构差异（P0-2 卡面要求）。
+--
+-- mode 语义（P0-2 仅实现 as_of；cancel/move/special 留给 B9）：
+--   as_of   = 调休补课：该日按 as_of_dow（1..7，与 period_slots.day_of_week 同口径）
+--             的课表展开。🔴 as_of_dow 与 mode='as_of' 必须成对出现，
+--             应用层（occupancy.load_exceptions）对 NULL 抛错、不静默。
+--   cancel  = 临时取消（B9）：该日不展开 → 槽位释放
+--   move    = 临时改点（B9）：该日改用 new_mask（十六进制）
+--   special = 换作息（二期）：该日用 set_id 这套作息
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS schedule_exceptions (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    scope       TEXT NOT NULL CHECK (scope IN ('day', 'schedule')),
+    -- day      : 整天级（调休补课）→ 对应 P0-2
+    -- schedule : 单条周期日程 × 单日（临时取消/改点）→ 对应 B9
+    target_id   TEXT,              -- scope='schedule' 时为 schedule_id；scope='day' 时 NULL
+    date        TEXT NOT NULL,     -- 生效日期（ISO 'YYYY-MM-DD'）
+    mode        TEXT NOT NULL CHECK (mode IN ('cancel', 'move', 'as_of', 'special')),
+    as_of_dow   INTEGER CHECK (as_of_dow IS NULL OR as_of_dow BETWEEN 1 AND 7),
+    new_mask    TEXT,              -- mode='move'：该日改用这个掩码（十六进制）
+    set_id      TEXT,              -- mode='special'：这天用哪套作息
+    note        TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sched_exc_lookup
+    ON schedule_exceptions(org_id, date, scope);
