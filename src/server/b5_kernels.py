@@ -31,24 +31,60 @@ from scheduler.slots import SlotConfig, decode_mask, load_slot_config
 # 建表（幂等）
 # ---------------------------------------------------------------------------
 
+#: 调整幅度档位词表（S18）。词汇与 /api/resolve 的 mode 同源（docs/07 §6），
+#: 默认 minimal（docs/19 §224 泄压阀：先做默认档起步，不做全套档位）。
+DEMAND_LEVELS = ("minimal", "balanced", "optimal")
+
+#: 缺省档位：请求不传 level 时的取值，也是旧数据（无档位行）读出的值。
+DEFAULT_DEMAND_LEVEL = "minimal"
+
+#: S18 档位存储：1:1 旁表（schema.sql 末尾）。🔴 为什么不是
+#: ALTER demands ADD COLUMN level——ALTER 非幂等，而 init_db 契约是
+#: 「可重复调用」，seeds.seed_demo 内部会二次 init_db，放 ALTER 会让既有
+#: 「init_db + seed_demo」调用链全部 duplicate column name（2026-10-13 实测
+#: 5 个既有测试 ERROR）。旁表 CREATE IF NOT EXISTS 幂等，新库旧库同一套 DDL。
+_LEVEL_TABLES = ("demands", "demand_levels")
+
 
 def ensure_demands(conn: sqlite3.Connection) -> None:
-    """确保 demands 表存在（幂等）。
+    """确保 demands 表与 demand_levels 档位表都存在（幂等）。
 
     🔴 与 telemetry.ensure_event_log 同款问题（2026-10-11 PR#5 审查实测发现）：
     ensure_database 只在**库文件不存在**时 seed，已存在的 data/*.db（trial.db /
     demo.db）**不会补进 schema.sql 新增的表**。缺表时 POST /api/demands 会
-    直接 500（sqlite3.OperationalError: no such table: demands），
-    而 /api/health 仍报200 → 典型的假绿灯。
+    直接 500（sqlite3.OperationalError: no such table），而 /api/health 仍报
+    200 → 典型的假绿灯。
 
-    照 ensure_event_log 范式：查 sqlite_master，缺失则 init_db。
-    **schema.sql 是 demands 的唯一 DDL 来源**，杜绝表结构在两处各写一遍的漂移。
+    S18 新增 demand_levels 旁表后加深一层：demands 表在（S17 建的旧库）、
+    **demand_levels 不在** → 只查 demands 会误判「已就绪」，写档位行时报
+    no such table: demand_levels（同为静默失效家族）。故两张表都查，
+    缺任一则 init_db（schema.sql 全量 IF NOT EXISTS，幂等安全）。
+
+    **schema.sql 是这两张表的唯一 DDL 来源**，杜绝表结构在两处各写一遍的漂移。
+    """
+    missing = [
+        name for name in _LEVEL_TABLES
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone() is None
+    ]
+    if missing:
+        init_db(conn)
+
+
+def read_level(conn: sqlite3.Connection, demand_id: str) -> str:
+    """读某条需求的调整幅度档位；旧数据（无旁表行）→ 默认 minimal。
+
+    🔴 旧库升级后，S18 之前登记的 demands 没有 demand_levels 行——
+    COALESCE 兜底为 minimal（docs/19 §224：默认档行为与无此字段一致），
+    绝不返回 None 让调用方各自猜。
     """
     row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'demands'"
+        "SELECT COALESCE(dl.level, ?) AS level FROM demands d "
+        "LEFT JOIN demand_levels dl ON dl.demand_id = d.id WHERE d.id = ?",
+        (DEFAULT_DEMAND_LEVEL, demand_id),
     ).fetchone()
-    if row is None:
-        init_db(conn)
+    return row["level"] if row else DEFAULT_DEMAND_LEVEL
 
 
 # ---------------------------------------------------------------------------

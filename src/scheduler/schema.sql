@@ -249,3 +249,32 @@ CREATE TABLE IF NOT EXISTS demands (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_demands_org ON demands(org_id, created_at);
+
+-- ---------------------------------------------------------------------------
+-- S18 需求「调整幅度」档位（docs/19 §224 泄压阀：默认 minimal 起步，不做全套）
+-- ---------------------------------------------------------------------------
+-- 词汇与 /api/resolve 的 mode 同源（docs/07 §6）：
+--   minimal  = 默认，行为与没有此字段时完全一致
+--   balanced = 中等幅度
+--   optimal  = 最大幅度
+--
+-- 🔴 为什么是旁表而不是 ALTER demands ADD COLUMN level（2026-10-13 实测结论）：
+-- ALTER 非幂等，而 init_db 的契约是「可重复调用」（db.py docstring：全部
+-- IF NOT EXISTS）——seeds.seed_demo 内部会二次 init_db，schema.sql 里放
+-- ALTER 会让所有「init_db + seed_demo」调用链报
+-- sqlite3.OperationalError: duplicate column name（实测 5 个既有测试 ERROR）。
+-- 旁表 CREATE IF NOT EXISTS 幂等，新库旧库同一套 DDL，无漂移。
+--
+-- 🔴 旧库兜底（第 7 处静默失效防线）：ensure_database 只在库文件缺失时
+-- seed，已存在的 data/*.db（trial.db / demo.db）不会补新表 →
+-- 由 b5_kernels.ensure_demands 查 sqlite_master，缺则 init_db 补齐。
+--
+-- 读法（旧数据没有旁表行 → 默认 minimal，绝不静默给错值）：
+--   SELECT COALESCE(dl.level, 'minimal') FROM demands d
+--   LEFT JOIN demand_levels dl ON dl.demand_id = d.id
+CREATE TABLE IF NOT EXISTS demand_levels (
+    demand_id    TEXT PRIMARY KEY REFERENCES demands(id) ON DELETE CASCADE,
+    level        TEXT NOT NULL DEFAULT 'minimal'
+                 CHECK (level IN ('minimal', 'balanced', 'optimal')),
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
