@@ -11,6 +11,10 @@
      K.resolve_authorized_org 拦跨组织 403（group 从请求体取，缺省=所在最高组）。
   5. 数据合规（AGENTS §7）：本接口纯本地解析，不外发任何内容；将来若要接
      外部大模型，只允许发 raw_text 本身。
+  6. S18 调整幅度档位（docs/19 §224）：请求可带 level（minimal/balanced/optimal，
+     与 /api/resolve 的 mode 同源），缺省 minimal、行为与改动前完全一致；
+     非法值 400，不静默兜底。词表见 b5_kernels.DEMAND_LEVELS；存储走 1:1
+     旁表 demand_levels（schema.sql 末尾，读法见 b5_kernels.read_level）。
 
 签名约定（写死，不得改）：
   handle(method, path, query, body, headers, context=None)
@@ -33,11 +37,12 @@ from scheduler.db import new_id
 def demand(method, path, query, body, headers, context=None):
     """POST /api/demands。
 
-    请求：{"raw_text":"下周三下午实验室A我要用，必须安排两节课","group":"...","hard":true}
-    成功 200：{"ok":true,"demand_id":"dem_x","parsed":{...},"raw_text":"原话",
+    请求：{"raw_text":"下周三下午实验室A我要用，必须安排两节课","group":"...","hard":true,
+           "level":"minimal"}
+    成功 200：{"ok":true,"demand_id":"dem_x","level":"minimal","parsed":{...},"raw_text":"原话",
                "conflicts":[...],"message":"..."}
     未登录 401（require_auth）；跨组织 403（resolve_authorized_org）；
-    缺 raw_text 400。
+    缺 raw_text 400；level 非法 400。
     """
     data = json_body(body)
     raw_text = data.get("raw_text")
@@ -45,6 +50,15 @@ def demand(method, path, query, body, headers, context=None):
         return 400, {"error": {"code": "bad_request", "message": "缺少 raw_text（用户原话）"}}
     hard = bool(data.get("hard", False))
     group = data.get("group")  # None 或缺省 → 所在最高组（docs/07 §1）
+
+    # S18 调整幅度档位：缺省 minimal（docs/19 §224）；非法值显式 400，不静默兜底。
+    # 与 api_resolve._parse_mode 同一风格（docs/07 §6 词汇）。
+    level = data.get("level") or B5.DEFAULT_DEMAND_LEVEL
+    if level not in B5.DEMAND_LEVELS:
+        return 400, {"error": {
+            "code": "bad_request",
+            "message": f"level 必须是 {'/'.join(B5.DEMAND_LEVELS)}，收到 {level!r}",
+        }}
 
     cfg = config.get_current_config()
     conn = config.open_db()
@@ -75,6 +89,13 @@ def demand(method, path, query, body, headers, context=None):
                 json.dumps(parsed, ensure_ascii=False),
             ),
         )
+        # S18 档位落 1:1 旁表 demand_levels（schema.sql 末尾；为什么不是
+        # ALTER demands ADD COLUMN——见 b5_kernels._LEVEL_TABLES 注释：
+        # ALTER 非幂等会炸 init_db 的二次调用）。与 demands 同事务提交。
+        conn.execute(
+            "INSERT INTO demand_levels (demand_id, level) VALUES (?, ?)",
+            (demand_id, level),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -82,6 +103,7 @@ def demand(method, path, query, body, headers, context=None):
     return {
         "ok": True,
         "demand_id": demand_id,
+        "level": level,
         "parsed": parsed,
         "raw_text": raw_text,
         "conflicts": conflicts,
