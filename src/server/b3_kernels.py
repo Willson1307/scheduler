@@ -313,14 +313,21 @@ def conflict_payload(conn: sqlite3.Connection, org_id: str, cfg) -> dict:
 
     count     = 聚合后组数（演示库 3）
     raw_count = 原始条数（演示库 23）
+
+    P0-3：存在静默跳过数据（孤儿行 / 无 term 日期 / 不落槽位活动）时，
+    额外附 warnings 数组（加字段属契约 §12.3 非破坏性变更；干净数据不附，
+    保持既有响应形态逐字不变）。
     """
     date_from, date_to = resolve_window(cfg)
     slot_cfg = load_slot_config(conn, org_id)
     report = scan(conn, org_id, date_from, date_to, cfg=slot_cfg)
     items, raw_count = aggregate_conflicts(conn, report.conflicts)
-    return {
+    payload = {
         "count": len(items),
         "raw_count": raw_count,
         "window": window_payload(cfg),
         "items": items,
     }
+    if report.issues:
+        payload["warnings"] = [iss.to_payload() for iss in report.issues]
+    return payload

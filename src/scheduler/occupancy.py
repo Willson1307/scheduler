@@ -107,6 +107,75 @@ def week_parity_of(term: Term, d: date) -> int:
 # ---------------------------------------------------------------------------
 
 
+# P0-3 统一信号：静默跳过的「可见化」出口。code 取值（本卡定死，加新码须改此表）：
+#   periodic_no_term = 周期日程的某天落在任何 term 区间外 → 该日程当天不展开（不可见）
+#   once_no_slot     = 一次性活动某天不落在任何启用槽位（如午休/周末）→ 活动当天不可见
+#   orphan_schedule  = schedules 有主表行但 schedule_periodic / schedule_once 都缺扩展行
+#                      → INNER JOIN 视图 v_schedule_full 不含它，冲突扫描完全看不见
+ISSUE_PERIODIC_NO_TERM = "periodic_no_term"
+ISSUE_ONCE_NO_SLOT = "once_no_slot"
+ISSUE_ORPHAN_SCHEDULE = "orphan_schedule"
+
+_ISSUE_TEXT = {
+    ISSUE_PERIODIC_NO_TERM: (
+        "周期日程的 {count} 天落在任何 term 区间外，该日程在这些日期不展开（课表不可见）。"
+        "若非假期场景，多半是 terms 表缺该学期行。日期：{dates}"
+    ),
+    ISSUE_ONCE_NO_SLOT: (
+        "活动时段在 {count} 天不落在任何启用槽位（如午休/未启用的节次），"
+        "活动在这些日期完全不可见。日期：{dates}"
+    ),
+    ISSUE_ORPHAN_SCHEDULE: (
+        "schedules(id={schedule_id}) 在 schedule_periodic / schedule_once 两张扩展表"
+        "都缺对应行——INNER JOIN 视图 v_schedule_full 不含它，冲突扫描完全看不见。"
+    ),
+}
+
+
+@dataclass
+class ExpansionIssue:
+    """P0-3：一处「本来会静默跳过」的展开事实记录。
+
+    设计约定（队长卡面纪律）：signal 必须可见——**计数并返回给调用方**
+    （scan 会挂到 ConflictReport.issues、/api/conflicts 会带 warnings），
+    不许只 print，也不许无声 continue。这里**不抛异常**：孤儿行/无 term/
+    午休活动都可能是真实数据，抛错会一条脏数据打死整个扫描接口
+    （试用期内不可接受）；load_exceptions 的 ValueError 语义是 P0-2 定的
+    另一条路（配置错误宁可报错），两者不冲突。
+
+    明确**不**算静默跳过、不记 issue 的设计内行为：
+      单双周不匹配（week_parity）、周末/无启用槽位的周期日程（day_mask=0）、
+      放假（calendar_exceptions holiday）——这些是业务规则，不是数据缺陷。
+    """
+
+    code: str
+    schedule_id: str = ""
+    schedule_kind: str = ""
+    schedule_title: str = ""
+    dates: list[str] = field(default_factory=list)  # 受影响日期（ISO，已排序）
+    count: int = 0  # 受影响天数（orphan 恒为 1）
+
+    @property
+    def detail(self) -> str:
+        return _ISSUE_TEXT[self.code].format(
+            count=self.count,
+            dates=", ".join(self.dates[:8]) + (" 等" if len(self.dates) > 8 else ""),
+            schedule_id=self.schedule_id,
+        )
+
+    def to_payload(self) -> dict:
+        """给 API / 前端的字典形态（/api/conflicts 的 warnings 数组元素）。"""
+        return {
+            "code": self.code,
+            "schedule_id": self.schedule_id,
+            "kind": self.schedule_kind,
+            "title": self.schedule_title,
+            "count": self.count,
+            "dates": list(self.dates),
+            "detail": self.detail,
+        }
+
+
 @dataclass
 class DayExceptions:
     """日期级例外的统一视图（load_exceptions 的返回值，P0-2 起）。
@@ -154,16 +223,23 @@ def expand_periodic(
     date_from: date,
     date_to: date,
     exceptions: "DayExceptions | dict[str, str] | None" = None,
+    *,
+    issues: list[ExpansionIssue] | None = None,
 ) -> dict[date, int]:
     """周期日程 → {日期: 当天掩码}。
 
     exceptions 接受 load_exceptions() 返回的 DayExceptions（放假 + 调休统一
     视图），也兼容旧格式 {ISO: kind} 字典。调休日（mode='as_of'）改按
     as_of_dow 周几的槽位展开——位号公式不变，只是换了"查哪一天的课表"。
+
+    P0-3：日期落在任何 term 区间外时，过去是静默 continue（课表凭空不见）。
+    现在仍不展开（掩码模型下无 term 就无法定周次），但必须记入 issues
+    返回给调用方——计数 + 上抛，不许无声。
     """
     exc = DayExceptions.coerce(exceptions)
     vf, vt = _parse_date(valid_from), _parse_date(valid_to)
     out: dict[date, int] = {}
+    no_term_days: list[str] = []
     d = date_from
     while d <= date_to:
         iso = d.isoformat()
@@ -179,17 +255,43 @@ def expand_periodic(
                     day_mask = slot_bitmap & cfg.day_mask(dow)
                     if day_mask:
                         out[d] = day_mask
+            elif issues is not None:
+                # P0-3：无 term 覆盖且不是放假——静默跳过的可见化。
+                no_term_days.append(iso)
         d += timedelta(days=1)
+    if no_term_days and issues is not None:
+        issues.append(
+            ExpansionIssue(
+                code=ISSUE_PERIODIC_NO_TERM,
+                dates=sorted(no_term_days),
+                count=len(no_term_days),
+            )
+        )
     return out
 
 
 def expand_once(
-    start_at: str, end_at: str, cfg: SlotConfig
+    start_at: str,
+    end_at: str,
+    cfg: SlotConfig,
+    *,
+    issues: list[ExpansionIssue] | None = None,
 ) -> dict[date, int]:
-    """一次性活动 → {日期: 当天掩码}。跨天会自然拆成多天。"""
+    """一次性活动 → {日期: 当天掩码}。跨天会自然拆成多天。
+
+    P0-3：活动时段不落在任何启用槽位（午休开会、周末活动、未启用节次）
+    时，过去是 mask=0 静默丢弃——活动在系统里"不存在"。现在仍无法在
+    掩码模型里表示它（没有槽位就没有位），但必须记入 issues 让上层看见。
+
+    aligned 的取舍（mask_for_range 第二返回值）：mask 非 0 但 aligned=False
+    （跨半节）时按**保守取整**保留掩码——与启用槽位重叠的课都会被算进
+    冲突，只可能多报不可能漏报，故不记 issue；只有 mask==0（完全不落
+    任何启用槽位）才是真·假阴性，必须记。
+    """
     s = datetime.strptime(start_at, "%Y-%m-%dT%H:%M")
     e = datetime.strptime(end_at, "%Y-%m-%dT%H:%M")
     out: dict[date, int] = {}
+    invisible: list[str] = []
     d = s.date()
     while d <= e.date():
         seg_start = max(s, datetime.combine(d, datetime.min.time()))
@@ -202,7 +304,18 @@ def expand_once(
             )
             if mask:
                 out[d] = mask
+            else:
+                # P0-3：mask=0 → 该日不可见。过去无声丢弃，现在记入 issues。
+                invisible.append(d.isoformat())
         d += timedelta(days=1)
+    if invisible and issues is not None:
+        issues.append(
+            ExpansionIssue(
+                code=ISSUE_ONCE_NO_SLOT,
+                dates=sorted(invisible),
+                count=len(invisible),
+            )
+        )
     return out
 
 
@@ -300,6 +413,25 @@ def load_exceptions(conn: sqlite3.Connection, org_id: str) -> DayExceptions:
     return exc
 
 
+def _orphan_schedules(
+    conn: sqlite3.Connection, org_id: str
+) -> list[sqlite3.Row]:
+    """P0-3：找出 schedules 有主表行、但两张扩展表都缺行的孤儿。
+
+    v_schedule_full 是 INNER JOIN（schema.sql:184/190，CREATE VIEW IF NOT
+    EXISTS 对已存在的 data/*.db 不会重建，改视图定义对存量库无效），
+    所以孤儿行的正确查法是读路径上一次 LEFT JOIN 反查——不改 schema，
+    存量库立即可用。
+    """
+    return conn.execute(
+        "SELECT s.id, s.kind, s.title FROM schedules s"
+        " LEFT JOIN schedule_periodic p ON p.schedule_id = s.id"
+        " LEFT JOIN schedule_once o ON o.schedule_id = s.id"
+        " WHERE s.org_id = ? AND p.schedule_id IS NULL AND o.schedule_id IS NULL",
+        (org_id,),
+    ).fetchall()
+
+
 def build_occupancy(
     conn: sqlite3.Connection,
     org_id: str,
@@ -308,21 +440,41 @@ def build_occupancy(
     *,
     cfg: SlotConfig | None = None,
     expand_groups: bool = True,
+    issues: list[ExpansionIssue] | None = None,
 ) -> list[OccupancyEntry]:
     """把某组织在给定日期范围内的所有日程展开成占用条目。
 
     参与者（target/teacher/participant）与资源（教室）都算"被占用对象"，
     因为教师和教室同样会撞课——这正是把资源纳入统一模型的意义。
+
+    P0-3：issues 传入一个 list 时，展开过程中的「静默跳过」事实会以
+    ExpansionIssue 记入（孤儿行 / 无 term 日期 / 不落槽位活动）。
+    不传（含 solver/m2 旧调用点）= 调用方主动放弃信号，行为与修前一致；
+    scan() 会传并挂到 ConflictReport.issues。
     """
     cfg = cfg or load_slot_config(conn, org_id)
     terms = load_terms(conn, org_id)
     exceptions = load_exceptions(conn, org_id)
+    out_issues: list[ExpansionIssue] = [] if issues is None else issues
+
+    # P0-3 静默点 4：孤儿行检测（先做，视图行里不可能出现孤儿，天然去重）。
+    for r in _orphan_schedules(conn, org_id):
+        out_issues.append(
+            ExpansionIssue(
+                code=ISSUE_ORPHAN_SCHEDULE,
+                schedule_id=r["id"],
+                schedule_kind=r["kind"],
+                schedule_title=r["title"],
+                count=1,
+            )
+        )
 
     entries: list[OccupancyEntry] = []
     rows = conn.execute(
         "SELECT * FROM v_schedule_full WHERE org_id = ?", (org_id,)
     ).fetchall()
     for r in rows:
+        local: list[ExpansionIssue] = []
         if r["kind"] == "periodic":
             days = expand_periodic(
                 r["week_parity"],
@@ -334,9 +486,18 @@ def build_occupancy(
                 date_from,
                 date_to,
                 exceptions,
+                issues=local,
             )
         else:
-            days = expand_once(r["start_at"], r["end_at"], cfg)
+            days = expand_once(r["start_at"], r["end_at"], cfg, issues=local)
+
+        # P0-3：expand_* 只知道日期，日程上下文在这里补齐并聚合
+        # （同一日程的同类问题合成一条 issue，防止整学期扫描刷屏）。
+        for iss in local:
+            iss.schedule_id = r["id"]
+            iss.schedule_kind = r["kind"]
+            iss.schedule_title = r["title"]
+            out_issues.append(iss)
 
         if not days:
             continue
@@ -464,6 +625,9 @@ class ConflictReport:
     date_from: date
     date_to: date
     conflicts: list[Conflict] = field(default_factory=list)
+    # P0-3：展开过程中的静默跳过信号（孤儿行 / 无 term / 不落槽位活动）。
+    # 空列表 = 无此类数据缺陷。下游 /api/conflicts 会以 warnings 字段透出。
+    issues: list[ExpansionIssue] = field(default_factory=list)
 
     @property
     def count(self) -> int:
@@ -484,9 +648,10 @@ def scan(
     *,
     cfg: SlotConfig | None = None,
 ) -> ConflictReport:
-    """一次性完成：展开占用 → 检测冲突 → 出报告。"""
-    entries = build_occupancy(conn, org_id, date_from, date_to, cfg=cfg)
-    return ConflictReport(date_from, date_to, find_conflicts(entries))
+    """一次性完成：展开占用 → 检测冲突 → 出报告（P0-3 起含静默跳过信号）。"""
+    issues: list[ExpansionIssue] = []
+    entries = build_occupancy(conn, org_id, date_from, date_to, cfg=cfg, issues=issues)
+    return ConflictReport(date_from, date_to, find_conflicts(entries), issues)
 
 
 def occupancy_map(
