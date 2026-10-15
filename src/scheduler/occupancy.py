@@ -112,9 +112,12 @@ def week_parity_of(term: Term, d: date) -> int:
 #   once_no_slot     = 一次性活动某天不落在任何启用槽位（如午休/周末）→ 活动当天不可见
 #   orphan_schedule  = schedules 有主表行但 schedule_periodic / schedule_once 都缺扩展行
 #                      → INNER JOIN 视图 v_schedule_full 不含它，冲突扫描完全看不见
+#   move_no_slot     = B9：某条周期日程被 move 改点后，新掩码与当天启用槽位无交集
+#                      → 改点在这些日期等于把课改没了（课表凭空不见）
 ISSUE_PERIODIC_NO_TERM = "periodic_no_term"
 ISSUE_ONCE_NO_SLOT = "once_no_slot"
 ISSUE_ORPHAN_SCHEDULE = "orphan_schedule"
+ISSUE_MOVE_NO_SLOT = "move_no_slot"
 
 _ISSUE_TEXT = {
     ISSUE_PERIODIC_NO_TERM: (
@@ -128,6 +131,11 @@ _ISSUE_TEXT = {
     ISSUE_ORPHAN_SCHEDULE: (
         "schedules(id={schedule_id}) 在 schedule_periodic / schedule_once 两张扩展表"
         "都缺对应行——INNER JOIN 视图 v_schedule_full 不含它，冲突扫描完全看不见。"
+    ),
+    ISSUE_MOVE_NO_SLOT: (
+        "日程 {schedule_id} 在 {count} 天被 move 改点后的新掩码与该日启用槽位无交集"
+        "（如改到午休/未启用节次），改点在这些日期等于把课改没了。"
+        "日期：{dates}"
     ),
 }
 
@@ -180,18 +188,34 @@ class ExpansionIssue:
 class DayExceptions:
     """日期级例外的统一视图（load_exceptions 的返回值，P0-2 起）。
 
-    两类语义，分属两张表：
+    四类语义，分属两张表：
       holidays = 放假（calendar_exceptions, kind='holiday'）：该日停课；
-      as_of    = 调休（schedule_exceptions, mode='as_of'）：该日按 as_of_dow
-                 周几的课表上课，键为 ISO 日期、值 1..7（与
-                 period_slots.day_of_week 同口径，省一次转换）。
+      as_of    = 调休（schedule_exceptions, scope='day', mode='as_of'）：
+                 该日按 as_of_dow 周几的课表上课，键为 ISO 日期、值 1..7
+                 （与 period_slots.day_of_week 同口径，省一次转换）；
+      cancels  = 临时取消（schedule_exceptions, scope='schedule', mode='cancel'）：
+                 键 (schedule_id, ISO)，逐日取消某条周期日程的某一天；
+      moves    = 临时改点（schedule_exceptions, scope='schedule', mode='move'）：
+                 键 (schedule_id, ISO)，值 = 新周掩码（DB 口径，与 slot_bitmap
+                 同 0-based 位序）。B9 起由 apply_schedule_exceptions 在展开
+                 后覆盖当天掩码；mode='special' 不落地（忽略不报错）。
     """
 
     holidays: set[str] = field(default_factory=set)
     as_of: dict[str, int] = field(default_factory=dict)
+    cancels: set[tuple[str, str]] = field(default_factory=set)
+    moves: dict[tuple[str, str], int] = field(default_factory=dict)
 
     def is_holiday(self, iso: str) -> bool:
         return iso in self.holidays
+
+    def is_cancelled(self, schedule_id: str, iso: str) -> bool:
+        """某条周期日程的某一天是否被临时取消（B9）。"""
+        return (schedule_id, iso) in self.cancels
+
+    def moved_mask(self, schedule_id: str, iso: str) -> int | None:
+        """某条周期日程的某一天被临时改点后的新周掩码；未改点返回 None。"""
+        return self.moves.get((schedule_id, iso))
 
     @classmethod
     def coerce(
@@ -368,13 +392,15 @@ def ensure_schedule_exceptions(conn: sqlite3.Connection) -> None:
 
 
 def load_exceptions(conn: sqlite3.Connection, org_id: str) -> DayExceptions:
-    """同时读两张例外表（P0-2，队长 2026-10-12 拍板）：
+    """同时读两张例外表（P0-2，队长 2026-10-12 拍板；B9 扩展第三类语义）：
 
     - calendar_exceptions：只服务 kind='holiday'（「放假」是日历事实，老逻辑
       保留不动）。旧表里的 makeup 行不再有任何效果——修前它本来也只是
       惰性（周六照旧查周六槽位 → 掩码 0），调休一律改走新表。
-    - schedule_exceptions：本卡只消费 scope='day' 且 mode='as_of' 的行；
-      其他 mode（cancel/move/special）与 scope='schedule' 留给 B9，本卡忽略。
+    - schedule_exceptions, scope='day' 且 mode='as_of'：调休（P0-2）。
+    - schedule_exceptions, scope='schedule' 且 mode='cancel'/'move'：B9 的
+      「某条周期日程的某一天」临时取消/改点。special 刻意忽略不报错
+      （与 test_p0_2_makeup.test_other_modes_ignored 的口径一致）。
 
     🔴 队长定死的语义：mode='as_of' 但 as_of_dow 为 NULL / 越界 / 同日多条
     dow 互相矛盾 → 抛 ValueError，绝不静默跳过（P0-3 教训：假阴性——
@@ -410,6 +436,42 @@ def load_exceptions(conn: sqlite3.Connection, org_id: str) -> DayExceptions:
                 f"（{prev} vs {r['as_of_dow']}）——请先修正数据"
             )
         exc.as_of[r["date"]] = r["as_of_dow"]
+    for r in conn.execute(
+        "SELECT id, target_id, date, mode, new_mask FROM schedule_exceptions"
+        " WHERE org_id = ? AND scope = 'schedule' AND mode IN ('cancel', 'move')",
+        (org_id,),
+    ).fetchall():
+        if r["target_id"] is None:
+            raise ValueError(
+                f"schedule_exceptions(id={r['id']}): scope='schedule' 但 target_id 为"
+                f" NULL——取消/改点必须指明是哪条日程（P0-3 语义）"
+            )
+        key = (r["target_id"], r["date"])
+        if r["mode"] == "cancel":
+            exc.cancels.add(key)
+        else:
+            if r["new_mask"] is None:
+                raise ValueError(
+                    f"schedule_exceptions(id={r['id']}): scope='schedule' 且 mode='move'"
+                    f" 但 new_mask 为 NULL——改点必须给出新的槽位掩码（P0-3 语义）"
+                )
+            # DB 存 hex 文本（与 slot_bitmap 同口径），这里转成 int 掩码；
+            # 非法 hex 会让 int() 抛 ValueError——配置错误宁可报错（P0-3）。
+            try:
+                new_mask = hex_to_mask(r["new_mask"])
+            except ValueError as exc_err:
+                raise ValueError(
+                    f"schedule_exceptions(id={r['id']}): new_mask={r['new_mask']!r} "
+                    f"不是合法十六进制——改点目标掩码无法解析（P0-3 语义）"
+                ) from exc_err
+            prev = exc.moves.get(key)
+            if prev is not None and prev != new_mask:
+                raise ValueError(
+                    f"schedule_exceptions(target_id={r['target_id']}, "
+                    f"date={r['date']}): 存在多条 move 且 new_mask 互相矛盾"
+                    f"（{prev:#x} vs {new_mask:#x}）——请先修正数据"
+                )
+            exc.moves[key] = new_mask
     return exc
 
 
@@ -430,6 +492,55 @@ def _orphan_schedules(
         " WHERE s.org_id = ? AND p.schedule_id IS NULL AND o.schedule_id IS NULL",
         (org_id,),
     ).fetchall()
+
+
+def apply_schedule_exceptions(
+    days: dict[date, int],
+    schedule_id: str,
+    exc: DayExceptions,
+    *,
+    cfg: SlotConfig | None = None,
+    issues: list[ExpansionIssue] | None = None,
+) -> dict[date, int]:
+    """B9：把 scope='schedule' 的 cancel / move 例外应用到已展开的 {日期: 掩码}。
+
+    在 build_occupancy 循环内、expand_* 之后调用（拿不到 days 就没法逐日
+    定位）。语义：
+      cancel → 该日程这一天直接消失（占用撤掉，相关冲突立即消失）；
+      move   → 该日程这一天改到新槽位（当天掩码被 new_mask 整体覆盖）。
+
+    为什么**不会误伤其他周**（Q2 的结构性保证）：例外键是
+    (schedule_id, ISO 日期)，逐日查/逐日改。同一 dow 的其他日期键不同，
+    不会被连带修改；跨 term 边界（如第 2 周取消、第 3 周照常）同样安全。
+    删掉例外行后 days 恢复 expand_* 的原始结果——完全还原。
+
+    不抛异常、不静默跳过（P0-3）：
+      - move 的新掩码与当天启用槽位无交集（传入 cfg 时检查）→ 这一天等于
+        把课改没了，冲突检测必然漏它，记 ISSUE_MOVE_NO_SLOT 信号上抛；
+      - 例外指向的 (schedule_id, ISO) 不在 days 里（那天本来就不展开，
+        如周末/假期/term 外）→ 无操作、不报错：例外比展开结果窄是合法的
+        （老师可以预先取消一节还没排的课），不构成数据缺陷。
+    """
+    if not exc.cancels and not exc.moves:
+        return days
+    out: dict[date, int] = {}
+    blind: list[str] = []
+    for d, mask in days.items():
+        iso = d.isoformat()
+        key = (schedule_id, iso)
+        if key in exc.cancels:
+            continue
+        moved = exc.moves.get(key)
+        if moved is not None:
+            mask = moved
+            if cfg is not None and not (mask & cfg.day_mask(d.isoweekday())):
+                blind.append(iso)
+        out[d] = mask
+    if blind and issues is not None:
+        issues.append(
+            ExpansionIssue(code=ISSUE_MOVE_NO_SLOT, dates=sorted(blind), count=len(blind))
+        )
+    return out
 
 
 def build_occupancy(
@@ -490,6 +601,14 @@ def build_occupancy(
             )
         else:
             days = expand_once(r["start_at"], r["end_at"], cfg, issues=local)
+
+        # B9：scope='schedule' 的 cancel/move 在展开之后逐日生效
+        # （cancel 撤掉当天占用 → 冲突立即消失；move 覆盖当天掩码）。
+        # 放在这里而不是塞进 expand_*：不改 expand_* 签名（卡面铁律），
+        # 且一次性活动同样受益（接口层仍按卡面只放行周期日程）。
+        days = apply_schedule_exceptions(
+            days, r["id"], exceptions, cfg=cfg, issues=local
+        )
 
         # P0-3：expand_* 只知道日期，日程上下文在这里补齐并聚合
         # （同一日程的同类问题合成一条 issue，防止整学期扫描刷屏）。

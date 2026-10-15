@@ -60,6 +60,13 @@ EXPECTED_ROUTES: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/api/ping"),
     ("POST", "/api/demands"),
     ("GET", "/api/telemetry"),
+    # B9（S21 临时微调）：三个方法都必须显式登记——routes.scan() 只能看见
+    # 「已注册」的路由，整个 api_*.py 没合进 main 时遍历现存表永远查不出缺失
+    # （B4 的 /api/resolve 事故）。DELETE 尤其容易漏：它和 POST 同路径，
+    # 少注册一个方法时扫描本身不报错，只有真实调用才 404/405。
+    ("POST", "/api/exceptions"),
+    ("DELETE", "/api/exceptions"),
+    ("GET", "/api/exceptions"),
 })
 
 CHECKS: list[tuple[str, bool, str]] = []  # (名称, 是否通过, 说明)

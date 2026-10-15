@@ -30,6 +30,7 @@ from datetime import date, timedelta
 
 from ..occupancy import (
     OccupancyEntry,
+    apply_schedule_exceptions,
     build_occupancy,
     find_conflicts,
     load_exceptions,
@@ -116,11 +117,21 @@ def related_objects(conn: sqlite3.Connection, schedule_id: str) -> tuple[list[st
 def schedule_masks(
     conn: sqlite3.Connection, schedule_id: str, cfg: SlotConfig, days: list[date]
 ) -> dict[date, int]:
-    """某条日程在给定每一天占用了哪些节次。"""
+    """某条日程在给定每一天占用了哪些节次。
+
+    🔴 B9：这里也必须应用 scope='schedule' 的 cancel/move 例外。
+    修前本函数直接调 expand_periodic，绕过 build_occupancy 的例外应用 →
+    老师取消某天后，消解器仍以为该日程占着原槽位，`old_mask` 非空 →
+    对一个**已经不存在的冲突**提案「把这条日程挪走」，用户看到的是
+    「改了却没消失、还让我再改一次」——正是本项目要消灭的缺陷。
+    """
     row = conn.execute("SELECT * FROM v_schedule_full WHERE id = ?", (schedule_id,)).fetchone()
     if row is None or not days:
         return {}
     lo, hi = min(days), max(days)
+    # B9：例外只加载一次，expand_*（放假/调休）与 apply_schedule_exceptions
+    # （当日取消/改点）共用同一份 DayExceptions，避免两次查库口径漂移。
+    exceptions = load_exceptions(conn, row["org_id"])
     if row["kind"] == "periodic":
         raw = expand_periodic(
             row["week_parity"],
@@ -131,10 +142,11 @@ def schedule_masks(
             load_terms(conn, row["org_id"]),
             lo,
             hi,
-            load_exceptions(conn, row["org_id"]),
+            exceptions,
         )
     else:
         raw = expand_once(row["start_at"], row["end_at"], cfg)
+    raw = apply_schedule_exceptions(raw, schedule_id, exceptions, cfg=cfg)
     return {d: m for d, m in raw.items() if d in set(days)}
 
 
