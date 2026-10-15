@@ -319,22 +319,45 @@ N = **3**（MVP）。少于 3 看不出选择，多于 3 决策瘫痪。
 
 ---
 
-## 11. POST|DELETE /api/exceptions（S21 临时微调 · 队长 2026-09-25 批准）
+## 11. POST|DELETE|GET /api/exceptions（S21 临时微调 · 队长 2026-09-25 批准；B9 2026-10-14 补 GET）
 
 | 项 | 内容 |
 |---|---|
 | POST（新增例外） | `{"schedule_id":"sch_x","date":"2026-09-23","mode":"cancel\|move","new_mask":"0x0008"}` |
 | DELETE（撤销例外） | `?id=exc_x` → 该日恢复按周期规则展开 |
-| 响应 200 | `{"ok":true,"exception_id":"exc_x","affected_dates":["2026-09-23"]}` |
-| 权限 | 需 `edit` 档；越权 → 404 |
+| GET（列出未撤销例外） | `?schedule_id=sch_x` → `{"count":n,"items":[{...}]}` |
+| 响应 200（POST） | `{"ok":true,"exception_id":"exc_x","affected_dates":["2026-09-23"],"mode":"cancel","schedule_id":"sch_x","effective":true}` |
+| 响应 200（DELETE） | `{"ok":true,"exception_id":"exc_x","affected_dates":["2026-09-23"]}` |
+| 响应 200（GET） | `{"count":2,"items":[{"id","schedule_id","title","date","mode","new_mask","readable","note","created_at"}]}` |
+| 权限 | 登录 + 组织隔离；越权 → 404 |
 
-🔴 **两条实现约束**：
+**B9 实现口径（2026-10-14，队长裁定）**：
+
+| 项 | v1.0 原文 | B9 落地 | 理由 |
+|---|---|---|---|
+| 权限档 | 「需 `edit` 档」 | 登录 + 组织隔离 | 代码里没有 `edit` 档（docs/06 四档是 view/propose/approve/own，teacher 天花板就是 propose）。真正卡「谁能批准」的是审批流（docs/06 已冻结、尚未进契约），不是本接口。 |
+| 请求字段名 | `schedule_id` | `schedule_id`（兼容 `target_id`，两者都给且不一致 → 400） | docs/12 的示例用过 `target_id`；静默选一个会让前端以为传的那个生效了。 |
+| 掩码口径 | 未写明 | 出入参 = **单日掩码**（1-based，`0x000002`=第1节）；入库 = **周掩码裸 hex**（与 `slot_bitmap` 同口径） | 与 `/api/schedules` grid 出参一致；两套位序混用会让页面整体错位且不报错（本项目最贵的坑）。 |
+| `effective` | 无此字段 | 新增（§12.3 非破坏性加字段） | 「这条例外声称影响哪一天」与「实际改变了占用」是两件事：周六/假期/单双周不匹配时写入成功但不生效，响应体如实说 `false`，不假装成功。 |
+| 重复例外 | 未写明 | 同 (日程, 日期) 已有 cancel/move → **409** 并带上已有 id | 不拦会静默失效（cancel 先命中、move 永远不生效）或让全组织 `/api/conflicts` 500（两条 move 掩码矛盾 → `load_exceptions` 抛 ValueError）。 |
+| `mode='special'` | 未开放 | 仍不开放（400） | 没有「换一套作息」的前端与规则支撑前，开放它等于开放一条没有语义的写入路径。 |
+
+🔴 **两条实现约束**（v1.0 原文，B9 已逐条落实）：
 
 1. 例外必须被 `expand_periodic()` **和** `hard_violations()` **同时读取**——
    只改一处会让"占用显示空着、排课时按有课处理"，把本项目要解决的核心缺陷重新引入。
+   B9 的落点：`build_occupancy` 在展开之后逐日应用（cancel/move），
+   `hard_violations` 经 `ctx.occupancy` 自动同步；**消解器 `m2.schedule_masks`
+   也必须应用**——否则老师取消某天后，求解器仍以为该日程占着原槽位，
+   对一个已经不存在的冲突提案「把这条日程挪走」。
 2. **DELETE 即撤销**（对应 V10）—— 微调改错了必须能回退，否则教师不敢用。
+   例外行一删，占用逐位恢复 `expand_*` 的原始结果。
 
 表结构见 `docs/12`（`schedule_exceptions`，`scope=day` 的 `as_of` 模式同时解决调休 A1）。
+`new_mask` 校验链（全部 400，绝不静默兜底）见 `src/server/b9_kernels.py` 的
+`parse_api_mask` docstring；`scope='schedule' 且 target_id 为 NULL` /
+`mode='move' 且 new_mask 为 NULL` / 多条 move 掩码矛盾 → `load_exceptions`
+抛 `ValueError`（P0-3 语义：配置错误宁可报错）。
 
 ---
 
