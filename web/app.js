@@ -71,7 +71,6 @@ const MOCK_CONFLICT_DATE = '2026-09-09';
 const MOCK_GROUPS = [
   { group_id: 'g_all',  name: '全校',      level: 'own',     member_count: 40, parent_name: null },
   { group_id: 'g_c1',   name: '高一(1)班', level: 'own',     member_count: 10, parent_name: '全校' },
-  { group_id: 'g_c2',   name: '高一(2)班', level: 'propose', member_count: 10, parent_name: '全校' },
   { group_id: 'g_c3',   name: '高一(3)班', level: 'view',    member_count: 10, parent_name: '全校' },
 ];
 
@@ -344,7 +343,9 @@ async function apiGet(pathname, params) {
   const body = await readBody(res);
   if (!res.ok) {
     if (res.status === 401) handle401(body);   // handle401 内部必 throw
-    throw new Error(extractMessage(body) || ('HTTP ' + res.status + ' ' + res.statusText));
+    const err = new Error(extractMessage(body) || ('HTTP ' + res.status + ' ' + res.statusText));
+    err.status = res.status;   // F7：审批动作要能区分 403/404/409，如实提示
+    throw err;
   }
   return body;
 }
@@ -367,7 +368,9 @@ async function apiPost(pathname, params, payload) {
   const body = await readBody(res);
   if (!res.ok) {
     if (res.status === 401) handle401(body);   // handle401 内部必 throw
-    throw new Error(extractMessage(body) || ('HTTP ' + res.status + ' ' + res.statusText));
+    const err = new Error(extractMessage(body) || ('HTTP ' + res.status + ' ' + res.statusText));
+    err.status = res.status;   // F7：审批动作要能区分 403/404/409，如实提示
+    throw err;
   }
   return body;
 }
@@ -858,6 +861,12 @@ function renderConflictItem(item, idx) {
   if (when) left.appendChild(el('span', { text: '· ' + when }));
   top.appendChild(left);
 
+  // F7（B8）：冲突旁「提议改期」入口 → 弹层选日程 + 填新起始日 + 理由 → POST /api/approvals。
+  // 🔴 入口不做权限预判（后端鉴权 + 自己批自己 403），前端只负责把请求如实交上去、把错误如实显示。
+  const proposeBtn = el('button', { text: '提议改期', attrs: { type: 'button' } });
+  proposeBtn.addEventListener('click', function () { openProposeModal(conflictTargets(item)); });
+  top.appendChild(proposeBtn);
+
   const btn = el('button', {
     cls: 'danger',
     text: '一键消解',
@@ -1181,6 +1190,9 @@ async function loadAll() {
   }
 
   $('resolveBtn').disabled = !(conflicts && readCounts(conflicts).groups > 0);
+
+  // ---- 4. 变更请求（F7/B8）：org 级列表，登录/切组/重载后都刷新 ----
+  await loadRequests();
 }
 
 async function doResolve(btn) {
@@ -1233,6 +1245,8 @@ function bindEvents() {
     loadAll();
   });
   $('reloadBtn').addEventListener('click', function () { loadAll(); });
+  // F7（B8）：变更请求列表的刷新按钮（org 级，不触发整页重载）
+  $('reqReloadBtn').addEventListener('click', function () { loadRequests(); });
   $('weekSel').addEventListener('change', function () { loadAll(); });
   $('objSel').addEventListener('change', function () {
     state.objectId = $('objSel').value;
@@ -1266,6 +1280,316 @@ function boot() {
   }
   bindEvents();
   if (USE_MOCK) loadAll();
+}
+
+/* =============================================================================
+ * 10. 审批流（F7 / B8）：提议改期 + 我的请求
+ * -----------------------------------------------------------------------------
+ * 端点形态（B8 已实测，路由精确匹配、无 path 参数）：
+ *   POST /api/approvals              提交提议
+ *   GET  /api/approvals              列出本组织请求
+ *   POST /api/approvals/approve?id=  批准
+ *   POST /api/approvals/reject?id=   拒绝（body 必须带 reason）
+ *   POST /api/approvals/withdraw?id= 撤回（仅提出人）
+ *   GET  /api/approvals/events?id=   审计轨迹（本卡不铺 UI，仅列契约）
+ *
+ * 🔴 铁律（与后端一致）：
+ *   - 禁用 innerHTML，一律 textContent；
+ *   - 不做位运算、不解掩码、不内置枚举映射表（状态文案有默认表，未知值原样显示）；
+ *   - 宽容解析：未知字段忽略、未知枚举降级、数组长度读 .length 不写死；
+ *   - 不本地硬编码 group/user：身份 = state.user.id（登录返回），组 = state.groupId；
+ *   - 404/403/409 一律如实提示（apiGet/apiPost 已把 res.status 挂到 Error.status）。
+ * ========================================================================== */
+
+/** 错误文案：能拿到 HTTP 状态码就前缀标注（如「HTTP 403：不能批准自己提出的请求」）。 */
+function httpErrText(e) {
+  const code = (e && e.status) ? ('HTTP ' + e.status + '：') : '';
+  const msg = (e && e.message) ? e.message : String(e);
+  return code + msg;
+}
+
+/* ---- 弹层（提议改期 / 拒绝共用容器） ---- */
+
+function modalOverlay() {
+  const ov = el('div', { cls: 'modal-overlay' });
+  const box = el('div', { cls: 'modal', attrs: { role: 'dialog', 'aria-modal': 'true' } });
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+  return { ov: ov, box: box };
+}
+
+function closeModal(ov) {
+  if (ov && ov.parentNode) ov.parentNode.removeChild(ov);
+}
+
+/* ---- 提议改期 ---- */
+
+/** 从冲突条目取可选目标日程（a/b 两侧，按 schedule_id 去重）。返回 [{schedule_id, title}]。 */
+function conflictTargets(item) {
+  const out = [];
+  const seen = {};
+  [item.a, item.b].forEach(function (side) {
+    if (!side || typeof side !== 'object') return;
+    const sid = str(side, 'schedule_id', '');
+    if (!sid || seen[sid]) return;
+    seen[sid] = true;
+    out.push({ schedule_id: sid, title: sideTitle(side) });
+  });
+  return out;
+}
+
+/** 弹层填「日程 + 新起始日 + 理由」，提交 POST /api/approvals。 */
+function openProposeModal(targets) {
+  const md = modalOverlay();
+  md.box.appendChild(el('h3', { text: '提议改期（走审批，批准后才落库）' }));
+
+  const fTarget = el('div', { cls: 'field' });
+  fTarget.appendChild(el('label', { text: '要改期的日程（周期日程起始日）' }));
+  const selTarget = el('select');
+  (targets || []).forEach(function (t) {
+    selTarget.appendChild(el('option', {
+      text: t.title + '（' + t.schedule_id + '）',
+      attrs: { value: t.schedule_id },
+    }));
+  });
+  if (!(targets || []).length) {
+    selTarget.appendChild(el('option', { text: '（该冲突未提供可改期的日程 id）', attrs: { value: '' } }));
+  }
+  fTarget.appendChild(selTarget);
+  md.box.appendChild(fTarget);
+
+  const fDate = el('div', { cls: 'field' });
+  fDate.appendChild(el('label', { text: '新的起始日 valid_from（YYYY-MM-DD）' }));
+  const inpDate = el('input', { attrs: { type: 'date' } });
+  fDate.appendChild(inpDate);
+  md.box.appendChild(fDate);
+
+  const fReason = el('div', { cls: 'field' });
+  fReason.appendChild(el('label', { text: '理由 reason（必填）' }));
+  const taReason = el('textarea', { attrs: { rows: '3' } });
+  fReason.appendChild(taReason);
+  md.box.appendChild(fReason);
+
+  const errBox = el('div', { cls: 'banner error', attrs: { role: 'alert' } });
+  errBox.hidden = true;
+  md.box.appendChild(errBox);
+
+  const actions = el('div', { cls: 'actions' });
+  const btnOk = el('button', { cls: 'primary', text: '提交提议', attrs: { type: 'button' } });
+  const btnCancel = el('button', { text: '取消', attrs: { type: 'button' } });
+  btnCancel.addEventListener('click', function () { closeModal(md.ov); });
+  actions.appendChild(btnOk);
+  actions.appendChild(btnCancel);
+  md.box.appendChild(actions);
+
+  btnOk.addEventListener('click', async function () {
+    const targetId = selTarget.value.trim();
+    const validFrom = inpDate.value.trim();
+    const reason = taReason.value.trim();
+    if (!targetId) { showBanner(errBox, '请选择要改期的日程。'); return; }
+    if (!validFrom) { showBanner(errBox, '请填写新的起始日。'); return; }
+    if (!reason) { showBanner(errBox, '请填写改期理由。'); return; }
+    btnOk.disabled = true;
+    try {
+      const body = await apiPost('/api/approvals', withGroup({}), {
+        scope: 'permanent',
+        op: 'update',
+        target_type: 'schedule',
+        target_id: targetId,
+        payload: { after: { valid_from: validFrom } },
+        reason: reason,
+      });
+      closeModal(md.ov);
+      showBanner($('reqMsg'),
+        '提议已提交：请求 ' + str(body, 'request_id', '') + '，状态 '
+        + str(body, 'status', 'pending') + '。课表数据【零变化】——要等批准后才落库。');
+      await loadRequests();
+    } catch (e) {
+      btnOk.disabled = false;
+      showBanner(errBox, '提交失败：' + httpErrText(e));
+    }
+  });
+
+  md.ov.addEventListener('click', function (ev) { if (ev.target === md.ov) closeModal(md.ov); });
+}
+
+/* ---- 我的请求列表 ---- */
+
+/** 请求状态 → 中文。未知值原样显示（契约 §12.2 第 2 条：不内置白名单）。 */
+const REQ_STATUS_CN = {
+  draft: '草稿', pending: '待审批', approved: '已批准', applied: '已生效',
+  rejected: '已拒绝', withdrawn: '已撤回',
+};
+function reqStatusLabel(s) {
+  return (typeof s === 'string' && REQ_STATUS_CN[s]) ? REQ_STATUS_CN[s] : (s || '未知状态');
+}
+
+function isSelfRequest(req) {
+  return !!(state.user && state.user.id && req.requester_id === state.user.id);
+}
+
+/** 按「后端状态 × 身份」决定动作按钮（返回动作名数组，终态只读）。 */
+function reqActions(req) {
+  if (req.status !== 'pending') return [];
+  if (isSelfRequest(req)) return ['withdraw'];   // 自己提的 → 只撤回
+  return ['approve', 'reject'];                   // 别人提的 → 同意/拒绝
+}
+
+function renderRequestItem(req) {
+  const li = el('li', { cls: 'req-item' });
+
+  // 顶部：状态 + 目标 + 是否我提的
+  const top = el('div', { cls: 'it-top' });
+  const left = el('div');
+  left.appendChild(el('span', { cls: 'req-status st-' + str(req, 'status', ''), text: reqStatusLabel(str(req, 'status', '')) }));
+  const target = str(req, 'target_id', '');
+  if (target) left.appendChild(el('span', { text: ' · 目标日程 ' + target }));
+  top.appendChild(left);
+  if (isSelfRequest(req)) top.appendChild(el('span', { cls: 'req-self', text: '（我提出的）' }));
+  li.appendChild(top);
+
+  // before → after（payload 宽容解析，缺字段显示 —）
+  const payload = (req && typeof req.payload === 'object' && req.payload) ? req.payload : {};
+  const before = (payload && typeof payload.before === 'object' && payload.before) ? payload.before : null;
+  const after = (payload && typeof payload.after === 'object' && payload.after) ? payload.after : null;
+  const diff = el('div', { cls: 'req-diff' });
+  diff.appendChild(el('span', {
+    text: '起始日 ' + (before ? str(before, 'valid_from', '') || '—' : '—')
+      + ' → ' + (after ? str(after, 'valid_from', '') || '—' : '—'),
+  }));
+  li.appendChild(diff);
+
+  const reason = str(req, 'reason', '');
+  if (reason) li.appendChild(el('div', { cls: 'req-reason', text: '理由：' + reason }));
+
+  const meta = [];
+  const created = str(req, 'created_at', '');
+  if (created) meta.push('提出于 ' + created);
+  const approver = str(req, 'approver_id', '');
+  if (approver) meta.push('处理人 ' + approver);
+  if (meta.length) li.appendChild(el('div', { cls: 'mt', text: meta.join(' · ') }));
+
+  // 动作按钮（按 reqActions 决定；终态不出按钮）
+  const acts = reqActions(req);
+  if (acts.length) {
+    const bar = el('div', { cls: 'req-actions' });
+    acts.forEach(function (a) {
+      let btn = null;
+      if (a === 'approve') {
+        btn = el('button', { cls: 'primary', text: '同意', attrs: { type: 'button' } });
+        btn.addEventListener('click', function () { doApprove(req, btn); });
+      } else if (a === 'reject') {
+        btn = el('button', { cls: 'danger', text: '拒绝', attrs: { type: 'button' } });
+        btn.addEventListener('click', function () { openRejectModal(req); });
+      } else if (a === 'withdraw') {
+        btn = el('button', { text: '撤回', attrs: { type: 'button' } });
+        btn.addEventListener('click', function () { doWithdraw(req, btn); });
+      }
+      if (btn) bar.appendChild(btn);
+    });
+    li.appendChild(bar);
+  }
+  return li;
+}
+
+function renderRequests(body) {
+  const box = $('reqBox');
+  const errBox = $('reqErr');
+  clear(box);
+  showBanner(errBox, null);
+
+  const items = arr(body, 'requests');
+  if (!items.length) {
+    box.appendChild(el('div', { cls: 'empty', text: '当前组织暂无变更请求。' }));
+    return;
+  }
+  const ul = el('ul', { cls: 'req-list' });
+  items.forEach(function (req) { ul.appendChild(renderRequestItem(req)); });
+  box.appendChild(ul);
+}
+
+async function loadRequests() {
+  const errBox = $('reqErr');
+  try {
+    const body = await apiGet('/api/approvals', withGroup({}));
+    renderRequests(body);
+  } catch (e) {
+    showBanner(errBox, '变更请求加载失败：' + httpErrText(e));
+    clear($('reqBox'));
+    $('reqBox').appendChild(el('div', {
+      cls: 'empty',
+      text: '🔴 变更请求未取到（这不等于「没有请求」），请检查登录状态与后端服务。',
+    }));
+  }
+}
+
+async function doApprove(req, btn) {
+  btn.disabled = true;
+  try {
+    const body = await apiPost('/api/approvals/approve', { id: req.id }, {});
+    showBanner($('reqMsg'),
+      '已批准请求 ' + req.id + '，状态 ' + str(body, 'status', 'applied')
+      + '（valid_from 已落库生效）。');
+    await loadRequests();
+    await loadAll();   // 落库后重拉周视图/冲突列表，反映真实状态
+  } catch (e) {
+    showBanner($('reqMsg'), '批准失败：' + httpErrText(e));
+    btn.disabled = false;
+  }
+}
+
+async function doWithdraw(req, btn) {
+  btn.disabled = true;
+  try {
+    const body = await apiPost('/api/approvals/withdraw', { id: req.id }, {});
+    showBanner($('reqMsg'),
+      '已撤回请求 ' + req.id + '，状态 ' + str(body, 'status', 'withdrawn') + '。');
+    await loadRequests();
+  } catch (e) {
+    showBanner($('reqMsg'), '撤回失败：' + httpErrText(e));
+    btn.disabled = false;
+  }
+}
+
+/** 拒绝弹层：body 必须带 reason，否则后端 400。 */
+function openRejectModal(req) {
+  const md = modalOverlay();
+  md.box.appendChild(el('h3', { text: '拒绝请求（必须填写理由）' }));
+
+  const fReason = el('div', { cls: 'field' });
+  fReason.appendChild(el('label', { text: '拒绝理由 reason（必填，会被写入审计日志）' }));
+  const taReason = el('textarea', { attrs: { rows: '3' } });
+  fReason.appendChild(taReason);
+  md.box.appendChild(fReason);
+
+  const errBox = el('div', { cls: 'banner error', attrs: { role: 'alert' } });
+  errBox.hidden = true;
+  md.box.appendChild(errBox);
+
+  const actions = el('div', { cls: 'actions' });
+  const btnOk = el('button', { cls: 'danger', text: '确认拒绝', attrs: { type: 'button' } });
+  const btnCancel = el('button', { text: '取消', attrs: { type: 'button' } });
+  btnCancel.addEventListener('click', function () { closeModal(md.ov); });
+  actions.appendChild(btnOk);
+  actions.appendChild(btnCancel);
+  md.box.appendChild(actions);
+
+  btnOk.addEventListener('click', async function () {
+    const reason = taReason.value.trim();
+    if (!reason) { showBanner(errBox, '拒绝必须填写理由（后端会 400 拦截空理由）。'); return; }
+    btnOk.disabled = true;
+    try {
+      const body = await apiPost('/api/approvals/reject', { id: req.id }, { reason: reason });
+      closeModal(md.ov);
+      showBanner($('reqMsg'), '已拒绝请求 ' + req.id + '，状态 ' + str(body, 'status', 'rejected') + '。');
+      await loadRequests();
+    } catch (e) {
+      btnOk.disabled = false;
+      showBanner(errBox, '拒绝失败：' + httpErrText(e));
+    }
+  });
+
+  md.ov.addEventListener('click', function (ev) { if (ev.target === md.ov) closeModal(md.ov); });
 }
 
 document.addEventListener('DOMContentLoaded', boot);
