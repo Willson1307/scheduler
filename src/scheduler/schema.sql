@@ -315,3 +315,40 @@ CREATE TABLE IF NOT EXISTS demand_levels (
                  CHECK (level IN ('minimal', 'balanced', 'optimal')),
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- ===========================================================================
+-- B8 审批流（docs/06 §3/§4 冻结）：change_requests + change_events
+-- 🔴 CREATE TABLE IF NOT EXISTS 而非 ALTER：ALTER 非幂等会炸 init_db 二次调用
+-- （demand_levels 旁表教训，见本文件 line 298）。
+-- 🔴 旧库兜底（第 8 处静默失效防线）：ensure_database 只在库文件缺失时 seed，
+-- 已存在的 data/*.db（trial.db / demo.db）不会补新表 →
+-- 由 b8_kernels.ensure_change_tables 查 sqlite_master，缺则 init_db 补齐。
+CREATE TABLE IF NOT EXISTS change_requests (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    requester_id TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK (scope IN ('once','permanent')),
+    op TEXT NOT NULL CHECK (op IN ('create','update','delete')),
+    target_type TEXT NOT NULL CHECK (target_type IN ('schedule','group','member')),
+    target_id TEXT,
+    payload_json TEXT NOT NULL,          -- {before:{...}, after:{...}}
+    reason TEXT,
+    status TEXT NOT NULL CHECK (status IN
+        ('draft','pending','approved','rejected','withdrawn','applied')),
+    approver_id TEXT,
+    reminder_due TEXT,                -- §5 超时提醒本卡不实现，字段先留
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    decided_at TEXT,
+    applied_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cr_org_status ON change_requests(org_id, status);
+
+CREATE TABLE IF NOT EXISTS change_events (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    action TEXT NOT NULL,              -- submit/approve/reject/withdraw/apply/fail
+    at TEXT NOT NULL DEFAULT (datetime('now')),
+    detail_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ce_request ON change_events(request_id);

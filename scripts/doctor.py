@@ -67,6 +67,14 @@ EXPECTED_ROUTES: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/api/exceptions"),
     ("DELETE", "/api/exceptions"),
     ("GET", "/api/exceptions"),
+    # B8（审批流）：六个方法都必须显式登记——同 B9 的教训，少注册一个
+    # 方法时扫描本身不报错，只有真实调用才 404/405。
+    ("POST", "/api/approvals"),
+    ("GET", "/api/approvals"),
+    ("POST", "/api/approvals/approve"),
+    ("POST", "/api/approvals/reject"),
+    ("POST", "/api/approvals/withdraw"),
+    ("GET", "/api/approvals/events"),
 })
 
 CHECKS: list[tuple[str, bool, str]] = []  # (名称, 是否通过, 说明)
