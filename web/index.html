@@ -281,6 +281,52 @@
     background: var(--c-warn-l); color: var(--c-warn);
     border: 1px solid #e3c887; font-size: var(--fs-xs); font-weight: 700;
   }
+  /* ---------- 变更请求（F7 / B8 审批流） ---------- */
+  ul.req-list { list-style: none; margin: 0; padding: 0; }
+  .req-item {
+    border: 1px solid var(--c-border);
+    border-left: 5px solid var(--c-primary);
+    border-radius: var(--radius);
+    padding: 10px var(--sp);
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  .req-status {
+    display: inline-block; padding: 0 8px; border-radius: 8px;
+    font-size: var(--fs-xs); font-weight: 700;
+    background: #eef1f5; color: var(--c-text-dim); border: 1px solid var(--c-border);
+  }
+  .req-status.st-pending   { background: var(--c-warn-l);    color: var(--c-warn);    border-color: #e3c887; }
+  .req-status.st-applied   { background: var(--c-ok-l);      color: var(--c-ok);      border-color: #a8d5bd; }
+  .req-status.st-approved  { background: var(--c-primary-l); color: var(--c-primary); border-color: #b9cde2; }
+  .req-status.st-rejected  { background: var(--c-danger-l);  color: #7d2019;          border-color: var(--c-danger-b); }
+  .req-status.st-withdrawn { background: #eef1f5; color: var(--c-text-dim); border-color: var(--c-border); }
+  .req-self { font-size: var(--fs-xs); color: var(--c-text-dim); }
+  .req-diff { margin: 6px 0; font-weight: 700; }
+  .req-reason { font-size: var(--fs-sm); color: var(--c-text-dim); margin: 4px 0; }
+  .req-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+
+  /* ---------- 弹层（提议改期 / 拒绝） ---------- */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(15, 25, 40, .55);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000; padding: var(--sp);
+  }
+  .modal {
+    background: var(--c-surface); border-radius: var(--radius);
+    border: 1px solid var(--c-border); padding: var(--sp);
+    width: 100%; max-width: 520px; max-height: 90vh; overflow: auto;
+  }
+  .modal h3 { margin: 0 0 10px; font-size: 1.05rem; }
+  .modal .field { margin-bottom: 10px; }
+  .modal .field select, .modal .field input { width: 100%; }
+  .modal textarea {
+    font: inherit; font-size: var(--fs-sm); padding: 7px 10px;
+    border: 1px solid var(--c-border-st); border-radius: var(--radius);
+    width: 100%; max-width: 100%; color: var(--c-text); background: #fff;
+  }
+  .modal .actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
+
   footer { color: var(--c-text-dim); font-size: var(--fs-xs); text-align: center; margin-top: 16px; }
 </style>
 </head>
@@ -378,6 +424,21 @@
   <section id="secResult">
     <h2>消解结果 <span class="hint">从 → 到，均读自接口响应，不在前端写死</span></h2>
     <div id="resBox"><div class="empty">尚未执行消解。</div></div>
+  </section>
+
+  <!-- ---------- 变更请求（F7 / B8 审批流） ---------- -->
+  <section id="secRequests">
+    <div class="cl-head">
+      <h2>变更请求 <span class="hint">永久改期走审批：pending 不改数据，批准才落库</span></h2>
+      <button id="reqReloadBtn" type="button">刷新请求</button>
+    </div>
+    <div id="reqMsg" class="banner ok" role="status" aria-live="polite" hidden></div>
+    <div id="reqErr" class="banner error" role="alert" hidden></div>
+    <div id="reqBox"></div>
+    <p class="note">
+      自己提的只显示「撤回」；别人提的显示「同意 / 拒绝」（拒绝须填理由）；已终结（已生效 / 已拒绝 / 已撤回）只读。
+      批准会重跑硬约束，撞车返回 409 并说明撞了什么，零写入。
+    </p>
   </section>
 
   <footer>
