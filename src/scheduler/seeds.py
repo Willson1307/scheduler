@@ -15,6 +15,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import date, timedelta
 
+from .authz import grant_role
 from .db import init_db, new_id
 from .object_graph import add_edge, create_object, create_organization, create_user
 from .occupancy import create_term
@@ -84,9 +85,13 @@ def seed_demo(
     # 教师按下标轮换分配，保证同一位教师不会同时被排在两个班（否则全是假冲突）
     subjects = [("语文", 1, 1), ("数学", 1, 2), ("英语", 2, 1)]
     schedule_ids: list[str] = []
+    #: 教师 object_id -> 任教班级 object_id 集合。授权口径与 create_periodic 同源，
+    #: 直接复用循环内已算出的 tid/cid，严禁另写一遍分配公式（口径漂移会授权错人）。
+    teaching: dict[str, set[str]] = {}
     for ci, cid in enumerate(class_ids):
         for si, (name, dow, idx) in enumerate(subjects):
             tid = teacher_ids[(ci * len(subjects) + si) % len(teacher_ids)]
+            teaching.setdefault(tid, set()).add(cid)
             sid = create_periodic(
                 conn,
                 NewSchedule(
@@ -137,6 +142,11 @@ def seed_demo(
             valid_to=end,
         )
         conflict_pair = (a, b)
+        # 冲突演示课同一位教师跨两个班：额外授 class_ids[0]/[1]，
+        # 否则该教师看不到要消解的教师撞课冲突（第 12 处静默失效同根因）。
+        teaching.setdefault(teacher_ids[3 % teachers], set()).update(
+            {class_ids[0], class_ids[1]}
+        )
 
     # --- 一次性活动：全年级大会，占用周三第 1-2 节（会撞上上面的物理课） ---
     event_id = None
@@ -156,6 +166,20 @@ def seed_demo(
             group_id=new_id("evt"),
         )
 
+    # --- 授权：按任教关系精确授权，不给全组织（docs/06 §1） ---
+    # 🔴 修复第 12 处静默失效：只 create_user 建账号从不 grant_role，
+    # 教师登录后 authorized_groups 为空（authz.py:139 admin 全组织短路掩盖了它）。
+    # level 用 'own'（与 build_trial_org.py 一致）；teacher 天花板 propose ⇒ 有效档 propose。
+    group_roles: list[tuple[str, str, str]] = []
+    for tid, cids in teaching.items():
+        row = conn.execute("SELECT id FROM users WHERE object_id=?", (tid,)).fetchone()
+        if row is None:
+            raise RuntimeError(f"教师对象 {tid} 没有 users 行，无法授权")
+        uid = row["id"]
+        for cid in cids:
+            grant_role(conn, org_id, cid, uid, "own")
+            group_roles.append((uid, cid, "own"))
+
     conn.commit()
     return {
         "org_id": org_id,
@@ -171,4 +195,5 @@ def seed_demo(
         "term_end": end,
         "admin": {"login": admin_login, "password": admin_password},
         "slot_config": cfg,
+        "group_roles": group_roles,
     }
