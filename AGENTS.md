@@ -36,19 +36,26 @@
 `feat/captain` / `feat/web` / `feat/trial-per-teacher` / `feat/api-exceptions` / `fix/p0-3`
 **均已 behind=0**，历史分支已全部合入 main，可继续用但**新卡不要再从旧分支切**）。
 
-### 🔴 当前唯一 P0 阻塞：`rji49M`（P0-1 教师授权）
+### ✅ P0-1 教师授权已修（`rji49M` / `5b16cdb`）
 
-**实测（2026-10-17）**：`data/demo.db` 有 **9 个教师账号但 `group_roles` = 0 行**
-（`data/trial.db` 有 12 教师 / 24 行，正常）。
+**2026-10-17 已完成并合入 main。** demo.db 实测：`group_roles` **10 行**、
+distinct user **9**、t04 因冲突演示授 2 个班。E2E：t01 登录 → 组列表非空
+→ 提交 pending → admin 批准 applied → `valid_from` 真落库。
 
-**后果**：教师登录后组列表为空 → **B8/F7 审批流现场演示第一步就跑不下去**。
+**根因回顾（防止复发）**：`seed_demo()` 曾只调 `create_user` 建账号、**从不调
+`grant_role`**，与 `build_trial_org.py:363` 修过的第 12 处静默失效**同根因**——
+当时只修了 trial 脚本，没回头修 `seeds.py`。
 
-**根因**：`src/scheduler/seeds.py` 的 `seed_demo()`（第 29 行起）只调`create_user`
-建账号，**从不调 `authz.grant_role`**。这与 `scripts/build_trial_org.py:363`
-修过的「第 12 处静默失效」是**同一根因**—— 当时只修了 trial 脚本，没回头修`seeds.py`。
+🔴 **两条由此得出的铁律**：
+1. **凡修「某处漏调某函数」，必须搜全部调用方。** 只修一处 = 同型复发。
+2. **验收一律用非管理员账号实测。** `authz.py:139` 的 `admin → 全组织短路`
+   会让管理员一切正常、普通教师全部为空 —— doctor 15/15 全绿也测不出。
 
-**为什么自检查不出来**：`authz.py:139` 的 `admin → 全组织短路`，
-管理员不需要 `group_roles` 行 → doctor 15/15 全绿、demo 库看着正常，**现场才炸**。
+🔴 **权限档位语义（答辩口径，别搞错）**：`authz.py:144` 的 `min(max, ceiling)` 意味着
+**teacher 的天花板是 `propose`** → **给教师授 `own` 与授 `propose` 行为完全等价**，
+都封顶成 `propose`。⛔ 不要为了「演示提议/批准分离」把部分教师降到 `propose`
+（那是**空操作**）；✅ 演示分离要靠**两个不同的人**（教师提议 + 管理员批准），
+自批本身会 403。
 
 ---
 
