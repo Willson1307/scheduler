@@ -333,7 +333,8 @@ Agent 侧读取有边界：**只给禁令不给正确做法，Agent 会绕过禁
 |---|---|---|---|---|
 | ① | **新增** `src/scheduler/authz.py` | 权限层（B2） | 纯新增，不碰现有文件 | 完成后跑全量测试（🔴 见下方「基线数字已过时」说明）全绿 |
 | ② | `schema.sql` **末尾追加** `group_roles` 建表语句 | 权限表（B2） | 纯追加，不动已有表 | 列名必须 `level`（`GRANT` 是 SQL 保留字） |
-| ③ | **修改** `object_graph.py` 的 `rebuild_closure()` | 修 P0-1（B0） | 🔴 唯一一处允许改现有文件 | 见下方 P0-1 说明 |
+| ③ | **修改** `object_graph.py` 的 `rebuild_closure()` | 修 P0-1（B0） | 🔴 允许改现有文件 | 见下方 P0-1 说明 |
+| ④ | **修改** `seeds.py` 的 `seed_demo()` 补授权 | 修 P0-1 教师授权（rji49M） | 🔴 允许改现有文件：仅 seed_demo 函数体末尾追加 grant_role + 返回值加 group_roles，不碰其他函数 | 全量测试全绿 + `tests/test_seed_demo_authz.py` 3 条全绿 |
 
 **③ 的具体要求**（别自作主张扩大范围）：
 
