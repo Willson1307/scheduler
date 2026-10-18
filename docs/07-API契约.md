@@ -335,7 +335,7 @@ N = **3**（MVP）。少于 3 看不出选择，多于 3 决策瘫痪。
 
 | 项 | v1.0 原文 | B9 落地 | 理由 |
 |---|---|---|---|
-| 权限档 | 「需 `edit` 档」 | 登录 + 组织隔离 | 代码里没有 `edit` 档（docs/06 四档是 view/propose/approve/own，teacher 天花板就是 propose）。真正卡「谁能批准」的是审批流（docs/06 已冻结、尚未进契约），不是本接口。 |
+| 权限档 | 「需 `edit` 档」 | 登录 + 组织隔离 | 代码里没有 `edit` 档（docs/06 四档是 view/propose/approve/own，teacher 天花板就是 propose）。真正卡「谁能批准」的是审批流（docs/06 已冻结、**已进本契约 §12.4**），不是本接口。 |
 | 请求字段名 | `schedule_id` | `schedule_id`（兼容 `target_id`，两者都给且不一致 → 400） | docs/12 的示例用过 `target_id`；静默选一个会让前端以为传的那个生效了。 |
 | 掩码口径 | 未写明 | 出入参 = **单日掩码**（1-based，`0x000002`=第1节）；入库 = **周掩码裸 hex**（与 `slot_bitmap` 同口径） | 与 `/api/schedules` grid 出参一致；两套位序混用会让页面整体错位且不报错（本项目最贵的坑）。 |
 | `effective` | 无此字段 | 新增（§12.3 非破坏性加字段） | 「这条例外声称影响哪一天」与「实际改变了占用」是两件事：周六/假期/单双周不匹配时写入成功但不生效，响应体如实说 `false`，不假装成功。 |
@@ -393,7 +393,7 @@ N = **3**（MVP）。少于 3 看不出选择，多于 3 决策瘫痪。
 | 新增自然语言意图（两节课对调、整周平移） | `intent` 非封闭清单 + `display` 后端给 |
 | 新增对象类型 | `kind` 新增值 → 前端默认样式降级 |
 | 方案数量变化 | 前端按数组长度渲染，不写死 3 |
-| **审批流接口**（`change_requests`） | 规格已在 `docs/06` 冻结，**尚未进本契约**；将来按 §12.3 追加，不动现有接口 |
+| **审批流接口**（`change_requests`） | ✅ **已进本契约**（B8，2026-10-16）：`src/server/api_approvals.py` 导出 6 条 `/api/approvals` 路由（submit·list·approve·reject·withdraw·events）。🔴 路由精确匹配、**无 path 参数**（`http_api.py:110`），id 一律 **query 传**：`POST /api/approvals/approve?id=cr_x`（**不是** `/api/approvals/<id>/approve`） |
 | 偏好权重 / M1 全局排课（当前暂缓） | 走新增可选参数，不动现有 `resolve` 行为 |
 
 ### 12.5 版本号
