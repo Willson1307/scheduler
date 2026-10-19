@@ -286,6 +286,7 @@ def build_per_teacher(conn: sqlite3.Connection, start: str, end: str) -> dict:
         n = scan(conn, org_id, date.fromisoformat(start), end_d, cfg=cfg).count
         orgs.append({
             "org_id": org_id,
+            "root_id": root_id,  # CP-H-S2 甲-2：trial_admin 显式授权用
             "org_name": org_name,
             "teacher_login": teacher_login(k),
             "trial_code": f"T{code}",
@@ -295,11 +296,22 @@ def build_per_teacher(conn: sqlite3.Connection, start: str, end: str) -> dict:
         })
 
     # 主持人用总管理员：放在**独立**的第 13 个组织，不进任何教师组织
-    #（避免 admin 短路 authorized_groups 返回全库所有组，把12 个组织混成一锅）
+    #（避免 admin 隐式范围混入教师组织——CP-H-S2 修复后 admin 默认只看
+    #  自己所属组织，跨组织必须显式授权）
     admin_org, admin_root = create_organization(conn, "试用学校管理员")
     admin_obj = create_object(conn, admin_org, "user", "示例管理员")
     add_edge(conn, admin_root, admin_obj)
-    create_user(conn, admin_obj, ADMIN_LOGIN, ADMIN_PASSWORD, role="admin")
+    admin_uid = create_user(conn, admin_obj, ADMIN_LOGIN, ADMIN_PASSWORD, role="admin")
+
+    # 🔴 CP-H-S2 甲-2 配套（2026-10-19）：修复前 admin 走全库短路，
+    # trial_admin 天生能看/管全部 12 个组织；收敛后此能力必须由**显式
+    # group_roles 授权**承载——给每个试用组织的根组授 own（沿祖先链向下
+    # 继承到该组织全部组）。trial_admin 的监控/审批能力与修复前等价，
+    # 但「默认不可见、显式才可见」的安全性质成立。
+    # 🔴 副作用提示：无这些授权行的旧 trial.db，trial_admin 只剩自己
+    #  的第 13 组织（1 个空组）——重建本库即恢复。
+    for o in orgs:
+        grant_role(conn, o["org_id"], o["root_id"], admin_uid, "own")
 
     return {"per_teacher": True, "orgs": orgs}
 
