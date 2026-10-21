@@ -41,7 +41,8 @@ LEVEL_ORDER: dict[str, int] = {"view": 0, "propose": 1, "approve": 2, "own": 3}
 LEVEL_BY_RANK: dict[int, str] = {v: k for k, v in LEVEL_ORDER.items()}
 
 #: 全局角色 → 天花板档（AGENTS §9）。
-#: admin 全组织短路（见 effective_level）；其余角色天花板为纯 cap。
+#: admin 本组织短路 + 组织外显式授权（CP-H-S2 甲-2，见 effective_level）；
+#: 其余角色天花板为纯 cap。
 #: student 无 users 行不登录，此处保留映射以备完整性校验。
 ROLE_CEILING: dict[str, str] = {
     "admin": "own",
@@ -128,6 +129,54 @@ def _user_role(conn: sqlite3.Connection, user_id: str) -> str | None:
     return row["role"] if row else None
 
 
+def _user_org_id(conn: sqlite3.Connection, user_id: str) -> str | None:
+    """用户所属组织 id（users.object_id → objects.org_id）。
+
+    CP-H-S2（方案甲-2）：admin 的隐式 own 权限以此为锚。
+    用户行缺失 / object_id 悬挂 → None（fail-closed：无所属组织
+    即无隐式范围，只剩显式 group_roles 授权）。
+    """
+    row = conn.execute(
+        "SELECT o.org_id AS org_id FROM users u "
+        "JOIN objects o ON o.id = u.object_id WHERE u.id = ?",
+        (user_id,),
+    ).fetchone()
+    return row["org_id"] if row else None
+
+
+def _group_in_org(conn: sqlite3.Connection, group_id: str, org_id: str) -> bool:
+    """组是否存在且属于指定组织。"""
+    row = conn.execute(
+        "SELECT 1 FROM objects WHERE id = ? AND org_id = ?", (group_id, org_id)
+    ).fetchone()
+    return row is not None
+
+
+def _granted_groups(conn: sqlite3.Connection, user_id: str) -> list[str]:
+    """沿祖先链（含自身）取用户有**显式 group_roles 授权**的全部组 id。
+
+    admin 与非 admin 共用（CP-H-S2 甲-2：admin 在自己组织之外的组
+    也走这条显式授权路径）。
+    """
+    # 后代（含自身）= WHERE ancestor_id IN (用户有直接授权的组)
+    # 🔴 2026-10-10 修复：必须过滤 o.kind='group'。
+    # 原实现只取 descendant_id，而闭包表里含 kind='user' 的学生对象
+    #（班级 → 学生 也是一条边）→ 教师登录后组列表混进 28 个学生对象，
+    # 组切换器出现「示例学生03-15」这种根本不是组的条目。
+    # 该缺陷在试用库里因 group_roles 之前为空而被掩盖（教师根本进不去），
+    # 一旦修好授权立刻暴露 —— 属于「修A 牵出 B」的连锁。
+    rows = conn.execute(
+        "SELECT DISTINCT e.descendant_id AS gid "
+        "FROM object_edges e "
+        "JOIN group_roles gr ON gr.group_id = e.ancestor_id "
+        "JOIN objects o ON o.id = e.descendant_id "
+        "WHERE gr.user_id = ? AND o.kind = 'group' "
+        "ORDER BY e.descendant_id",
+        (user_id,),
+    ).fetchall()
+    return [r["gid"] for r in rows]
+
+
 def effective_level(
     conn: sqlite3.Connection,
     user_id: str,
@@ -135,11 +184,13 @@ def effective_level(
 ) -> str | None:
     """用户在指定组上的有效授权档。
 
-    算法（docs/06 §1 + AGENTS §9）：
-      1. admin → 全组织短路，直接返回 'own'（无需任何 group_roles 行）。
-      2. 其余角色：取 group_id 的所有祖先（含自身，object_edges depth>=0），
-         在这些祖先上查该用户的 group_roles，取最高档 max。
-         无任何授权 → 返回 None。
+    算法（docs/06 §1 + AGENTS §9 + CP-H-S2 甲-2）：
+      1. admin → **本组织短路**：group 在自己所属组织内直接返回 'own'
+         （无需任何 group_roles 行）；组织外的组不短路，落入下方
+         显式授权路径（cp-H-S2 修复前是全库无条件 'own'，跨组织泄露）。
+      2. 其余角色（含 admin 的组织外组）：取 group_id 的所有祖先
+         （含自身，object_edges depth>=0），在这些祖先上查该用户的
+         group_roles，取最高档 max。无任何授权 → 返回 None。
       3. 全局角色天花板 cap：effective = min(max_grant, ceiling)。
          teacher 授 own 也被 cap 到 propose（审批流下普通教师不能批永久改）。
 
@@ -152,9 +203,12 @@ def effective_level(
     if ceiling is None:
         return None  # 未知全局角色，视为无授权
 
-    # admin 全组织短路（AGENTS §9）
+    # admin 本组织短路（CP-H-S2 甲-2：仅限自己所属组织）
     if role == "admin":
-        return "own"
+        org = _user_org_id(conn, user_id)
+        if org is not None and _group_in_org(conn, group_id, org):
+            return "own"
+        # 组织外的组：不 return，落入下方显式授权路径（ceiling=own cap）
 
     # 沿祖先链（含自身）取该用户的最高授权档
     # object_edges: (ancestor_id, descendant_id, depth)，含自反边 depth=0
@@ -200,39 +254,33 @@ def authorized_groups(
     /api/groups 契约（docs/07 §2）：只返回我有授权的组，未授权的根本不列出
     （不是灰掉）。
 
-    算法：
-      - admin → 全部组（短路）。
-      - 其余：用户在某组有直接授权 → 该组及其所有后代（含自身）都可见
-        （授权沿祖先链向下继承）。一条 SQL JOIN object_edges 即得。
+    算法（CP-H-S2 甲-2）：
+      - admin → 自己所属组织的全部组（隐式 own，无需 group_roles 行）
+        ∪ 组织外**显式授权**的组及后代（与普通角色同一条路径）。
+        修复前是 SELECT 全库所有组（跨组织泄露，CP-H-S2）。
+      - 其余角色：用户在某组有直接授权 → 该组及其所有后代（含自身）都可见
+        （授权沿祖先链向下继承），见 _granted_groups。
       - 所有角色天花板 >= view，故凡有授权的组 effective 都 >= view，
         无需再逐组算 effective 过滤。
+
+    返回按 id 升序排序（确定性；单组织 admin 输出与修复前逐字节一致）。
     """
     role = _user_role(conn, user_id)
     if role is None:
         return []
-    if role == "admin":
-        rows = conn.execute(
-            "SELECT id FROM objects WHERE kind='group' ORDER BY id"
-        ).fetchall()
-        return [r["id"] for r in rows]
 
-    # 后代（含自身）= WHERE ancestor_id IN (用户有直接授权的组)
-    # 🔴 2026-10-10 修复：必须过滤 o.kind='group'。
-    # 原实现只取 descendant_id，而闭包表里含 kind='user' 的学生对象
-    #（班级 → 学生 也是一条边）→ 教师登录后组列表混进 28 个学生对象，
-    # 组切换器出现「示例学生03-15」这种根本不是组的条目。
-    # 该缺陷在试用库里因 group_roles 之前为空而被掩盖（教师根本进不去），
-    # 一旦修好授权立刻暴露 —— 属于「修A 牵出 B」的连锁。
-    rows = conn.execute(
-        "SELECT DISTINCT e.descendant_id AS gid "
-        "FROM object_edges e "
-        "JOIN group_roles gr ON gr.group_id = e.ancestor_id "
-        "JOIN objects o ON o.id = e.descendant_id "
-        "WHERE gr.user_id = ? AND o.kind = 'group' "
-        "ORDER BY e.descendant_id",
-        (user_id,),
-    ).fetchall()
-    return [r["gid"] for r in rows]
+    if role == "admin":
+        org = _user_org_id(conn, user_id)
+        gids: set[str] = set(_granted_groups(conn, user_id))
+        if org is not None:
+            rows = conn.execute(
+                "SELECT id FROM objects WHERE kind='group' AND org_id=?",
+                (org,),
+            ).fetchall()
+            gids.update(r["id"] for r in rows)
+        return sorted(gids)
+
+    return _granted_groups(conn, user_id)
 
 
 def _depth_to_root(conn: sqlite3.Connection, group_id: str) -> int:
