@@ -1,0 +1,4 @@
+# 换行符统一：脚本/源码强制 LF（Windows checkout 也不转 CRLF，避免 tar 同步到 Linux 后 bash 报错）
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
