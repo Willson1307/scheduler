@@ -92,6 +92,30 @@ def _request(method: str, path: str, body=None, token=None, timeout=5.0):
         raise _Unreachable(repr(e)) from e
 
 
+def _request_raw(method: str, path: str, body=None, token=None, timeout=5.0):
+    """同 _request，但额外返回响应头（键统一小写）。
+
+    供契约「通用约定」里只能看响应头才能断言的条款用，
+    例如「未登录统一 401（响应体不带 WWW-Authenticate 头）」。
+    """
+    url = BASE_URL + path
+    data = None
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with _OPENER.open(req, timeout=timeout) as resp:
+            return resp.status, {k.lower(): v for k, v in resp.headers.items()}, _parse(resp.read())
+    except urllib.error.HTTPError as e:
+        return e.code, {k.lower(): v for k, v in e.headers.items()}, _parse(e.read())
+    except OSError as e:  # 连接拒绝 / 超时等（URLError 是其子类）
+        raise _Unreachable(repr(e)) from e
+
+
 # 模块级共享状态：setUpModule 里探测健康 + 登录一次，供各测试复用。
 _TOKEN = None
 _DEFAULT_GROUP = None
@@ -442,6 +466,222 @@ class TestDemands(_Authed):
         self.assertIsInstance(data.get("conflicts"), list)
         self.assertIsInstance(data.get("message"), str)
         self.assertTrue(data["message"].strip(), "绝不静默失败：message 不能为空")
+
+
+# ---------------------------------------------------------------------------
+# 通用约定 · 鉴权与拒绝语义（401 / 伪 token / 组越权 403 / 授权组数据收窄）
+# ---------------------------------------------------------------------------
+class TestAuthRejection(_Authed):
+    """契约「通用约定」+ §10 的鉴权与拒绝语义（2026-10-21 补，断言逐条对应原文）。
+
+    对应的契约原文（docs/07-API契约.md）：
+      - 通用约定：「认证：`Authorization: Bearer <token>`；未登录统一 **401**
+        （响应体**不带** `WWW-Authenticate` 头）」
+      - 通用约定：「统一错误体：`{"error":{"code":"...","message":"..."}}`」
+      - 通用约定：「当前组：`?group=<group_id>` 或 `X-Group` 请求头」
+        （X-Group 头后端未实现，不在本测试范围）
+      - 通用约定：「拒绝语义：越权访问具体资源 → 404 ｜ 档位不足 → 403 ｜
+        参数不合法 → 400」——其中「越权访问具体资源 → 404」指**按 id 访问
+        具体资源**（如 §11 exceptions 的 schedule_id）；`?group=` 是**范围选择
+        参数**，越权属 §10 显式写明的 403（「group 越权 403」），两种语义不混。
+      - §10 /api/ping 鉴权行：「必须登录（Bearer token），未登录 401；
+        `group` 越权 403」
+
+    🔴 参数名防假绿：当前组的查询参数名是 `group`（通用约定原文）。
+    写错成 `?group_id=` 时后端会**静默忽略**该参数并回退缺省组、返回 200——
+    测试会假绿。因此「200 且数据属于指定组」的断言必须验证数据确实收窄到
+    该组闭包（严格小于缺省全量），参数名写错时才会变红（破坏法验证见交付报告）。
+
+    载体账号：admin（全组织可见）+ t01（演示库教师，seeds.py 按任教关系
+    仅授权「高一(1)班」）——admin 有全组织短路，测不出组越权，越权用例
+    必须用授权范围受限的教师 token。非演示库（无 t01）时相关用例跳过。
+    """
+
+    def test_missing_token_gets_401_with_contract_error_body(self):
+        # 通用约定：未登录统一 401 + 统一错误体 + 不带 WWW-Authenticate 头。
+        # 覆盖 §3 objects / §4 schedules / §5 conflicts / §10 ping 四个接口。
+        cases = [
+            ("GET", "/api/objects", None),
+            ("GET", "/api/schedules", None),
+            ("GET", "/api/conflicts", None),
+            ("POST", "/api/ping", {"event": "task_start", "session_id": "contract-noauth"}),
+        ]
+        for method, path, body in cases:
+            with self.subTest(f"{method} {path} 未带 Authorization"):
+                try:
+                    st, headers, data = _request_raw(method, path, body=body, token=None)
+                except _Unreachable as e:
+                    self.skipTest(f"服务不可达：{e}")
+                self.assertEqual(
+                    st, 401,
+                    f"{method} {path} 未带 Authorization 应 401（通用约定），"
+                    f"实际 {st}，响应={data!r}",
+                )
+                self._assert_contract_error_body(data, f"{method} {path}")
+                self.assertNotIn(
+                    "www-authenticate", headers,
+                    "通用约定：401 响应不带 WWW-Authenticate 头",
+                )
+
+    def test_garbage_token_gets_401(self):
+        # 伪 token 与未登录同语义 → 401（通用约定「认证」条）。
+        # 两种形态：无点分隔的乱串 / 结构合法但签名不符。
+        for token in ("not-a-real-token", "eyJmYWtlIjoidHJ1ZSJ9.aW52YWxpZF9zaWdu"):
+            with self.subTest(f"伪 token {token[:12]}..."):
+                try:
+                    st, data = _request("GET", "/api/objects", token=token)
+                except _Unreachable as e:
+                    self.skipTest(f"服务不可达：{e}")
+                self.assertEqual(
+                    st, 401,
+                    f"伪 token 应 401（通用约定），实际 {st}，响应={data!r}",
+                )
+                self._assert_contract_error_body(data, "伪 token")
+
+    def test_unauthorized_group_param_gets_403(self):
+        # §10「group 越权 403」：token 有效，但 ?group= 指向自己没有授权的组。
+        # 覆盖 §3 objects（query 传 group）/ §4 schedules（query 传 group）/
+        # §10 ping（请求体传 group）三个入口。
+        t_token = self._teacher_login()[0]
+        try:
+            st, groups = _request("GET", "/api/groups", token=t_token)
+        except _Unreachable as e:
+            self.skipTest(f"服务不可达：{e}")
+        self.assertEqual(st, 200, f"教师 GET /api/groups 期望 200，实际 {st}")
+        teacher_ids = {g["group_id"] for g in groups}
+        self.assertTrue(
+            teacher_ids, "教师至少应看到自己任教的班级（P0-1 修复后演示库非空）"
+        )
+        # 从 admin 可见的组里挑一个教师未授权的（组存在、但不属于教师授权范围）
+        admin_groups = self._json200("GET", "/api/groups")
+        admin_ids = {g["group_id"] for g in admin_groups}
+        unauthorized = sorted(admin_ids - teacher_ids)
+        if not unauthorized:
+            self.fail("演示库中找不到教师未授权的组，无法测 ?group= 越权（数据不合预期）")
+        target = unauthorized[0]
+        # §3 /api/objects?group=<未授权组>
+        try:
+            st, data = _request("GET", "/api/objects?group=" + target, token=t_token)
+        except _Unreachable as e:
+            self.skipTest(f"服务不可达：{e}")
+        self.assertEqual(
+            st, 403,
+            f"?group= 指向未授权组应 403（§10『group 越权 403』），"
+            f"实际 {st}，响应={data!r}",
+        )
+        # §4 /api/schedules?group=<未授权组>
+        try:
+            st, data = _request("GET", "/api/schedules?group=" + target, token=t_token)
+        except _Unreachable as e:
+            self.skipTest(f"服务不可达：{e}")
+        self.assertEqual(
+            st, 403,
+            f"?group= 指向未授权组应 403（§10『group 越权 403』），"
+            f"实际 {st}，响应={data!r}",
+        )
+        # §10 POST /api/ping（group 在请求体里）
+        try:
+            st, data = _request(
+                "POST", "/api/ping",
+                body={"event": "task_start", "session_id": "contract-authz", "group": target},
+                token=t_token,
+            )
+        except _Unreachable as e:
+            self.skipTest(f"服务不可达：{e}")
+        self.assertEqual(
+            st, 403,
+            f"ping 的 group 越权应 403（§10 鉴权行），实际 {st}，响应={data!r}",
+        )
+
+    def test_authorized_group_returns_scoped_data(self):
+        # 通用约定「当前组：?group=<group_id>」+ §3「只返回当前组闭包内的对象」：
+        # 显式指定组 → 200，且数据确实收窄到该组闭包（不是缺省组的全量）。
+        root = self._json200("GET", "/api/objects")
+        root_ids = {o["id"] for o in root}
+        groups = self._json200("GET", "/api/groups")
+        subclasses = [g for g in groups if g["parent_name"] is not None]
+        self.assertTrue(subclasses, "演示库应有非根组（班级），否则无法验证 ?group= 收窄")
+        gid = subclasses[0]["group_id"]
+        data = self._json200("GET", "/api/objects?group=" + gid)
+        scoped_ids = {o["id"] for o in data}
+        self.assertTrue(scoped_ids, "班级组闭包内至少应有对象（班级自身 + 学生）")
+        self.assertTrue(
+            scoped_ids <= root_ids,
+            "指定组返回的对象必须仍在根组闭包内（同一演示库）",
+        )
+        self.assertLess(
+            len(scoped_ids), len(root_ids),
+            "指定班级组时不得返回与缺省根组相同的数据"
+            "（防 ?group= 参数名写错被后端忽略、静默回退缺省组 → 假绿）",
+        )
+        # §4 /api/schedules?group=<授权组> → 200 且结构完整（与 403 用例成对照，
+        # 证明 403 来自授权判定）。⚠️ 契约 §4 未规定 grid 按组收窄（§3 才有
+        # 「只返回当前组闭包内的对象」），实现上网格按组织输出，故此处不断言
+        # grid 的组归属——那是契约没写的口径，留给队长拍板（见交付报告）。
+        sched = self._json200("GET", "/api/schedules?group=" + gid)
+        for key in ("objects", "days", "grid"):
+            self.assertIn(key, sched, f"schedules?group= 响应缺 {key}")
+
+    def test_teacher_authorized_group_200(self):
+        # 对照用例：教师访问**自己授权**的组 → 200，证明上面 403 用例的 403
+        # 确实来自授权判定，而不是「该接口/参数对教师一律拒绝」。
+        t_token, t_default = self._teacher_login()
+        self.assertIsNotNone(t_default, "教师登录响应应含 default_group_id")
+        try:
+            st, data = _request("GET", "/api/objects?group=" + t_default, token=t_token)
+        except _Unreachable as e:
+            self.skipTest(f"服务不可达：{e}")
+        self.assertEqual(
+            st, 200,
+            f"教师访问自己授权的组应 200，实际 {st}，响应={data!r}",
+        )
+        self.assertTrue(data, "自己班级闭包内至少应有对象")
+        # §10 ping：group 给自己授权的组 → 200（与上面 ping 403 成对照）
+        try:
+            st, data = _request(
+                "POST", "/api/ping",
+                body={"event": "task_start", "session_id": "contract-authz-ok",
+                      "group": t_default},
+                token=t_token,
+            )
+        except _Unreachable as e:
+            self.skipTest(f"服务不可达：{e}")
+        self.assertEqual(
+            st, 200,
+            f"ping 带授权 group 应 200，实际 {st}，响应={data!r}",
+        )
+
+    # -- 辅助 ------------------------------------------------------------------
+
+    def _teacher_login(self):
+        """登录演示库教师 t01（口令见 seeds.py；授权仅限任教班级）。
+
+        非演示库（无 t01 账号）→ 跳过：组越权语义需要授权范围受限的账号，
+        admin 有全组织短路测不出 403。
+        """
+        try:
+            st, body = _request("POST", "/api/login", {"login": "t01", "password": "123456"})
+        except _Unreachable as e:
+            self.skipTest(f"服务不可达：{e}")
+        if st != 200 or not isinstance(body, dict) or not body.get("token"):
+            self.skipTest(
+                f"演示库教师 t01 登录失败（{st} {body!r}）——"
+                "组越权用例需要教师账号，请用演示库（data/demo.db）起服务重试"
+            )
+        return body["token"], body.get("default_group_id")
+
+    def _assert_contract_error_body(self, data, where):
+        """通用约定：统一错误体 `{"error":{"code":"...","message":"..."}}`。"""
+        self.assertIsInstance(
+            data, dict, f"{where}：错误响应应是 JSON 对象，实际 {data!r}"
+        )
+        err = data.get("error")
+        self.assertIsInstance(
+            err, dict, f"{where}：error 应为对象（统一错误体），实际 {err!r}"
+        )
+        self.assertIsInstance(err.get("code"), str, f"{where}：error.code 应为字符串")
+        self.assertTrue(err["code"], f"{where}：error.code 不能为空")
+        self.assertIsInstance(err.get("message"), str, f"{where}：error.message 应为字符串")
 
 
 if __name__ == "__main__":
