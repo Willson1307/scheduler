@@ -103,8 +103,28 @@ PERIODS_PER_DAY = 10
 DAYS = 5  # 周一~周五
 
 ADMIN_LOGIN = "trial_admin"
-ADMIN_PASSWORD = "trial123"
+#: 教师初始共用口令：仅在建库时写入，部署后必须立即用
+#: deploy/reset_trial_passwords.py 重置为各自随机串（2026-10-23 已执行）。
 TEACHER_PASSWORD = "123456"
+#: trial_admin 口令 2026-10-24 起不再是明文常量（TRIAL-AUTH-KIT）：
+#: 从口令表 data/trial-passwords.txt 读（与 reset_trial_passwords.py 同一来源），
+#: 表里没有就报错要求先跑 generate。理由：口令表是唯一事实来源，
+#: build 与 reset 共享，避免「库里的口令与发给老师的登录卡不一致」。
+_PW_TABLE = os.path.join(ROOT, "data", "trial-passwords.txt")
+
+
+def admin_password() -> str:
+    """从 data/trial-passwords.txt 读 trial_admin 口令；缺失则报错退出。"""
+    if os.path.exists(_PW_TABLE):
+        for ln in open(_PW_TABLE, encoding="utf-8"):
+            parts = ln.split(None, 1)
+            if len(parts) == 2 and parts[0] == ADMIN_LOGIN:
+                return parts[1].strip()
+    raise SystemExit(
+        f"FAIL 未找到 {ADMIN_LOGIN} 的口令（{_PW_TABLE}）。\n"
+        "请先运行：python deploy/reset_trial_passwords.py generate\n"
+        "（口令表 data/ 已 gitignore，明文不入库、不出本机）"
+    )
 
 # 每个班排这几门课（通用学科名，非真实信息）。
 # 🔴 刻意避开周三第 1–2 节：让「示例活动」只撞故意造的冲突演示课，不撞常规课，
@@ -301,7 +321,7 @@ def build_per_teacher(conn: sqlite3.Connection, start: str, end: str) -> dict:
     admin_org, admin_root = create_organization(conn, "试用学校管理员")
     admin_obj = create_object(conn, admin_org, "user", "示例管理员")
     add_edge(conn, admin_root, admin_obj)
-    admin_uid = create_user(conn, admin_obj, ADMIN_LOGIN, ADMIN_PASSWORD, role="admin")
+    admin_uid = create_user(conn, admin_obj, ADMIN_LOGIN, admin_password(), role="admin")
 
     # 🔴 CP-H-S2 甲-2 配套（2026-10-19）：修复前 admin 走全库短路，
     # trial_admin 天生能看/管全部 12 个组织；收敛后此能力必须由**显式
@@ -342,7 +362,7 @@ def build(per_teacher: bool = False) -> dict:
     # 管理员
     admin_obj = create_object(conn, org_id, "user", "示例管理员")
     add_edge(conn, root_id, admin_obj)
-    create_user(conn, admin_obj, ADMIN_LOGIN, ADMIN_PASSWORD, role="admin")
+    create_user(conn, admin_obj, ADMIN_LOGIN, admin_password(), role="admin")
 
     # 班级 + 学生
     class_ids: list[str] = []
@@ -717,7 +737,7 @@ def main() -> int:
             print(f"{o['trial_code']:<6}{o['teacher_login']:<14}{o['org_name']:<14}"
                   f"{o['classes']:<4}{o['students']:<6}{o['conflicts']}")
         print()
-        print(f"管理员登录：{ADMIN_LOGIN} / {ADMIN_PASSWORD}（独立组织，与教师数据不通）")
+        print(f"管理员登录：{ADMIN_LOGIN} / <口令见 data/trial-passwords.txt>（独立组织，与教师数据不通）")
         print()
     else:
         print(f"组织：{ORG_NAME}（org_id={info['org_id']}）")
