@@ -3,7 +3,11 @@
 在服务器上跑一条命令，证明「服务器上是新代码 + 试用库是新的 + admin 范围已收敛 +
 埋点能落库 + 问卷工具在」：
 
-    python3 deploy/trial_smoke.py [--db data/trial.db] [--live-port 8000]
+    python3 deploy/trial_smoke.py [--db data/trial.db] [--live-port 8000] [--admin-password <真实口令>]
+
+admin 口令来源（2026-10-24 起，TRIAL-AUTH-KIT）：--admin-password > 环境变量
+TRIAL_ADMIN_PASSWORD > 临时副本重置为 smoke 值（线上库不动）。
+真实口令的公网验证（新口令 200 / 旧口令 401）在交付报告 5.3，不在本脚本内。
 
 判据全部写成可粘贴命令 + 期望数值（不接受「验证通过」这类描述）。全部在**临时副本**
 上起临时服务验证，不动线上 trial.db；只对线上服务做只读 health 探测。
@@ -38,7 +42,12 @@ sys.path.insert(0, os.path.join(REPO, "src"))
 RUN_SERVER = os.path.join(REPO, "scripts", "run_server.py")
 
 ADMIN_LOGIN = "trial_admin"
-ADMIN_PASSWORD = "trial123"
+#: 2026-10-24 起 admin 真实口令不再写死（TRIAL-AUTH-KIT）：
+#:   优先级 --admin-password 参数 > 环境变量 TRIAL_ADMIN_PASSWORD > 临时副本重置。
+#: 都没提供时，在**临时副本**上把 admin 口令重置为下面的 smoke 值再验证
+#: （与 T01_SMOKE_PASSWORD 同机制，线上库不动）。真实口令的公网验证走
+#: 交付报告 5.3（admin 新口令 200 / 旧口令 401），不在本脚本职责内。
+ADMIN_SMOKE_PASSWORD = "smoke-admin-2026"
 T01_LOGIN = "trial_t01"
 T01_SMOKE_PASSWORD = "smoke-t01-2026"  # 只在临时副本上临时覆盖，线上库不动
 
@@ -146,15 +155,24 @@ def _term_start(db_path: str) -> str:
 
 
 def _reset_t01_password(db_path: str) -> None:
+    _set_login_password(db_path, T01_LOGIN, T01_SMOKE_PASSWORD)
+
+
+def _reset_admin_password(db_path: str) -> None:
+    """未提供真实 admin 口令时，在临时副本上重置为 smoke 值（线上库不动）。"""
+    _set_login_password(db_path, ADMIN_LOGIN, ADMIN_SMOKE_PASSWORD)
+
+
+def _set_login_password(db_path: str, login: str, pw: str) -> None:
     from scheduler.object_graph import hash_password
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.execute(
             "UPDATE users SET password_hash = ? WHERE login = ?",
-            (hash_password(T01_SMOKE_PASSWORD), T01_LOGIN),
+            (hash_password(pw), login),
         )
         if cur.rowcount != 1:
-            raise RuntimeError(f"临时副本重置 t01 口令失败，影响行数 {cur.rowcount}")
+            raise RuntimeError(f"临时副本重置 {login} 口令失败，影响行数 {cur.rowcount}")
         conn.commit()
     finally:
         conn.close()
@@ -185,7 +203,15 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="试用就绪验收")
     ap.add_argument("--db", default=os.path.join(REPO, "data", "trial.db"))
     ap.add_argument("--live-port", type=int, default=8000)
+    ap.add_argument("--admin-password", default=None,
+                    help="trial_admin 真实口令（缺省回退环境变量 TRIAL_ADMIN_PASSWORD；"
+                         "两者都没有则临时副本重置为 smoke 口令，线上库不动）")
     args = ap.parse_args()
+
+    admin_pw = args.admin_password or os.environ.get("TRIAL_ADMIN_PASSWORD") or ""
+    admin_pw_src = ("命令行/环境变量（真实口令）" if admin_pw
+                    else "临时副本重置为 smoke 口令（未传 --admin-password / TRIAL_ADMIN_PASSWORD）")
+    print(f"[info] admin 口令来源：{admin_pw_src}", flush=True)
 
     print("=" * 62)
     print("试用就绪验收（trial_smoke）")
@@ -222,13 +248,18 @@ def main() -> int:
         shutil.copy2(args.db, copy_ok)
         _reset_t01_password(copy_ok)
 
+        if not admin_pw:
+            _reset_admin_password(copy_ok)
+        admin_pw_eff = admin_pw or ADMIN_SMOKE_PASSWORD
+
         srv = Server(copy_ok, today)
         try:
             port = srv.wait_ready()
             base = f"http://127.0.0.1:{port}"
 
-            at = login(base, ADMIN_LOGIN, ADMIN_PASSWORD)
-            check("admin 登录成功（trial_admin/trial123）", at is not None, "有 token" if at else "无 token")
+            at = login(base, ADMIN_LOGIN, admin_pw_eff)
+            check("admin 登录成功", at is not None,
+                  f"{'有 token' if at else '无 token'}；口令来源={admin_pw_src}")
             if at:
                 st, g = request(base, "GET", "/api/groups", token=at)
                 n = len(g) if isinstance(g, list) else -1
@@ -276,7 +307,9 @@ def main() -> int:
         try:
             port2 = srv2.wait_ready()
             base2 = f"http://127.0.0.1:{port2}"
-            at2 = login(base2, ADMIN_LOGIN, ADMIN_PASSWORD)
+            if not admin_pw:
+                _reset_admin_password(copy_noauth)
+            at2 = login(base2, ADMIN_LOGIN, admin_pw or ADMIN_SMOKE_PASSWORD)
             check("无授权副本 admin 登录成功", at2 is not None, f"已删 {n_del} 条授权")
             if at2:
                 st, g = request(base2, "GET", "/api/groups", token=at2)
