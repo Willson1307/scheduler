@@ -9,6 +9,8 @@
      并列才比 level / group_id。admin→根组，年级组长→年级，教师→其最高层级组。
   4. 限频防爆破：同一 login 连续失败 5 次 → 锁定 15 分钟返回 429
      （docs/07 §1）。成功登录清零。进程内 dict 计数（本地单进程足够）。
+     🔴 **登录名不存在时同样计数**（对称计数）→ 不能用「会不会 429」判断账号是否存在；
+     且对不存在用户补一次等时 PBKDF2 → **也不能用响应耗时判断**。见 §S3 修复注释。
   5. 错误体用契约嵌套格式 {"error":{"code","message"}}，返回 (status, body) 元组。
 
 签名约定（写死）：handle(method, path, query, body, headers, context=None)。
@@ -29,6 +31,11 @@ from scheduler import authz, object_graph as og
 _LOCK_THRESHOLD = 5  # 连续失败 5 次锁定
 _LOCK_SECONDS = 15 * 60  # 锁 15 分钟
 _fail_tracker: dict[str, dict] = {}  # login -> {"count": int, "lock_until": float}
+
+#: 等时补偿用的哑 hash（格式合法、内容恒不匹配）。
+#: 用于「登录名不存在」分支补齐一次 PBKDF2 计算，消除计时侧信道。
+#: 🔴 不要改成 None 或空串——`verify_password` 解析失败会提前 return，耗时又变短了。
+_DUMMY_HASH = "pbkdf2$" + "00" * 16 + "$" + "00" * 32
 
 
 def _is_locked(login_name: str, now: float) -> bool:
@@ -75,26 +82,39 @@ def login(method: str, path: str, query: dict, body: bytes, headers: dict, conte
     try:
         user = og.authenticate(conn, login_name, password)
         if user is None:
-            # 🔴 2026-10-11 修复第 14 处静默失效（试用当天真实踩中）：
-            # 登录名拼错也累加失败计数 → 5 次打错就把**正确密码**也锁死，
-            # 现场表现是「我密码没错却登不进去」，极难自查。
-            # 实测记录：09:03:21–09:04:26 连续 5 次 401（trail_t05 拼错），
-            # 随后正确密码同样被拒 429 → 队长以为账号坏了。
+            # 🔴 2026-10-25 修复第 15 处静默失效（CP-H S3 / docs/21 §6.3 P1 返修项②）：
+            #    **登录名枚举可被 HTTP 状态码 + 响应耗时双重区分**。
             #
-            # 修法：**登录名不存在时完全不计数**。
-            # 理由一（安全）：返回的文案与「密码错」**完全一致**（都是
-            #   bad_credentials「登录名或密码错误」），攻击者仍无法区分
-            #   「用户不存在」与「密码错误」→ **不泄露用户是否存在**这条不变。
-            # 理由二（可用）：爆破一个不存在的账号本就无意义，
-            #   不该让真实用户为别人的拼写错误买单。
-            # ⚠️ 副作用（如实记录）：「无此用户」可被无限次尝试而无锁定，
-            #   但攻击者也拿不到任何 token，不构成数据风险；
-            #   资源滥用可用全局限流单独兜底，不混同于账号锁定。
-            exists = conn.execute(
-                "SELECT 1 FROM users WHERE login = ? LIMIT 1", (login_name,)
-            ).fetchone() is not None
-            if exists:
-                _record_failure(login_name, now)
+            # 历史（别重蹈）：
+            #   10-11 那版为修「拼错登录名把真实用户锁死」，改成「登录名不存在时完全不计数」。
+            #   副作用是把枚举信号放大成两条硬区分：
+            #     真实账号错密 5 次 → 第 6 次 429（锁定）
+            #     不存在账号     → 永远 401（永不锁定）
+            #   代码注释当时写「攻击者仍无法区分」——**实测为假**，误导了 14 天。
+            #
+            # 现修法（两条通道一起堵）：
+            #   ① **对称计数**：不存在的登录名失败同样累加，同样在第 _LOCK_THRESHOLD+1 次返回 429。
+            #      状态码序列完全一致 → 无法据此判断账号是否存在。
+            #   ② **等时补偿**：`og.authenticate()` 对「用户不存在 / 非 active」**直接 return None、
+            #      不跑 PBKDF2**，而正常用户要跑 10 万轮 → 两者响应耗时差约一倍，
+            #      **计时侧信道比状态码更好利用**。
+            #      故仅在这两种「压根没算过哈希」的情况下，对一个恒不匹配的哑 hash
+            #      补跑一次 `verify_password`，把耗时拉平。
+            #      ⛔ 域层 object_graph.py 只读，不能改 authenticate，只能在服务层补偿。
+            #      ⚠️ 只能补「没跑过」的情况——对「跑过一次的」再补会变成两次，
+            #         反而让不存在账号快一倍（实测 0.497 倍，本文件第一版就踩了这个坑）。
+            #
+            # ⚠️ 已知副作用（如实记录，不隐瞒）：
+            #   攻击者现在可以「锁定任意登录名」——包括真实账号。但这条路**在修前同样存在**
+            #   （直接打真实账号就能锁），本修复没有新增 DoS 面。
+            #   拼错登录名只会锁住那个拼错的串，不会波及正确登录名（计数按 login 字符串隔离）。
+            row = conn.execute(
+                "SELECT status FROM users WHERE login = ? LIMIT 1", (login_name,)
+            ).fetchone()
+            hashed_already = row is not None and row["status"] == "active"
+            if not hashed_already:
+                og.verify_password(password, _DUMMY_HASH)  # 等时补偿，结果恒 False
+            _record_failure(login_name, now)
             return 401, {"error": {"code": "bad_credentials", "message": "登录名或密码错误"}}
 
         # 成功：清失败计数
