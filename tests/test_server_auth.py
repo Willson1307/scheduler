@@ -149,7 +149,7 @@ class TestLoginBadCredentials(_ServerTestBase):
 
 class TestLoginLockout(_ServerTestBase):
     def test_five_failures_then_429(self):
-        """连续失败 5 次后第 6 次返回 429（锁定 15 分钟）。"""
+        """连续失败 5 次后第 6 次返回 429（组合锁 60 秒，2026-10-25 起口径）。"""
         h = self._login_handler()
         for i in range(5):
             s, _ = self._normalize(self._call(h, "POST", "/api/login",

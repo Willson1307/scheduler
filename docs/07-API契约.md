@@ -36,7 +36,7 @@
 | 请求 | `{"login": "admin", "password": "admin123"}` |
 | 响应 200 | `{"token": "...", "user": {"id","login","global_role"}, "default_group_id": "..."}` |
 | 响应 401 | `{"error":{"code":"bad_credentials","message":"登录名或密码错误"}}` |
-| 响应 429 | 连续失败 5 次后锁定 15 分钟 |
+| 响应 429 | **（2026-10-25 升级）**双层限频：① `(login, 客户端IP)` 组合锁——同组合连续失败 5 次 → 只锁该组合 60 秒，`{"error":{"code":"locked",...}}`；② 单 IP 60 秒内第 31 次起登录请求 → `{"error":{"code":"rate_limited",...}}` + `Retry-After: 60` 响应头。别人（别的 IP）登录同一账号不受影响。IP 仅内存限流，不落库、不进埋点/日志/响应体 |
 
 🔴 **响应中绝不回传 `password_hash`。**
 

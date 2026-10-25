@@ -111,15 +111,27 @@ class RequestHandler(BaseHTTPRequestHandler):
         if handler is None:
             raise ApiError(404, f"接口不存在：{method} {path}")
         headers = {k.lower(): v for k, v in self.headers.items()}
+        # 🔴 必须在字典推导**之后**注入——放前面会被客户端伪造的 X-Client-IP 覆盖。
+        # 仅供 api_login 限流使用（内存态，不落库/不进日志，见隐私红线 docs/08）。
+        headers["x-client-ip"] = self.client_address[0]
         result = handler(method, path, query, body, headers, context=None)
-        status, payload = self._normalize_result(result)
-        self._send_json(status, payload)
+        status, payload, extra_headers = self._normalize_result(result)
+        self._send_json(status, payload, extra_headers)
 
     @staticmethod
-    def _normalize_result(result: Any) -> tuple[int, Any]:
+    def _normalize_result(result: Any) -> tuple[int, Any, dict | None]:
+        """统一返回三元组 (status, payload, extra_headers)。
+
+        handler 返回 dict → 200；返回 (status, payload) → 指定状态码；
+        返回 (status, payload, headers_dict) → 额外写自定义响应头
+        （如登录限流的 Retry-After）。extra_headers 仅本层消费。
+        """
+        if (isinstance(result, tuple) and len(result) == 3
+                and isinstance(result[0], int) and isinstance(result[2], dict)):
+            return result[0], result[1], result[2]
         if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], int):
-            return result[0], result[1]
-        return 200, result
+            return result[0], result[1], None
+        return 200, result, None
 
     @staticmethod
     def _normalize(path: str) -> str:
@@ -138,11 +150,15 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     # -- 响应 ---------------------------------------------------------------
 
-    def _send_json(self, status: int, payload: Any) -> None:
+    def _send_json(self, status: int, payload: Any,
+                   extra_headers: dict | None = None) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        if extra_headers:
+            for key, value in extra_headers.items():
+                self.send_header(key, str(value))
         self.end_headers()
         self.wfile.write(data)
 

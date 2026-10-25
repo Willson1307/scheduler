@@ -13,7 +13,7 @@
   C. **等时补偿存在**：不存在用户的响应耗时与存在用户同量级，不再「秒回」。
 
 ⛔ 破坏法验证（本文件必须能判红）：
-   - 删掉 `_record_failure(login_name, now)` 前的等时补偿 → C 组变红
+   - 删掉 `_record_failure(login_name, ip, now)` 前的等时补偿 → C 组变红
    - 改成「只在用户存在时计数」→ A 组变红
 """
 
@@ -103,11 +103,12 @@ class TestMisspellingDoesNotLockReal(unittest.TestCase):
         api_login.reset_locks()
 
     def test_typo_does_not_lock_correct_name(self):
+        # 2026-10-25 签名升级：计数键 = (login, ip)，直接调内部函数需传 ip
         for _ in range(5):
-            api_login._record_failure("tO1", time.time())
+            api_login._record_failure("tO1", "9.9.9.9", time.time())
         now = time.time() + 1
-        self.assertTrue(api_login._is_locked("tO1", now))
-        self.assertFalse(api_login._is_locked("t01", now),
+        self.assertTrue(api_login._is_locked("tO1", "9.9.9.9", now))
+        self.assertFalse(api_login._is_locked("t01", "9.9.9.9", now),
                          "拼错的串锁住了正确登录名 → 10-11 的可用性问题复发")
 
 
