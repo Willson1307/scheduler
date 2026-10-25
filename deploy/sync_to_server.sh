@@ -4,7 +4,9 @@
 # 做五件事（幂等，可重复跑）：
 #   1. 备份服务器 data/（data.bak.<时间戳>），失败可回滚
 #   2. tar over ssh 同步代码（src web scripts tests docs deploy + 根文档；不含 .git / data）
-#   3. 重建试用库（--per-teacher，一师一组织）+ 重置 12 位教师口令为随机串
+#   3. 重建试用库（--per-teacher，一师一组织）+ 重置 13 个账号口令为随机串
+#      🔴 重建前查 event_log：已有真实试用数据则拒绝（须 FORCE_REBUILD=1）
+#      🔴 admin 口令经 stdin 灌入远端建库命令（服务器无口令表）
 #   4. 写 systemd user unit（--today 走 Environment=SCHEDULER_TODAY）+ reload/restart
 #   5. enable-linger + 复验 + 服务器侧自检 + 外网连通性（3 次 curl）
 #
@@ -69,12 +71,32 @@ tar -czf - -C "$REPO" src web scripts tests docs deploy AGENTS.md README.md requ
   || { rollback_data; die "代码同步失败（已回滚 data/）"; }
 
 # ── 3. 重建试用库（--per-teacher，一师一组织）──────────────
-log "重建试用库（build_trial_org.py --per-teacher）"
-"${SSH[@]}" "cd '$REMOTE_ROOT' && python3 scripts/build_trial_org.py --per-teacher" \
+# 🔴 2026-10-25 TRIAL-AUTH-KIT-2 两条护栏：
+#   ① admin 口令经 stdin 喂进远端建库命令 —— 服务器上没有 data/trial-passwords.txt
+#      （data/ 不进 tar），写死「读表」会让本步骤必然 FAIL。
+#   ② trial.db 的 event_log 是章程第八条(六)「真实用户体验数据」的唯一证据；
+#      已有数据时默认拒绝重建，必须先导出或显式 FORCE_REBUILD=1。
+ADMIN_PW="$(awk '$1 == "trial_admin" { print $2; exit }' "$REPO/data/trial-passwords.txt" 2>/dev/null || true)"
+[ -n "$ADMIN_PW" ] || die "本机口令表里没有 trial_admin 口令（先跑 deploy/reset_trial_passwords.py generate）"
+
+EXISTING_EVENTS="$("${SSH[@]}" "cd '$REMOTE_ROOT' && python3 -c \"import sqlite3, os; p = 'data/trial.db'; print(sqlite3.connect(p).execute('select count(*) from event_log').fetchone()[0] if os.path.exists(p) else 0)\" 2>/dev/null" || echo 0)"
+EXISTING_EVENTS="$(printf '%s' "$EXISTING_EVENTS" | tr -dc '0-9')"
+EXISTING_EVENTS="${EXISTING_EVENTS:-0}"
+log "服务器 trial.db 现有真实埋点：$EXISTING_EVENTS 行"
+
+if [ "$EXISTING_EVENTS" -gt 0 ] && [ "${FORCE_REBUILD:-0}" != "1" ]; then
+  die "已有 $EXISTING_EVENTS 行真实试用数据（资格项证据），重建会清空 → 已中止。
+     先导出：ssh -i $KEY $SSH_USER@$HOST 'cd $REMOTE_ROOT && python3 scripts/telemetry_report.py --db data/trial.db'
+     确认要重建再加 FORCE_REBUILD=1 重跑本脚本。"
+fi
+
+log "重建试用库（build_trial_org.py --per-teacher，admin 口令经 stdin）"
+printf '%s\n' "$ADMIN_PW" \
+  | "${SSH[@]}" "cd '$REMOTE_ROOT' && python3 scripts/build_trial_org.py --per-teacher --admin-password-stdin" \
   || { rollback_data; die "重建试用库失败（已回滚 data/）"; }
 
-# ── 4. 重置 12 位教师口令（各自随机串，旧共享口令作废）─────
-log "重置 12 位教师口令（生成 + 应用）"
+# ── 4. 重置 13 个试用账号口令（admin + 12 教师，各自随机串，旧共享口令作废）
+log "重置试用账号口令（admin + 12 教师）"
 "$PY_LOCAL" "$REPO/deploy/reset_trial_passwords.py" generate 2>/dev/null \
   | "${SSH[@]}" "cd '$REMOTE_ROOT' && python3 deploy/reset_trial_passwords.py apply --db data/trial.db" \
   || { rollback_data; die "重置教师口令失败（已回滚 data/）"; }
