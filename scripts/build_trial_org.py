@@ -112,9 +112,18 @@ TEACHER_PASSWORD = "123456"
 #: build 与 reset 共享，避免「库里的口令与发给老师的登录卡不一致」。
 _PW_TABLE = os.path.join(ROOT, "data", "trial-passwords.txt")
 
+#: 2026-10-25 TRIAL-AUTH-KIT-2：`--admin-password-stdin` 传进来的口令（优先级最高）。
+#: 起因：服务器上没有 data/trial-passwords.txt（data/ 不进 tar 同步），
+#: 而 deploy/sync_to_server.sh 步骤 3 就在服务器上建库 → 读表必然 FAIL。
+#: 用法：ssh ... "python3 scripts/build_trial_org.py --per-teacher --admin-password-stdin" <<< "$ADMIN_PW"
+#: ⛔ 不要改回「命令行参数传口令」（会出现在 ps 里），也不要把口令落盘。
+_ADMIN_PW_FROM_STDIN: str | None = None
+
 
 def admin_password() -> str:
-    """从 data/trial-passwords.txt 读 trial_admin 口令；缺失则报错退出。"""
+    """trial_admin 口令：--admin-password-stdin > data/trial-passwords.txt；都没有则报错退出。"""
+    if _ADMIN_PW_FROM_STDIN:
+        return _ADMIN_PW_FROM_STDIN
     if os.path.exists(_PW_TABLE):
         for ln in open(_PW_TABLE, encoding="utf-8"):
             parts = ln.split(None, 1)
@@ -123,7 +132,8 @@ def admin_password() -> str:
     raise SystemExit(
         f"FAIL 未找到 {ADMIN_LOGIN} 的口令（{_PW_TABLE}）。\n"
         "请先运行：python deploy/reset_trial_passwords.py generate\n"
-        "（口令表 data/ 已 gitignore，明文不入库、不出本机）"
+        "（口令表 data/ 已 gitignore，明文不入库、不出本机；\n"
+        "  在服务器上建库时用 --admin-password-stdin 从标准输入喂口令）"
     )
 
 # 每个班排这几门课（通用学科名，非真实信息）。
@@ -694,7 +704,17 @@ def main() -> int:
     ap.add_argument("--scrub", metavar="NAME", help="用脱敏盐稳定脱敏一个名字")
     ap.add_argument("--per-teacher", action="store_true",
                     help="一师一组织：12 位老师各一个独立组织，消解互不影响（教师试用用）")
+    ap.add_argument("--admin-password-stdin", action="store_true",
+                    help="从标准输入读一行作为 trial_admin 口令（服务器上建库用；优先于口令表）")
     args = ap.parse_args()
+
+    global _ADMIN_PW_FROM_STDIN
+    if args.admin_password_stdin:
+        line = sys.stdin.readline().strip()
+        if not line:
+            print("FAIL --admin-password-stdin 收到空行，中止", file=sys.stderr)
+            return 2
+        _ADMIN_PW_FROM_STDIN = line
 
     if args.scrub:
         salt = ensure_salt()

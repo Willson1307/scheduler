@@ -15,11 +15,44 @@
 🔴 断言口径（首跑踩过）：`count`=聚合组数（界面口径），`raw_count`=原始条数（消解口径），
    两者必须都比；只比 count 会得出「隔离失效」的错误结论。
 """
+import argparse
 import json
+import os
 import sys
 import urllib.request
 
-BASE = "http://127.0.0.1:8000"
+#: 服务地址：默认本机 8000；要打别的机子用 SCHEDULER_BASE_URL（2026-10-25 TRIAL-AUTH-KIT-2）。
+BASE = os.environ.get("SCHEDULER_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+
+#: 口令表（2026-10-25 TRIAL-AUTH-KIT-2）：教师口令 2026-10-23 起已随机化，
+#: 不再有「所有人共用一个弱口令」这回事。口令表在 data/（gitignore），可用 --password-table 覆盖。
+#: 🔴 本脚本原先写死统一弱口令，试用库口令重置后一跑就 401 —— 同型缺陷，勿再写死口令。
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_PW_TABLE = os.path.join(_REPO, "data", "trial-passwords.txt")
+
+
+def _load_passwords(path: str) -> dict:
+    if not os.path.exists(path):
+        raise SystemExit(
+            f"FAIL 找不到口令表：{path}\n"
+            "先在本地跑：python deploy/reset_trial_passwords.py generate\n"
+            "（或用 --password-table 指向别的表）"
+        )
+    table = {}
+    for ln in open(path, encoding="utf-8"):
+        parts = ln.split(None, 1)
+        if len(parts) == 2:
+            table[parts[0].strip()] = parts[1].strip()
+    if not table:
+        raise SystemExit(f"FAIL 口令表为空：{path}")
+    return table
+
+
+_ap = argparse.ArgumentParser(description="试用组织隔离实测（12 位老师互不影响）")
+_ap.add_argument("--password-table", default=DEFAULT_PW_TABLE,
+                 help=f"登录名 → 口令的表（默认 {DEFAULT_PW_TABLE}）")
+_args = _ap.parse_args()
+PASSWORDS = _load_passwords(_args.password_table)
 
 
 def req(method, path, token=None, body=None):
@@ -52,7 +85,10 @@ BASE_RAW = {}
 BASE_CNT = {}
 print("=== 登录并读初始冲突 ===")
 for k in ("t01", "t02", "t03", "t12"):
-    tok = login(f"trial_{k}", "123456")
+    _login = f"trial_{k}"
+    if _login not in PASSWORDS:
+        raise SystemExit(f"FAIL 口令表里没有 {_login}（表：{_args.password_table}）")
+    tok = login(_login, PASSWORDS[_login])
     tokens[k] = tok
     c = conflicts(tok)
     # 🔴 count=聚合组数（界面口径）/ raw_count=原始条数（消解口径）。
