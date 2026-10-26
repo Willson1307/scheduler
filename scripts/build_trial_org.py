@@ -21,6 +21,12 @@
     python scripts/build_trial_org.py --dump              # 导出全部文本字段（供 grep）
     python scripts/build_trial_org.py --scrub 王小明  # 用脱敏盐稳定脱敏一个名字
 
+    # 2026-10-26（TRIAL-REANCHOR）：试用日 2026-10-12 → 2026-11-11~13，
+    # 学期起点/活动日期必须跟着挪，否则「活动过期 → 冲突归零且不报错」：
+    python scripts/build_trial_org.py --per-teacher --db /tmp/t.db --term-start 2026-11-09
+    （--db 默认仍为 data/trial.db，--term-start 默认仍为 2026-10-12，旧调用零破坏；
+      落库前会把「学期起点 / 活动日期 / 目标库路径」三行打到 stdout）
+
 🔴🔴 为什么试用必须用 `--per-teacher`（2026-10-11 队长提问触发的第 13 处设计缺陷）
 ---------------------------------------------------------------------------
 问题：「一个老师把冲突全消了，剩下的老师怎么办？」
@@ -93,6 +99,10 @@ TERM_NAME = "示例学期"
 # 原值2026-10-05 会让整个 10/12–10/18 试用期落在「学期第 2 周」，
 # 而冲突课表造在第 1 周 → 实测 10/12 起只剩 **1 处冲突**（10/05 起才有 32 处）。
 # 1 处冲突撑不起「AI 求解一键消解」的说服力，且老师不会去点消解 → 采不到完成率。
+# 2026-10-26（TRIAL-REANCHOR）：此常量降级为 **CLI --term-start 的默认值**。
+# 试用日再变时用 `--term-start YYYY-MM-DD` 重锚（活动 = 起点+2 天的周三），
+# 不改代码。实测教训：term 锚 10/12、试用日 11/11 时 raw_count 30 → 3，
+# 接口不报错 ——「活动过期」是静默失效，靠 build 参数外置 + 就绪脚本才兜得住。
 TERM_START = "2026-10-12"  # 周一：让10/12–10/18 整个试用期都落在学期第 1 周内
 
 CLASSES = 6
@@ -204,7 +214,8 @@ def scrub_name(raw: str, salt_hex: str) -> str:
 # 生成试用组织
 # ---------------------------------------------------------------------------
 def _fresh_db(db_path: str) -> sqlite3.Connection:
-    """删旧库（含 -wal/-shm 残留）并建空库。"""
+    """删旧库（含 -wal/-shm 残留）并建空库。父目录不存在则先建（--db 指临时目录用）。"""
+    os.makedirs(os.path.dirname(os.path.abspath(db_path)) or ".", exist_ok=True)
     for suffix in ("", "-wal", "-shm"):
         p = db_path + suffix
         if os.path.exists(p):
@@ -346,26 +357,30 @@ def build_per_teacher(conn: sqlite3.Connection, start: str, end: str) -> dict:
     return {"per_teacher": True, "orgs": orgs}
 
 
-def build(per_teacher: bool = False) -> dict:
-    """重建 data/trial.db，返回规模与冲突统计。
+def build(per_teacher: bool = False, db_path: str = TRIAL_DB,
+          term_start: str = TERM_START) -> dict:
+    """重建试用库（db_path / term_start 由 CLI --db / --term-start 传入），返回规模与冲突统计。
 
+    默认值与旧调用完全兼容（data/trial.db + TERM_START）。
     per_teacher=False（默认）：共享单组织，32 处冲突，供**现场演示 / 多人围观**。
     per_teacher=True：一师一组织（12 个），每位老师的消解互不影响，供**教师试用**。
     """
-    conn = _fresh_db(TRIAL_DB)
+    conn = _fresh_db(db_path)
 
     if per_teacher:
-        term_end = (date.fromisoformat(TERM_START)
+        term_end = (date.fromisoformat(term_start)
                     + timedelta(days=20 * 7 - 1)).isoformat()
-        info = build_per_teacher(conn, TERM_START, term_end)
+        info = build_per_teacher(conn, term_start, term_end)
         info["admin_login"] = ADMIN_LOGIN
+        info["term_start"] = term_start
+        info["term_end"] = term_end
         conn.close()
         return info
 
     org_id, root_id = create_organization(conn, ORG_NAME)
     setup_default_slots(conn, org_id, periods_per_day=PERIODS_PER_DAY, days=DAYS)
 
-    start = TERM_START
+    start = term_start
     end = (date.fromisoformat(start) + timedelta(days=20 * 7 - 1)).isoformat()
     create_term(conn, org_id, TERM_NAME, start, end)
 
@@ -706,7 +721,19 @@ def main() -> int:
                     help="一师一组织：12 位老师各一个独立组织，消解互不影响（教师试用用）")
     ap.add_argument("--admin-password-stdin", action="store_true",
                     help="从标准输入读一行作为 trial_admin 口令（服务器上建库用；优先于口令表）")
+    ap.add_argument("--db", default=TRIAL_DB, metavar="PATH",
+                    help="目标库路径（默认 data/trial.db）。_fresh_db 会删库重建——"
+                         "想先试建就指到临时副本，别拿 data/ 下的正式库当实验场")
+    ap.add_argument("--term-start", default=TERM_START, metavar="YYYY-MM-DD",
+                    help=f"学期起点（默认 {TERM_START}；「示例活动」落在起点+2 天的周三）。"
+                         "试用日变了必须重锚：term 落后于真实日期时活动过期、冲突归零且不报错")
     args = ap.parse_args()
+
+    try:
+        date.fromisoformat(args.term_start)
+    except ValueError:
+        print(f"FAIL --term-start 需要 YYYY-MM-DD，收到 {args.term_start!r}", file=sys.stderr)
+        return 2
 
     global _ADMIN_PW_FROM_STDIN
     if args.admin_password_stdin:
@@ -723,33 +750,38 @@ def main() -> int:
         return 0
 
     if args.dump:
-        if not os.path.exists(TRIAL_DB):
-            print(f"库不存在：{TRIAL_DB}", file=sys.stderr)
+        if not os.path.exists(args.db):
+            print(f"库不存在：{args.db}", file=sys.stderr)
             return 1
-        conn = connect(TRIAL_DB)
+        conn = connect(args.db)
         for ln in _dump_lines(conn):
             print(ln)
         conn.close()
         return 0
 
     if args.check:
-        ok, report = check()
+        ok, report = check(args.db)
         return _print_check(ok, report)
 
     # 默认：重建 + 自检
+    # 🔴 落库前先把三行关键参数打到 stdout：跑错库 / 锚错学期当场可见，
+    #    不等「老师进来看到 0 冲突」才暴露（本卡的病灶就是这两个值错了没人知道）。
+    d3 = date.fromisoformat(args.term_start) + timedelta(days=2)
+    print(f"生效学期起点：{args.term_start}")
+    print(f"活动日期：{d3.isoformat()}（学期起点 + 2 天，周三；一次性「示例活动」全落这天）")
+    print(f"目标库路径：{os.path.abspath(args.db)}")
     ensure_salt()
-    info = build(per_teacher=args.per_teacher)
+    info = build(per_teacher=args.per_teacher, db_path=args.db,
+                 term_start=args.term_start)
     print("=" * 56)
     print("试用组织（trial）数据已生成"
           + ("　【一师一组织模式】" if info.get("per_teacher") else "　【共享单组织模式】"))
     print("=" * 56)
-    print(f"库文件：{TRIAL_DB}")
+    print(f"库文件：{os.path.abspath(args.db)}")
 
     if info.get("per_teacher"):
         print(f"组织数：{len(info['orgs'])} 个教师组织 + 1 个管理员组织")
-        term_end = (date.fromisoformat(TERM_START)
-                    + timedelta(days=20 * 7 - 1)).isoformat()
-        print(f"学期：{TERM_START} ~ {term_end}")
+        print(f"学期：{info['term_start']} ~ {info['term_end']}")
         print(f"教师密码：{TEACHER_PASSWORD}（登录名见下表，一人一组织，互不影响）")
         print()
         print(f"{'短码':<6}{'登录名':<14}{'组织':<14}{'班':<4}{'学生':<6}{'第1周冲突'}")
@@ -774,7 +806,7 @@ def main() -> int:
         print("    否则第一位老师消解后，其余老师看到的冲突会归零。")
         print()
 
-    ok, report = check()
+    ok, report = check(args.db)
     return _print_check(ok, report)
 
 

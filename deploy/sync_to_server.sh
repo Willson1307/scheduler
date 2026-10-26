@@ -14,7 +14,11 @@
 #   bash deploy/sync_to_server.sh
 # 可覆盖：
 #   SCHEDULER_HOST=106.53.214.131  SCHEDULER_SSH_KEY=$HOME/.ssh/wb_deploy
-#   SCHEDULER_TODAY=2026-10-12     （重开试用日期，队长拍板后只改这一个值）
+#   SCHEDULER_TODAY=YYYY-MM-DD     （🔴 缺省=运行当日，写进 systemd unit 的
+#                                   SCHEDULER_TODAY，并把试用学期起点锚定到
+#                                   该日所在周周一；只有要复现旧日期时才显式传。
+#                                   旧注释教人写死 2026-10-12 —— 谁忘了传，老师
+#                                   看到的就是过期的课表，且没有任何报错）
 #
 # 通道：tar over ssh（唯一实测可用）；rsync 本机未装、服务器私有库无凭据、不 git clone。
 set -euo pipefail
@@ -24,7 +28,7 @@ HOST="${SCHEDULER_HOST:-106.53.214.131}"
 SSH_USER="ubuntu"
 KEY="${SCHEDULER_SSH_KEY:-$HOME/.ssh/wb_deploy}"
 REMOTE_ROOT="/home/ubuntu/scheduler"
-TRIAL_TODAY="${SCHEDULER_TODAY:-2026-10-12}"
+TRIAL_TODAY="${SCHEDULER_TODAY:-$(date +%F)}"
 UNIT_NAME="scheduler-trial"
 TRIAL_PORT="8000"
 
@@ -90,9 +94,14 @@ if [ "$EXISTING_EVENTS" -gt 0 ] && [ "${FORCE_REBUILD:-0}" != "1" ]; then
      确认要重建再加 FORCE_REBUILD=1 重跑本脚本。"
 fi
 
-log "重建试用库（build_trial_org.py --per-teacher，admin 口令经 stdin）"
+# 🔴 2026-10-26（TRIAL-REANCHOR）：学期起点锚定 TRIAL_TODAY 所在周周一。
+#   旧版重建不带 --term-start → 永远用 build 脚本里 2026-10-12 的默认学期 →
+#   试用日一到、一次性「示例活动」过期、冲突 30→3 且接口不报错（本卡要修的病灶）。
+TRIAL_TERM_START="$(date -d "$TRIAL_TODAY -$(( $(date -d "$TRIAL_TODAY" +%u) - 1 )) days" +%F)" || true
+[ -n "$TRIAL_TERM_START" ] || die "无法由 TRIAL_TODAY=$TRIAL_TODAY 计算学期起点（需 YYYY-MM-DD）"
+log "重建试用库（term-start=$TRIAL_TERM_START ← TRIAL_TODAY=$TRIAL_TODAY 所在周周一，admin 口令经 stdin）"
 printf '%s\n' "$ADMIN_PW" \
-  | "${SSH[@]}" "cd '$REMOTE_ROOT' && python3 scripts/build_trial_org.py --per-teacher --admin-password-stdin" \
+  | "${SSH[@]}" "cd '$REMOTE_ROOT' && python3 scripts/build_trial_org.py --per-teacher --term-start '$TRIAL_TERM_START' --admin-password-stdin" \
   || { rollback_data; die "重建试用库失败（已回滚 data/）"; }
 
 # ── 4. 重置 13 个试用账号口令（admin + 12 教师，各自随机串，旧共享口令作废）
@@ -102,7 +111,9 @@ log "重置试用账号口令（admin + 12 教师）"
   || { rollback_data; die "重置教师口令失败（已回滚 data/）"; }
 
 # ── 5. 写 systemd user unit（--today 走 Environment）──────
-log "写 systemd unit（SCHEDULER_TODAY=$TRIAL_TODAY）"
+# 🔴 写 unit 之前先把最终 TRIAL_TODAY 打出来——这是老师将要看到的「今天」，
+#    锚错了当场可见，不等试用当天才发现（TRIAL-REANCHOR）。
+log "最终 TRIAL_TODAY=$TRIAL_TODAY（即将写入 unit 的 SCHEDULER_TODAY；学期起点=$TRIAL_TERM_START）"
 UNIT_CONTENT="$(cat <<EOF
 [Unit]
 Description=Scheduler Trial Server (TRIAL-SYNC-2)
