@@ -31,6 +31,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from datetime import date
 
 from . import auth
 from . import b3_kernels as K
@@ -192,6 +193,96 @@ def _enrich(conn, payload: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 一次性活动窗口哨兵（2026-10-27，治「活动过期 → 冲突归零且不报错」）
+# ---------------------------------------------------------------------------
+
+#: 一次性活动与扫描窗口相差超过这么多天才告警。
+#: 为什么是 7：resolve_window 的窗口 = today 所在周的周一~周日，窗口内任何日期
+#: 与 today 的距离都 ≤ 6 天；7 天是「还落在本周窗口内」的宽松上界，超过它
+#: 活动必然扫不到。与 tests/test_trial_activity_window.py 的 MAX_WINDOW_DAYS 同口径。
+ACTIVITY_GAP_WARN_DAYS = 7
+
+
+def activity_window_advisory(conn, org_id: str, window: dict) -> dict:
+    """一次性活动的日期落点 vs 本次扫描窗口 —— 不重叠就明确告警。
+
+    🔴 为什么需要它（静默失效第 21 处形态，2026-10-26 实测）：
+    同一份试用库，`--today 2026-10-14` → raw_count=30；`--today 2026-11-11`
+    （教师试用日）→ raw_count=3。接口 **200、页面正常、没有任何报错**，
+    老师打开看到的就是一个「没什么可消解」的空场景 —— 主场景整体消失。
+    同类事故在演示库上同样成立：demo.db 裸起（不带 `--demo`）在 2026-11-16
+    只扫到 1 处冲突（`--demo` 才有 23 处）。
+
+    根因不是扫描算错，而是**一次性活动的日期被钉在过去的某一周**，
+    而窗口跟着 today 走。所以判据只能是「活动日期区间 与 窗口区间 是否重叠」，
+    跟冲突算法无关，这也是它必须放在接口层而不是内核层的原因
+    （内核只负责在给定窗口内如实扫描，窗口外没有数据不是内核的错）。
+
+    返回（**只新增字段，不动内核已定的任何值**，契约 §12.3）：
+        {"has_once": bool, "count": int, "earliest": "YYYY-MM-DD"|None,
+         "latest": ..., "gap_days": int|None, "advisory": str|None}
+
+    `advisory` 非空 = 需要人看一眼；空 = 一切正常。**不抛异常**：
+    数据缺失时如实降级（与 warnings 的态度一致），不能一条脏数据打死接口。
+    """
+    row = conn.execute(
+        "SELECT MIN(o.start_at) AS lo, MAX(o.start_at) AS hi, COUNT(*) AS n"
+        " FROM schedule_once o JOIN schedules s ON s.id = o.schedule_id"
+        " WHERE s.org_id = ?",
+        (org_id,),
+    ).fetchone()
+
+    count = int(row["n"] or 0) if row else 0
+    if count == 0:
+        return {
+            "has_once": False,
+            "count": 0,
+            "earliest": None,
+            "latest": None,
+            "gap_days": None,
+            "advisory": (
+                "本组织没有任何一次性活动 —— 「活动撞课表」场景不存在，"
+                "页面只会显示周期性冲突。演示/试用库请确认活动已被写入"
+                "（build_trial_org.py / seeds.py）。"
+            ),
+        }
+
+    lo = date.fromisoformat(row["lo"][:10])
+    hi = date.fromisoformat(row["hi"][:10])
+    w_from = date.fromisoformat(window["from"])
+    w_to = date.fromisoformat(window["to"])
+
+    if hi < w_from:  # 活动全在窗口左侧（最常见：活动已过期）
+        gap = (w_from - hi).days
+        where = "早于"
+    elif lo > w_to:  # 活动全在窗口右侧（学期起点锚到未来）
+        gap = (lo - w_to).days
+        where = "晚于"
+    else:  # 至少有一天重叠 —— 活动在窗口内，扫描得到
+        gap = 0
+        where = ""
+
+    advisory = None
+    if gap > ACTIVITY_GAP_WARN_DAYS:
+        advisory = (
+            f"一次性活动 {lo.isoformat()} ~ {hi.isoformat()} 全部{where}扫描窗口 "
+            f"{w_from.isoformat()} ~ {w_to.isoformat()}（相差 {gap} 天）—— "
+            f"「活动撞课表」场景不可见，页面只剩周期性冲突，且接口不会报错。"
+            f"核对两处：① 学期起点是否锚到本期（build_trial_org.py --term-start）；"
+            f"② 启动日期是否落在活动所在周（run_server.py --today / --demo）。"
+        )
+
+    return {
+        "has_once": True,
+        "count": count,
+        "earliest": lo.isoformat(),
+        "latest": hi.isoformat(),
+        "gap_days": gap,
+        "advisory": advisory,
+    }
+
+
+# ---------------------------------------------------------------------------
 # handler
 # ---------------------------------------------------------------------------
 
@@ -228,6 +319,8 @@ def list_conflicts(method, path, query, body, headers, context=None):
         # 越权校验 + group → org_id（越权 403，组不存在 404）
         _group, org_id = K.resolve_authorized_org(conn, user_id, group)
         payload = K.conflict_payload(conn, org_id, cfg)
+        # 活动窗口哨兵：只加字段，不改内核已定的 count/raw_count/window/items
+        payload["activity_window"] = activity_window_advisory(conn, org_id, payload["window"])
         return _enrich(conn, payload)
     finally:
         conn.close()
