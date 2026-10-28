@@ -4,7 +4,9 @@
 
     ① 公网 /api/health 的 server_date == 期望日期（默认本机当日）
     ② 13 个试用账号（trial_admin + trial_t01..t12）全部登录 200
-    ③ trial_t01 的 /api/conflicts raw_count > 0（主场景「活动撞课表」在）
+    ③ trial_t01 的 /api/conflicts raw_count > 0 且活动未过期
+      （2026-10-27 起同时看 activity_window.advisory：非空即判失败，
+        见 api_conflicts.py 的活动窗口哨兵）
     ④ event_log 表存在且可插入一条再删掉（写权限探测，不留痕，经 ssh 直连库）
     ⑤ survey_responses 表缺失时可建（调 scripts/import_survey.py 的
        ensure_survey_table，幂等，经 ssh 在服务器上执行）
@@ -273,14 +275,25 @@ def main() -> int:
         st_c, conflicts = request(args.base_url, "GET", "/api/conflicts", token=t01)
         raw = conflicts.get("raw_count") if isinstance(conflicts, dict) else None
         win = conflicts.get("window") if isinstance(conflicts, dict) else None
-        check("③ trial_t01 /api/conflicts raw_count > 0",
-              st_c == 200 and isinstance(raw, int) and raw > 0,
+        # 🔴 2026-10-27（ACTIVITY-WINDOW-GUARD）：raw_count>0 只是**必要条件**。
+        #    活动"刚好"落在窗口内但已过期时 raw 可能仍有零头，靠天数判定才准；
+        #    接口自 2026-10-27 起会带回 activity_window.advisory（活动与窗口不重叠
+        #    时的可读告警）。这里把它变成硬判据：advisory 非空 = 不通过，
+        #    并在失败信息里原样带出告警文本，让人一眼知道该改 term-start 还是 --today。
+        aw = conflicts.get("activity_window") if isinstance(conflicts, dict) else None
+        advice = aw.get("advisory") if isinstance(aw, dict) else None
+        ok3 = st_c == 200 and isinstance(raw, int) and raw > 0 and not advice
+        check("③ trial_t01 /api/conflicts raw_count > 0 且活动未过期",
+              ok3,
               f"status={st_c}，raw_count={raw}，count="
               f"{conflicts.get('count') if isinstance(conflicts, dict) else '-'}，"
-              f"window={win}")
+              f"window={win}"
+              + (f"；activity_window={aw}" if aw is not None else ""))
         if st_c == 200 and isinstance(raw, int) and raw == 0:
             print("      ⚠️ raw_count=0：大概率是「活动过期 / today 不在冲突周」——"
                   "查 server_date 与试用学期起点（build --term-start）", flush=True)
+        if advice:
+            print(f"      ⚠️ 活动窗口告警：{advice}", flush=True)
 
     # ── ④ event_log 存在且可写（插一条删一条，不留痕）──────────
     # 🔴 远端路径必须用 posixpath 拼：Windows 本机 os.path.join 会产出

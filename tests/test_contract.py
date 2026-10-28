@@ -336,6 +336,33 @@ class TestConflicts(_Authed):
         if data["count"] > 0:
             self.assertTrue(data["items"], "count>0 时 items 不应为空")
 
+    def test_activity_window_present(self):
+        """§5 加字段（契约 §12.3 非破坏性）：一次性活动窗口哨兵必须随响应返回。
+
+        🔴 为什么这条要在契约层守住：2026-10-26 实测过「活动过期 → 冲突 30→3、
+        接口零报错、页面正常」，而当时能发现它的只有测试与部署脚本，
+        接口响应里没有任何线索。字段缺失 = 前端/核对脚本永远看不到这个问题。
+        只断言**存在性与类型**，不断言具体天数（天数随 today 变，写死必假红）。
+        """
+        data = self._conflicts()
+        self.assertIn("activity_window", data, "§5 响应缺 activity_window（活动过期哨兵）")
+        aw = data["activity_window"]
+        self.assertIsInstance(aw, dict)
+        for key in ("has_once", "count", "earliest", "latest", "gap_days", "advisory"):
+            self.assertIn(key, aw, f"activity_window 缺字段 {key}")
+        self.assertIsInstance(aw["has_once"], bool)
+        self.assertIsInstance(aw["count"], int)
+        if aw["has_once"]:
+            self.assertTrue(_is_iso_date(aw["earliest"]))
+            self.assertTrue(_is_iso_date(aw["latest"]))
+            self.assertIsInstance(aw["gap_days"], int)
+            self.assertGreaterEqual(aw["gap_days"], 0)
+        # advisory 的语义：None = 正常；字符串 = 要人看一眼。类型不能漂
+        self.assertTrue(
+            aw["advisory"] is None or isinstance(aw["advisory"], str),
+            f"advisory 只能是 None 或字符串，实际 {aw['advisory']!r}",
+        )
+
     def test_conflict_item_fields_are_full(self):
         data = self._conflicts()
         for item in data["items"]:
