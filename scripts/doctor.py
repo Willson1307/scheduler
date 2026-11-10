@@ -75,6 +75,11 @@ EXPECTED_ROUTES: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/api/approvals/reject"),
     ("POST", "/api/approvals/withdraw"),
     ("GET", "/api/approvals/events"),
+    # B-1（作息方案）：三个方法都必须显式登记——同 B9/B8 的教训，整个
+    # api_*.py 没合进 main、或漏注册某个 method 时，扫描本身不报错。
+    ("POST", "/api/period-sets"),
+    ("GET", "/api/period-sets"),
+    ("GET", "/api/period-sets/detail"),
 })
 
 CHECKS: list[tuple[str, bool, str]] = []  # (名称, 是否通过, 说明)

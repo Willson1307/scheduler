@@ -175,14 +175,19 @@ class TestMakeupExpansion(unittest.TestCase):
             conn.close()
 
     def test_other_modes_ignored(self):
-        """cancel/move/special 与 scope='schedule' 的行：本卡忽略，不抛错不生效。"""
+        """cancel/move 与 scope='schedule' 的行：P0-2 本卡忽略，不抛错不生效。
+
+        🔴 B-1 起 `mode='special'` **不再属于本用例**：它现在会被
+        load_exceptions 读取（该日换 period_sets 那套作息），且 set_id 缺失/
+        指向不存在方案会抛 ValueError。special 的断言全部搬到
+        `tests/test_special_schedule.py`，本用例只保留与 special 无关的口径。
+        """
         conn = fresh()
         try:
             org, cfg = _setup(conn)
-            # cancel/move/special 均 as_of_dow=NULL —— 不得触发"NULL 抛错"（那仅限 mode='as_of'）
+            # cancel/move 均 as_of_dow=NULL —— 不得触发"NULL 抛错"（那仅限 mode='as_of'）
             _ins_sched_exc(conn, "se_c", org, "2026-09-23", "cancel")
             _ins_sched_exc(conn, "se_m", org, "2026-09-24", "move", new_mask="1")
-            _ins_sched_exc(conn, "se_s", org, "2026-09-25", "special", set_id="set_x")
             _ins_sched_exc(conn, "se_sc", org, "2026-09-26", "cancel",
                            scope="schedule", target_id="sch_dummy")
             exc = load_exceptions(conn, org)

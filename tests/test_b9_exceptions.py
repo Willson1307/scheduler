@@ -330,15 +330,29 @@ class TestDayExceptionsModel(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_load_special_ignored(self):
-        """mode='special' 刻意忽略：不落地、不抛错（与 P0-2 口径一致）。"""
+    def test_load_special_missing_set_raises(self):
+        """🔴 B-1 变更：mode='special' 不再「忽略不报错」。
+
+        修前口径（P0-2 时代）：special 不落地、不抛错。
+        修后（卡 rOKKES）：special 会被读取；`set_id` 指向不存在的方案或
+        scope != 'day' 一律 ValueError —— 「查不到就当默认作息用」是典型
+        静默失效（课表与配置不一致且无人知晓）。
+        完整语义用例见 tests/test_special_schedule.py。
+        """
         conn = fresh()
         try:
             org, _cfg = _setup(conn)
             _ins_exc(conn, "se_s", org, "2026-09-25", "special", set_id="set_x")
-            exc = load_exceptions(conn, org)
-            self.assertEqual(exc.cancels, set())
-            self.assertEqual(exc.moves, {})
+            with self.assertRaises(ValueError) as cm:
+                load_exceptions(conn, org)
+            # 该行默认 scope='schedule' → 先被 scope 校验拦下（不许静默忽略）
+            self.assertIn("scope", str(cm.exception))
+
+            conn.execute("UPDATE schedule_exceptions SET scope = 'day' WHERE id = 'se_s'")
+            conn.commit()
+            with self.assertRaises(ValueError) as cm:
+                load_exceptions(conn, org)
+            self.assertIn("set_x", str(cm.exception))
         finally:
             conn.close()
 
