@@ -48,7 +48,7 @@ from scheduler.seeds import seed_demo  # noqa: E402
 #:    自检命令（两处必须输出同一串）：
 #:      grep -n 'ASSET_VERSION = ' src/server/config.py
 #:      grep -n 'app.js?v=' web/index.html
-ASSET_VERSION = "20261110"
+ASSET_VERSION = "20261111"
 
 #: 默认数据库：与队长 L8 沙盒演示库同路径，现场「删 data/ → 一条命令 →
 #: 30 秒可演示」的闭环由本模块的自动初始化兜底（CP-G）。

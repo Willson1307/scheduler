@@ -398,3 +398,48 @@ CREATE TABLE IF NOT EXISTS set_slots (
     enabled     INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     UNIQUE (set_id, day_of_week, idx)
 );
+
+-- ===========================================================================
+-- 例外 ⑧（队长 2026-11-10 批准，卡 rvdL9a）：消解闭环快照
+-- ===========================================================================
+-- 用途：`POST /api/resolve` 是**原地 UPDATE**（m2.apply_plan 直接改
+--   schedule_periodic.slot_bitmap / schedule_once.start_at、end_at），
+--   点一次就不可逆。本表在写入前存一份**全量**快照，支撑：
+--     · revert  → 按快照逐字段回写，回到应用前
+--     · commit  → 固化为正式版本（此后再 revert 一律 409）
+--
+-- 🔴 为什么存全量而不是增量：
+--   消解是迭代过程（max_rounds=24），每一轮改哪几条依赖当时的占用状态，
+--   事前算不出改动集合；组织级日程只有几十条，全量快照仅几 KB。
+--   「简单且不会漏」优先于「省几 KB」——漏一条就是撤销不干净。
+--
+-- 🔴 payload 结构（JSON 文本）：
+--   {"schedules":[{"id":"sch_x","kind":"periodic","bitmap":"ff0f",
+--                  "start_at":null,"end_at":null},
+--                 {"id":"sch_y","kind":"once","bitmap":null,
+--                  "start_at":"2026-11-11T09:30","end_at":"2026-11-11T10:10"}],
+--    "captured_at":"2026-11-11T09:30:00"}
+--   `kind` 决定回写哪张表：周期日程写 schedule_periodic.slot_bitmap，
+--   一次性活动写 schedule_once.start_at/end_at。
+--   （⚠️ 卡面写的 `schedules.start_at` 是笔误：schedules 主表只有 id/org_id/
+--     kind/title/created_by/created_at/updated_at，起止时刻在 schedule_once。）
+--
+-- 🔴 status 三态用 CHECK 锁死，不允许第四种或 NULL：
+--   「这版到底是临时还是定稿」不能靠人记。
+--
+-- 旧库兜底（第 10 处静默失效防线）：ensure_database 只在库缺失时 seed，
+-- 已存在的 data/*.db 不会补新表 → b4_kernels.ensure_snapshot_table()
+-- 查 sqlite_master，缺则 init_db（与 occupancy.ensure_period_set_tables 同范式）。
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS resolve_snapshots (
+    id               TEXT PRIMARY KEY,
+    org_id           TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    created_by       TEXT NOT NULL,              -- users.id
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    status           TEXT NOT NULL CHECK (status IN ('applied', 'reverted', 'committed')),
+    payload          TEXT NOT NULL,              -- JSON 全量快照
+    applied_count    INTEGER,
+    remaining_before INTEGER,
+    remaining_after  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_snap_org ON resolve_snapshots(org_id, created_at);
