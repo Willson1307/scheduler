@@ -48,7 +48,10 @@ const USE_MOCK = false;   // F3b：真实接口（mock 分支保留，供离线�
  *   §4  GET  /api/schedules → {objects,days,grid}，grid 键= "<object_id>|<date>"
  *   §5  GET  /api/conflicts → {count,raw_count,items[{a,b,date,slots,readable}]}
  *   §6  POST /api/resolve   → {applied,remaining_before,remaining_after,rounds,
- *                             filtered_out_count,termination}
+ *                             filtered_out_count,termination,snapshot_id}
+ *       POST /api/resolve/revert?id=  → {reverted,snapshot_id,conflicts_after}
+ *       POST /api/resolve/commit?id=  → {committed,snapshot_id}（仅 admin/own）
+ *       GET  /api/resolve/snapshots   → {snapshots:[…最近 20 条…]}
  *
  * 🔴 count 与 raw_count 语义不同，切勿混用：
  *    count    = 聚合后的冲突**组**数（演示库 3）
@@ -284,8 +287,27 @@ function mockRoute(pathname, method) {
         rounds: 3,
         filtered_out_count: 0,
         termination: 'ok',
+        // 闭环（卡 rvdL9a）：mock 也给 snapshot_id，让撤销/固化按钮在离线兜底时可用
+        snapshot_id: 'snap_mock',
       },
     };
+  }
+  if (pathname === '/api/resolve/revert' && method === 'POST') {
+    mockState.resolved = false;
+    const c = mockConflictsFor(currentGroupId());
+    return {
+      status: 200,
+      body: {
+        reverted: true, snapshot_id: 'snap_mock', conflicts_after: c.raw_count,
+        already_reverted: false, restored: 2, missing: 0,
+      },
+    };
+  }
+  if (pathname === '/api/resolve/commit' && method === 'POST') {
+    return { status: 200, body: { committed: true, snapshot_id: 'snap_mock' } };
+  }
+  if (pathname === '/api/resolve/snapshots' && method === 'GET') {
+    return { status: 200, body: { snapshots: [] } };
   }
   return { status: 404, body: { error: { code: 'not_found', message: 'mock 未覆盖该路径：' + pathname } } };
 }
@@ -831,7 +853,9 @@ function renderConflicts(counts) {
       : '口径说明：「' + counts.groups + ' 组」是服务端聚合后的冲突组数（一条冲突涉及多个学生时'
         + '只报1 组，否则同班 40 名学生会把一处冲突刷成 40 条）；「' + counts.raw
         + ' 处」是聚合前的原始冲突条数。消解按钮调POST /api/resolve，'
-        + '由后端统一求解（契约 §5 要求服务端聚合、§6 要求前端不做位运算）。');
+        + '由后端统一求解（契约 §5 要求服务端聚合、§6 要求前端不做位运算）。'
+        + ' 消解后结果条上可「撤销本次消解」——消解是原地改写课表，撤销按应用前的'
+        + ' 全量快照逐字段回写；管理员还可「固化此版本」，固化后不可撤销。');
 
   // ---- 列表 ----
   const items = arr(counts, 'items');
@@ -994,6 +1018,90 @@ function renderResolveResult(body) {
     box.appendChild(el('div', {
       cls: 'banner warn',
       text: '仍有 ' + after + ' 处未消解。请看上方终止态说明，或联系有改权限的人处理；系统不会假装已经解决。',
+    }));
+  }
+
+  /* ---- 闭环（卡 rvdL9a）：撤销本次消解 / 固化此版本 ----
+   * 为什么必须有：apply_plan 是原地 UPDATE，点一次就回不去了。
+   * 现场敢点「一键消解」的前提是「能撤回」，所以按钮紧贴结果条，
+   * 文案带上真实数字（N 处 / 23 → 0），不写死。
+   * 🔴 只有 applied > 0 才显示撤销（没改动就没有可撤销的东西）。
+   * 🔴 固化只对 admin 显示前端按钮；真正的权限判定在后端（teacher → 403）。
+   */
+  const sid = body.snapshot_id ? String(body.snapshot_id) : '';
+  if (sid) {
+    const strip = el('div', { cls: 'banner ok' });
+    const canUndo = applied !== null && applied > 0;
+    strip.appendChild(el('span', {
+      text: '已消解 ' + (applied === null ? '?' : String(applied)) + ' 处（'
+        + (before === null ? '?' : String(before)) + ' → '
+        + (after === null ? '?' : String(after)) + '）' + (canUndo ? '｜' : ''),
+    }));
+    if (canUndo) {
+      const undo = el('button', {
+        cls: 'primary', text: '撤销本次消解', attrs: { type: 'button' },
+      });
+      undo.addEventListener('click', function () { doRevert(sid, undo); });
+      strip.appendChild(undo);
+    }
+    if (isAdmin()) {
+      const fix = el('button', {
+        cls: 'danger', text: '固化此版本', attrs: { type: 'button' },
+      });
+      fix.addEventListener('click', function () { doCommit(sid, fix); });
+      strip.appendChild(fix);
+    }
+    box.appendChild(strip);
+  }
+}
+
+/** 当前登录身份是否管理员（仅用于决定「固化此版本」按钮是否显示）。
+ *  真正的权限判定在后端（commit 要求该组 own 档，teacher 一律 403）。 */
+function isAdmin() {
+  return !!(state.user && state.user.global_role === 'admin');
+}
+
+/** 撤销本次消解：按应用前快照逐字段回写 → 刷新周视图与冲突列表。 */
+async function doRevert(sid, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const body = await apiPost('/api/resolve/revert', withGroup({ id: sid }), {});
+    await loadAll();   // 周视图 + 冲突列表重新拉，反映还原后的真实状态
+    const after = intOrNull(body, 'conflicts_after');
+    const restored = intOrNull(body, 'restored');
+    clear($('resBox'));
+    $('resBox').appendChild(el('div', {
+      cls: 'banner ok',
+      text: '已还原：冲突回到 ' + (after === null ? '?' : String(after)) + ' 处'
+        + '（回写 ' + (restored === null ? '?' : String(restored)) + ' 条日程，逐字段等于消解前）'
+        + ((body && body.already_reverted) ? '。这条快照先前已撤销，本次未改动数据。' : ''),
+    }));
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    clear($('resBox'));
+    $('resBox').appendChild(el('div', {
+      cls: 'banner error',
+      text: '撤销失败：' + httpErrText(e) + '（409 = 该版本已固化，需管理员重新消解）',
+    }));
+  }
+}
+
+/** 固化此版本：此后 revert 一律 409（不许静默忽略）。 */
+async function doCommit(sid, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await apiPost('/api/resolve/commit', withGroup({ id: sid }), {});
+    clear($('resBox'));
+    $('resBox').appendChild(el('div', {
+      cls: 'banner ok',
+      text: '已固化此版本（快照 ' + sid + '）。此后再撤销会被拒绝；如需调整请重新执行消解。',
+    }));
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    clear($('resBox'));
+    $('resBox').appendChild(el('div', {
+      cls: 'banner error',
+      text: '固化失败：' + httpErrText(e) + '（403 = 需要管理员或 own 档权限）',
     }));
   }
 }

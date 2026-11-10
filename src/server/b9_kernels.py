@@ -59,6 +59,7 @@ from scheduler.occupancy import (
     ensure_schedule_exceptions,
     expand_once,
     expand_periodic,
+    load_exceptions,
     load_terms,
 )
 from scheduler.slots import (
@@ -269,6 +270,14 @@ def exception_effective(
     if not (row["valid_from"] <= iso <= row["valid_to"]):
         return False
     if row["kind"] == "periodic":
+        # 🔴 P2 修复（卡 rvdL9a 顺手项）：第 9 个参数曾是 None ——
+        #    等于告诉 expand_periodic「这天没有任何例外」。而本函数要回答的
+        #    正是「写下这条例外，当天占用是否真的会变」，于是：
+        #      · 该日是调休日（mode='as_of'）→ 按默认作息展开，天数/掩码都可能不同；
+        #      · 该日换了作息方案（mode='special'）→ 默认 8 节 vs 方案 7 节，
+        #        「第 8 节取消了」这种例外会被算成 effective=true，**字段撒谎**。
+        #    两类都是「返回 true 但实际不生效」的假阳性，属于本项目最忌的静默失效。
+        #    改为一律读真例外：与 expand_periodic 在占用计算时的入参保持同源。
         days = expand_periodic(
             row["week_parity"],
             int(row["slot_bitmap"], 16) if row["slot_bitmap"] else 0,
@@ -278,7 +287,7 @@ def exception_effective(
             load_terms(conn, org_id),
             d,
             d,
-            None,
+            load_exceptions(conn, org_id),
         )
     else:
         days = expand_once(row["start_at"], row["end_at"], cfg)

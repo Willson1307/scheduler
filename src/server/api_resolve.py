@@ -2,6 +2,9 @@
 
 GET  /api/resolve?group=&mode=  → top-3 消解方案预览（docs/07 §6.1）
 POST /api/resolve                → 执行一键消解（迭代）
+POST /api/resolve/revert?id=     → 撤销一次消解（按应用前快照逐字段回写）
+POST /api/resolve/commit?id=     → 固化（仅 admin / own 档）
+GET  /api/resolve/snapshots?group= → 最近 20 条快照
 限频：每 token 每分钟 10 次，超限 429（docs/07 §6）
 
 用途与设计意图（答辩口径）：
@@ -19,6 +22,11 @@ POST /api/resolve                → 执行一键消解（迭代）
      @require_auth 拦 401；`_scope` 走 `K.resolve_authorized_org` 拦跨组织 403
      （GET 预览与 POST 执行同口径，杜绝「读泄漏 + 写越权」），
      movable 一律按 effective_group 闭包（越权不越界）。
+  6. 闭环（卡 rvdL9a，例外 ⑧）：`m2.apply_plan()` 是**原地 UPDATE**，
+     点一次不可逆。本文件在 `resolve_and_apply_filtered()` 调用**前后**加一层
+     快照（`b4_kernels.capture` / `write_snapshot`），支撑「撤销本次消解」
+     与「固化此版本」。🔴 m2.py 一行未改 —— 它是 386 项测试锁定的核心。
+     权限：apply / revert = 登录 + 同组织；commit = 该组 own 档（admin 短路）。
 
 签名约定（写死，不得改）：
   handle(method, path, query, body, headers, context=None)
@@ -35,6 +43,7 @@ from datetime import timedelta
 
 from . import auth
 from . import b3_kernels as K
+from . import b4_kernels as S
 from . import config
 from .http_api import ApiError, json_body
 
@@ -208,10 +217,24 @@ def resolve_post(method, path, query, body, headers, context=None):
         slot_cfg = load_slot_config(conn, org_id)
         remaining_before = scan(conn, org_id, date_from, date_to, cfg=slot_cfg).count
 
+        # 🔴 快照必须在写入**之前**抓（例外 ⑧）：apply_plan 是原地 UPDATE，
+        #    抓晚一步拿到的就是消解后的状态，撤销等于没撤。
+        before_payload = S.capture(conn, org_id)
+
         applied, remaining_after, filtered_out = m2.resolve_and_apply_filtered(
             conn, org_id, date_from, date_to, movable_ids,
             cfg=slot_cfg,
             window_days=MODE_WINDOW_DAYS[mode],
+        )
+
+        snapshot_id = S.write_snapshot(
+            conn,
+            org_id,
+            context["user_id"],
+            before_payload,
+            applied,
+            remaining_before,
+            remaining_after,
         )
 
         if remaining_after == 0:
@@ -221,6 +244,8 @@ def resolve_post(method, path, query, body, headers, context=None):
         else:
             termination = "best_effort"
 
+        # 🔴 原有六个字段一个都不能少（前端 renderResolveResult 与契约测试在吃）；
+        #    snapshot_id 是新增字段，非破坏性。
         return {
             "applied": applied,
             "remaining_before": remaining_before,
@@ -228,7 +253,80 @@ def resolve_post(method, path, query, body, headers, context=None):
             "rounds": applied,
             "filtered_out_count": filtered_out,
             "termination": termination,
+            "snapshot_id": snapshot_id,
         }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 闭环：撤销 / 固化 / 快照列表（卡 rvdL9a）
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_id(query: dict) -> str:
+    """取 ?id=snap_x。缺失 → 400（路由是精确匹配，id 只能走 query）。"""
+    sid = (query.get("id") or [""])[0].strip()
+    if not sid:
+        raise ApiError(400, "缺少 id 参数（要撤销/固化哪一条快照）")
+    return sid
+
+
+@auth.require_auth
+def resolve_revert(method, path, query, body, headers, context=None):
+    """撤销一次消解：按应用前快照逐字段回写。
+
+    权限 = 登录 + 同组织（教师可用）。固化的快照 → 409（不许静默忽略）。
+    已撤销再撤 → 200 幂等，**不写任何数据**。
+    """
+    sid = _snapshot_id(query)
+    group = _parse_group(query)
+    conn = config.open_db()
+    try:
+        org_id, _movable = _scope(conn, context["user_id"], group)
+        result = S.revert(conn, org_id, sid)
+        # 回写后用同一口径重算冲突数，证明「还原了」不是靠自述
+        cfg = config.get_current_config()
+        date_from, date_to = _resolve_window(cfg)
+        slot_cfg = load_slot_config(conn, org_id)
+        conflicts_after = scan(conn, org_id, date_from, date_to, cfg=slot_cfg).count
+        return {
+            "reverted": True,
+            "snapshot_id": sid,
+            "conflicts_after": conflicts_after,
+            "already_reverted": result["already_reverted"],
+            "restored": result["restored"],
+            "missing": result["missing"],
+        }
+    finally:
+        conn.close()
+
+
+@auth.require_auth
+def resolve_commit(method, path, query, body, headers, context=None):
+    """固化某个版本：仅 admin 全局角色 或 该组 own 档，否则 403。"""
+    sid = _snapshot_id(query)
+    group = _parse_group(query)
+    conn = config.open_db()
+    try:
+        effective_group, org_id = K.resolve_authorized_org(conn, context["user_id"], group)
+        # 先判组织归属（不存在/别组织的 id → 404），再判档位（→ 403）
+        S.get_row(conn, org_id, sid)
+        S.require_own_level(conn, context["user_id"], effective_group)
+        S.commit(conn, org_id, sid)
+        return {"committed": True, "snapshot_id": sid}
+    finally:
+        conn.close()
+
+
+@auth.require_auth
+def resolve_snapshots_get(method, path, query, body, headers, context=None):
+    """最近 20 条快照（org 级，按登录用户可访问的组定位组织）。"""
+    group = _parse_group(query)
+    conn = config.open_db()
+    try:
+        org_id, _movable = _scope(conn, context["user_id"], group)
+        return {"snapshots": S.list_recent(conn, org_id)}
     finally:
         conn.close()
 
@@ -236,4 +334,7 @@ def resolve_post(method, path, query, body, headers, context=None):
 ROUTES = {
     ("GET", "/api/resolve"): resolve_get,
     ("POST", "/api/resolve"): resolve_post,
+    ("POST", "/api/resolve/revert"): resolve_revert,
+    ("POST", "/api/resolve/commit"): resolve_commit,
+    ("GET", "/api/resolve/snapshots"): resolve_snapshots_get,
 }
