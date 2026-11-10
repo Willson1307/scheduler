@@ -363,7 +363,7 @@ Agent 侧读取有边界：**只给禁令不给正确做法，Agent 会绕过禁
 | ④ | **修改** `seeds.py` 的 `seed_demo()` 补授权 | 修 P0-1 教师授权（rji49M） | 🔴 允许改现有文件：仅 seed_demo 函数体末尾追加 grant_role + 返回值加 group_roles，不碰其他函数 | 全量测试全绿 + `tests/test_seed_demo_authz.py` 3 条全绿 |
 | ⑤ | **修改** `occupancy.py` 扩 `mode='special'` 分支 | 夏冬作息（B 刚需，`rOKKES`） | 🔴 仅扩展开分支；**位图与 idx 逻辑一行不动** | 全量绿 + special 用例 + 🔴 **`expand_periodic()` 与 `hard_violations()` 双读断言** |
 | ⑥ | **修改** `m2.py` **新增** `find_slots()` | M3 局部补排（B 刚需，`rbOAef`） | 🔴 **只许新增函数**，不改现有函数体/签名 | 全量绿 + smoke 绿；`resolve()` / `resolve_and_apply()` 行为**逐字节不变** |
-| ⑦ | `schema.sql` **末尾追加** `period_sets` + `slot_time_overrides` | 作息集（配合 ⑤） | 🔴 纯追加，**不动 `period_slots`、不改其唯一约束** | 旧库升级**幂等**用例 + 全量绿 |
+| ⑦ | `schema.sql` **末尾追加** `period_sets` + `set_slots` | 作息方案（配合 ⑤） | 🔴 纯追加，**不动 `period_slots`、不改其唯一约束** | 旧库升级**幂等**用例 + 全量绿 |
 
 **⑤⑥⑦ 的附加条件（2026-10-25 队长批准，三条同时适用）**：
 
@@ -374,9 +374,22 @@ Agent 侧读取有边界：**只给禁令不给正确做法，Agent 会绕过禁
 - 🔴 **⑥ 的边界是「不改变已验证行为」**：`resolve()` / `resolve_and_apply()` 输出必须逐字节一致，
   这是 M2 已被现场演示与契约测试锁定的能力，新功能不得触碰。
 - ⚠️ **⑦ 是「只加表，不改表」**：`period_slots` 的 `UNIQUE(org_id, day_of_week, idx)`
-  决定了一个组织只能有一套节次时间。**不要为了 `special` 去改这个约束** ——
-  夏冬作息按「钟点平移」实现（只覆盖 `start_time`/`end_time`，节次数与顺序不变）。
-  若确认节次**数量**也要变，**停工报告**，需重新设计并另批例外。
+  决定了一个组织只能有一套**默认**节次时间。**不要为了 `special` 去改这个约束** ——
+  作息方案走 `period_sets` + `set_slots` 两张独立新表，`period_slots` 保持"默认方案"地位。
+
+  **🔴 为什么「多套方案」不需要改位图（2026-11-10 澄清，别再说要「停工报告」）**：
+  `src/scheduler/slots.py:24-26` 写着 `MAX_PERIODS_PER_DAY = 16`、
+  `WEEK_MASK_BITS = 7 * 16`，注释原话是「留余量是有意的：**位序固定，配置怎么改都不影响历史掩码**」。
+  → 第 k 节永远是第 k 位。夏 8 节 / 冬 7 节 / 考试周 6 节**全在同一个 112 位掩码里**。
+  → 「钟点平移」「冬季取消第 8 节」「只上上午 4 节」**是同一个模型**：
+    `set_slots` 里写 `enabled=1` 的 `(day_of_week, idx)` 行；**缺行与 `enabled=0` 等价**，
+    都表示「该方案这一天没有这一节」。
+  ⛔ 所以旧说法「节次数量一变就要停工重设计」**已作废**，不要再按它卡住。
+
+- 🔴 **⑦ 附带的「缺节不静默」要求**：某方案没有第 8 节、而有日程正好排在第 8 节时，
+  那天不占用是对的，但**必须产出 advisory**（如 `special_slot_missing` + 受影响条数），
+  **⛔ 不许 `continue` 静默跳过**。参照 `api_conflicts.py` 的 `activity_window_advisory`：
+  不抛异常、只出提示。理由：PR #15 修的就是同一形态（活动过期 → 冲突归零且零报错）。
 
 **③ 的具体要求**（别自作主张扩大范围）：
 
