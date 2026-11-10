@@ -1069,11 +1069,20 @@ async function doRevert(sid, btn) {
     await loadAll();   // 周视图 + 冲突列表重新拉，反映还原后的真实状态
     const after = intOrNull(body, 'conflicts_after');
     const restored = intOrNull(body, 'restored');
+    // 🔴 2026-11-10：`missing` 必须参与文案。
+    //    原文案无条件写「逐字段等于消解前」—— 但后端在「消解后该日程被别人删掉了」
+    //    时会返回 missing>0，此时并未完全还原。照旧文案就是**让界面撒谎**，
+    //    正是本项目最痛的静默失效形态（只是这次落在提示文字上）。
+    const missing = intOrNull(body, 'missing');
+    const missN = (missing === null ? 0 : missing);
+    const exact = (missN === 0);
     clear($('resBox'));
     $('resBox').appendChild(el('div', {
-      cls: 'banner ok',
+      cls: exact ? 'banner ok' : 'banner warn',
       text: '已还原：冲突回到 ' + (after === null ? '?' : String(after)) + ' 处'
-        + '（回写 ' + (restored === null ? '?' : String(restored)) + ' 条日程，逐字段等于消解前）'
+        + '（回写 ' + (restored === null ? '?' : String(restored)) + ' 条日程'
+        + (exact ? '，逐字段等于消解前）'
+                 : '；另有 ' + String(missN) + ' 条日程已不存在，未能还原）')
         + ((body && body.already_reverted) ? '。这条快照先前已撤销，本次未改动数据。' : ''),
     }));
   } catch (e) {
