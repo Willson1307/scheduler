@@ -25,7 +25,14 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 from .db import init_db
-from .slots import SlotConfig, bit, hex_to_mask, load_slot_config, popcount
+from .slots import (
+    SlotConfig,
+    bit,
+    decode_bit_index,
+    hex_to_mask,
+    load_slot_config,
+    popcount,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -114,10 +121,14 @@ def week_parity_of(term: Term, d: date) -> int:
 #                      → INNER JOIN 视图 v_schedule_full 不含它，冲突扫描完全看不见
 #   move_no_slot     = B9：某条周期日程被 move 改点后，新掩码与当天启用槽位无交集
 #                      → 改点在这些日期等于把课改没了（课表凭空不见）
+#   special_slot_missing = B-1：该日切换了作息方案（mode='special'），而日程排在该方案
+#                      不存在的节次（如冬季取消第 8 节）→ 那天不占用是对的，但必须
+#                      让老师看见「这节课在当天不存在」，不许静默消失
 ISSUE_PERIODIC_NO_TERM = "periodic_no_term"
 ISSUE_ONCE_NO_SLOT = "once_no_slot"
 ISSUE_ORPHAN_SCHEDULE = "orphan_schedule"
 ISSUE_MOVE_NO_SLOT = "move_no_slot"
+ISSUE_SPECIAL_SLOT_MISSING = "special_slot_missing"
 
 _ISSUE_TEXT = {
     ISSUE_PERIODIC_NO_TERM: (
@@ -136,6 +147,11 @@ _ISSUE_TEXT = {
         "日程 {schedule_id} 在 {count} 天被 move 改点后的新掩码与该日启用槽位无交集"
         "（如改到午休/未启用节次），改点在这些日期等于把课改没了。"
         "日期：{dates}"
+    ),
+    ISSUE_SPECIAL_SLOT_MISSING: (
+        "该 {count} 天使用了作息方案「{extra}」，日程排在该方案里不存在的节次。"
+        "当天不占用是对的，但老师在课表上看不到这几节课——若无意为，"
+        "请检查该方案是否漏配这些节次。日期：{dates}"
     ),
 }
 
@@ -162,6 +178,9 @@ class ExpansionIssue:
     schedule_title: str = ""
     dates: list[str] = field(default_factory=list)  # 受影响日期（ISO，已排序）
     count: int = 0  # 受影响天数（orphan 恒为 1）
+    #: 额外上下文，供 {extra} 占位符使用（B-1 special_slot_missing 用：方案名 + 缺的节次）。
+    #: 现有 4 个 code 的文案都不引用 {extra}，故新增本字段对既有输出**逐字节无影响**。
+    extra: str = ""
 
     @property
     def detail(self) -> str:
@@ -169,6 +188,7 @@ class ExpansionIssue:
             count=self.count,
             dates=", ".join(self.dates[:8]) + (" 等" if len(self.dates) > 8 else ""),
             schedule_id=self.schedule_id,
+            extra=self.extra,
         )
 
     def to_payload(self) -> dict:
@@ -188,7 +208,7 @@ class ExpansionIssue:
 class DayExceptions:
     """日期级例外的统一视图（load_exceptions 的返回值，P0-2 起）。
 
-    四类语义，分属两张表：
+    五类语义，分属三张表：
       holidays = 放假（calendar_exceptions, kind='holiday'）：该日停课；
       as_of    = 调休（schedule_exceptions, scope='day', mode='as_of'）：
                  该日按 as_of_dow 周几的课表上课，键为 ISO 日期、值 1..7
@@ -198,13 +218,21 @@ class DayExceptions:
       moves    = 临时改点（schedule_exceptions, scope='schedule', mode='move'）：
                  键 (schedule_id, ISO)，值 = 新周掩码（DB 口径，与 slot_bitmap
                  同 0-based 位序）。B9 起由 apply_schedule_exceptions 在展开
-                 后覆盖当天掩码；mode='special' 不落地（忽略不报错）。
+                 后覆盖当天掩码；
+      specials = 换作息方案（schedule_exceptions, scope='day', mode='special'，
+                 B-1）：键为 ISO 日期、值为 period_sets.id。该日「用哪套作息」
+                 由它决定；`as_of` 决定「按周几的课表」，两者可同日共存。
+                 special_cfgs 是 set_id → SlotConfig 的缓存（由
+                 load_period_sets 预载），让 expand_periodic 不必再查库。
     """
 
     holidays: set[str] = field(default_factory=set)
     as_of: dict[str, int] = field(default_factory=dict)
     cancels: set[tuple[str, str]] = field(default_factory=set)
     moves: dict[tuple[str, str], int] = field(default_factory=dict)
+    specials: dict[str, str] = field(default_factory=dict)
+    special_cfgs: dict[str, "SlotConfig"] = field(default_factory=dict)
+    special_names: dict[str, str] = field(default_factory=dict)
 
     def is_holiday(self, iso: str) -> bool:
         return iso in self.holidays
@@ -216,6 +244,10 @@ class DayExceptions:
     def moved_mask(self, schedule_id: str, iso: str) -> int | None:
         """某条周期日程的某一天被临时改点后的新周掩码；未改点返回 None。"""
         return self.moves.get((schedule_id, iso))
+
+    def set_id_of(self, iso: str) -> str | None:
+        """该日绑定的作息方案 id；未绑定返回 None。"""
+        return self.specials.get(iso)
 
     @classmethod
     def coerce(
@@ -256,14 +288,25 @@ def expand_periodic(
     视图），也兼容旧格式 {ISO: kind} 字典。调休日（mode='as_of'）改按
     as_of_dow 周几的槽位展开——位号公式不变，只是换了"查哪一天的课表"。
 
+    B-1（换作息方案）：该日命中 `mode='special'` 时，节次配置换成
+    `period_sets/set_slots` 那套（`effective_slot_config` 是唯一事实来源）。
+    位号公式仍不动——第 k 节永远是第 k 位，方案只是决定「这一节存不存在」。
+
     P0-3：日期落在任何 term 区间外时，过去是静默 continue（课表凭空不见）。
     现在仍不展开（掩码模型下无 term 就无法定周次），但必须记入 issues
     返回给调用方——计数 + 上抛，不许无声。
+
+    B-1「缺节不静默」：换方案后日程排在该方案不存在的节次 → 那天不占用
+    是对的，但必须记一条 special_slot_missing（否则就是 PR #15 那类事故：
+    课表少了一节、接口 200、零报错）。
     """
     exc = DayExceptions.coerce(exceptions)
     vf, vt = _parse_date(valid_from), _parse_date(valid_to)
     out: dict[date, int] = {}
     no_term_days: list[str] = []
+    missing_days: list[str] = []
+    missing_idx: set[int] = set()
+    missing_sets: list[str] = []
     d = date_from
     while d <= date_to:
         iso = d.isoformat()
@@ -276,9 +319,31 @@ def expand_periodic(
                     dow = exc.as_of.get(iso)
                     if dow is None:
                         dow = d.isoweekday()
-                    day_mask = slot_bitmap & cfg.day_mask(dow)
+                    # B-1：该日若绑了作息方案，节次配置换成方案那套
+                    day_cfg = effective_slot_config(exc, cfg, iso)
+                    default_day_mask = cfg.day_mask(dow)
+                    day_mask = slot_bitmap & day_cfg.day_mask(dow)
                     if day_mask:
                         out[d] = day_mask
+                    if day_cfg is not cfg:
+                        # 🔴 缺节不静默：本来在默认作息下上得了的节次，
+                        # 换方案后「这一节不存在」→ 必须让人看见。
+                        lost = slot_bitmap & default_day_mask & ~day_cfg.day_mask(dow)
+                        if lost:
+                            missing_days.append(iso)
+                            # 用 decode_bit_index 反查节次，不自己重写位号公式
+                            rest = lost
+                            while rest:
+                                low = rest & -rest
+                                _dow_of_bit, idx_of_bit = decode_bit_index(
+                                    low.bit_length() - 1
+                                )
+                                missing_idx.add(idx_of_bit)
+                                rest ^= low
+                            set_id = exc.specials.get(iso, "")
+                            name = exc.special_names.get(set_id) or set_id
+                            if name not in missing_sets:
+                                missing_sets.append(name)
             elif issues is not None:
                 # P0-3：无 term 覆盖且不是放假——静默跳过的可见化。
                 no_term_days.append(iso)
@@ -289,6 +354,18 @@ def expand_periodic(
                 code=ISSUE_PERIODIC_NO_TERM,
                 dates=sorted(no_term_days),
                 count=len(no_term_days),
+            )
+        )
+    if missing_days and issues is not None:
+        issues.append(
+            ExpansionIssue(
+                code=ISSUE_SPECIAL_SLOT_MISSING,
+                dates=sorted(missing_days),
+                count=len(missing_days),
+                extra="{}（缺第 {} 节）".format(
+                    "、".join(missing_sets) or "未知方案",
+                    "、".join(str(i) for i in sorted(missing_idx)),
+                ),
             )
         )
     return out
@@ -391,6 +468,83 @@ def ensure_schedule_exceptions(conn: sqlite3.Connection) -> None:
         init_db(conn)
 
 
+def ensure_period_set_tables(conn: sqlite3.Connection) -> None:
+    """确保 period_sets / set_slots 两张表存在（幂等，B-1 作息方案）。
+
+    与 ensure_schedule_exceptions 同范式：已存在的 data/*.db 不会在启动时重建
+    表（ensure_database 只在库文件缺失时 seed），故**读前**调用。schema.sql 是
+    唯一 DDL 来源，缺表就跑 init_db，杜绝「表结构在 schema.sql 与代码里各写
+    一遍」的漂移。这是本项目第 9 处静默失效防线。
+    """
+    missing = [
+        name
+        for name in ("period_sets", "set_slots")
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone()
+        is None
+    ]
+    if missing:
+        init_db(conn)
+
+
+def load_period_sets(conn: sqlite3.Connection, org_id: str) -> dict[str, dict]:
+    """读本组织的作息方案 → {set_id: {"name": 方案名, "cfg": SlotConfig}}。
+
+    🔴 set_slots 语义（写死在这里，别处不许另解释）：
+      · 展开时**只认 enabled = 1** 的行（SlotConfig.day_mask 已按 enabled 过滤）；
+      · enabled = 0 与**缺行完全等价**，都表示「该方案这一天没有这一节」；
+      · 方案存在但 set_slots 零行 = 该方案全天无课（合法，不抛错，靠 advisory 提示）。
+    """
+    out: dict[str, dict] = {}
+    for r in conn.execute(
+        "SELECT id, name FROM period_sets WHERE org_id = ?", (org_id,)
+    ).fetchall():
+        out[r["id"]] = {"name": r["name"], "cfg": SlotConfig(org_id=org_id)}
+    if not out:
+        return out
+    for r in conn.execute(
+        "SELECT s.set_id, s.day_of_week, s.idx, s.start_time, s.end_time, s.enabled"
+        " FROM set_slots s JOIN period_sets p ON p.id = s.set_id"
+        " WHERE p.org_id = ?",
+        (org_id,),
+    ).fetchall():
+        entry = out.get(r["set_id"])
+        if entry is None:  # 理论不可达（JOIN 已限定），防御性跳过
+            continue
+        entry["cfg"].slots[(r["day_of_week"], r["idx"])] = {
+            "name": None,  # set_slots 无 name 列，节次名沿用默认方案口径
+            "start_time": r["start_time"],
+            "end_time": r["end_time"],
+            "enabled": bool(r["enabled"]),
+        }
+    return out
+
+
+def effective_slot_config(
+    exc: "DayExceptions", cfg: SlotConfig, iso: str
+) -> SlotConfig:
+    """该日**实际生效**的节次配置：命中 special 返回方案配置，否则返回默认 cfg。
+
+    🔴 这是「作息方案」的唯一事实来源：expand_periodic（显示/占用）与测试都读
+    它，不许别处再自己判断一次 set_id（只改一处 = 占用显示空着、排课按有课）。
+
+    注意与 as_of 的分工：`as_of` 决定「按周几的课表」（dow），`special` 决定
+    「用哪套作息」（本函数）。两者可同日共存，互不替代。
+    """
+    set_id = exc.specials.get(iso)
+    if set_id is None:
+        return cfg
+    set_cfg = exc.special_cfgs.get(set_id)
+    if set_cfg is None:
+        # DayExceptions 被手工构造却没预载 special_cfgs：宁可报错，不悄悄用默认作息
+        raise ValueError(
+            f"日期 {iso} 绑定了作息方案 {set_id!r}，但 special_cfgs 里没有它——"
+            f"请用 load_exceptions() 构造 DayExceptions（拒绝静默回退默认作息）"
+        )
+    return set_cfg
+
+
 def load_exceptions(conn: sqlite3.Connection, org_id: str) -> DayExceptions:
     """同时读两张例外表（P0-2，队长 2026-10-12 拍板；B9 扩展第三类语义）：
 
@@ -399,14 +553,20 @@ def load_exceptions(conn: sqlite3.Connection, org_id: str) -> DayExceptions:
       惰性（周六照旧查周六槽位 → 掩码 0），调休一律改走新表。
     - schedule_exceptions, scope='day' 且 mode='as_of'：调休（P0-2）。
     - schedule_exceptions, scope='schedule' 且 mode='cancel'/'move'：B9 的
-      「某条周期日程的某一天」临时取消/改点。special 刻意忽略不报错
-      （与 test_p0_2_makeup.test_other_modes_ignored 的口径一致）。
+      「某条周期日程的某一天」临时取消/改点。
+    - schedule_exceptions, scope='day' 且 mode='special'：B-1 换作息方案，
+      该日改按 period_sets/set_slots 那套节次配置展开。
 
     🔴 队长定死的语义：mode='as_of' 但 as_of_dow 为 NULL / 越界 / 同日多条
     dow 互相矛盾 → 抛 ValueError，绝不静默跳过（P0-3 教训：假阴性——
     系统说没冲突、实际有——直接毁掉本系统的全部价值主张）。
+
+    🔴 B-1 同口径：mode='special' 但 set_id 为 NULL / 指向不存在的方案 /
+    同日多条互相矛盾 → 同样抛 ValueError。「方案不存在就当默认作息用」
+    是典型静默失效（卡面必验 5 明确要求报错）。
     """
     ensure_schedule_exceptions(conn)
+    ensure_period_set_tables(conn)
     exc = DayExceptions()
     for r in conn.execute(
         "SELECT date, kind FROM calendar_exceptions WHERE org_id = ?", (org_id,)
@@ -472,6 +632,44 @@ def load_exceptions(conn: sqlite3.Connection, org_id: str) -> DayExceptions:
                     f"（{prev:#x} vs {new_mask:#x}）——请先修正数据"
                 )
             exc.moves[key] = new_mask
+    # B-1 换作息方案：mode='special' → 该日绑定的 period_sets.id
+    # 刻意**不限 scope**：scope='schedule'+special 是没实现的组合，若过滤掉就成了
+    # 静默忽略（与「缺节不静默」同一条纪律），所以取出来显式报错。
+    special_rows = conn.execute(
+        "SELECT id, scope, date, set_id FROM schedule_exceptions"
+        " WHERE org_id = ? AND mode = 'special'",
+        (org_id,),
+    ).fetchall()
+    if special_rows:
+        sets = load_period_sets(conn, org_id)
+        for r in special_rows:
+            if r["scope"] != "day":
+                raise ValueError(
+                    f"schedule_exceptions(id={r['id']}, date={r['date']}): "
+                    f"mode='special' 只支持 scope='day'（整天换作息），"
+                    f"实际 scope={r['scope']!r}——拒绝静默忽略这条例外"
+                )
+            if r["set_id"] is None:
+                raise ValueError(
+                    f"schedule_exceptions(id={r['id']}, date={r['date']}): "
+                    f"mode='special' 但 set_id 为 NULL——换作息必须指明用哪套方案，"
+                    f"拒绝静默按默认作息展开（P0-3 语义）"
+                )
+            if r["set_id"] not in sets:
+                raise ValueError(
+                    f"schedule_exceptions(id={r['id']}, date={r['date']}): "
+                    f"set_id={r['set_id']!r} 在本组织的 period_sets 里不存在——"
+                    f"拒绝静默回退默认作息（那会让课表与配置不一致且无人知晓）"
+                )
+            prev_set = exc.specials.get(r["date"])
+            if prev_set is not None and prev_set != r["set_id"]:
+                raise ValueError(
+                    f"schedule_exceptions(date={r['date']}): 存在多条 special 且 set_id"
+                    f" 互相矛盾（{prev_set} vs {r['set_id']}）——请先修正数据"
+                )
+            exc.specials[r["date"]] = r["set_id"]
+        exc.special_cfgs = {sid: v["cfg"] for sid, v in sets.items()}
+        exc.special_names = {sid: v["name"] for sid, v in sets.items()}
     return exc
 
 

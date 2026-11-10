@@ -352,3 +352,49 @@ CREATE TABLE IF NOT EXISTS change_events (
     detail_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_ce_request ON change_events(request_id);
+
+-- ===========================================================================
+-- ③ 作息方案（B-1 夏冬作息 · AGENTS.md §3 例外 ⑦）
+-- ---------------------------------------------------------------------------
+-- 为什么是两张**新表**而不是改 period_slots：
+--   period_slots 的 UNIQUE(org_id, day_of_week, idx)（本文件 :94）决定了一个
+--   组织只能有一套**默认**节次时间。多套作息（夏季/冬季/考试周）必须并行走
+--   本处的新表，period_slots 保持「默认方案」地位不变。
+--
+-- 为什么位图不用改、历史数据不会坏（`slots.py:24-26`）：
+--   MAX_PERIODS_PER_DAY = 16 是**上界**，位号 = (周几-1)*16 + (节次-1) 固定，
+--   → 第 k 节永远是第 k 位。夏 8 节 / 冬 7 节 / 考试周 6 节全在同一个 112 位
+--   掩码里，「钟点平移」「取消第 8 节」「只上上午 4 节」是同一个模型。
+--
+-- 🔴 set_slots 语义（定死，不许含糊）：
+--   · 展开时**只认 enabled = 1** 的行；
+--   · enabled = 0 与**缺行完全等价** —— 都表示「该方案这一天没有这一节」；
+--   · idx 上界 = slots.MAX_PERIODS_PER_DAY（16），不是 8 也不是 12。
+--
+-- 绑定「哪天用哪套」**不新建表**：直接用 schedule_exceptions
+--   (scope='day', mode='special', date='YYYY-MM-DD', set_id='set_winter')
+--   读路径在 occupancy.load_exceptions → expand_periodic。
+--
+-- 旧库兜底（第 9 处静默失效防线）：ensure_database 只在库文件缺失时 seed，
+-- 已存在的 data/*.db 不会补新表 → occupancy.ensure_period_set_tables 查
+-- sqlite_master，缺则 init_db（与 b8_kernels.ensure_change_tables 同范式）。
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS period_sets (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,                       -- 「冬季作息」「考试周」
+    note        TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_period_sets_org ON period_sets(org_id);
+
+CREATE TABLE IF NOT EXISTS set_slots (
+    id          TEXT PRIMARY KEY,
+    set_id      TEXT NOT NULL REFERENCES period_sets(id) ON DELETE CASCADE,
+    day_of_week INTEGER NOT NULL CHECK (day_of_week BETWEEN 1 AND 7),
+    idx         INTEGER NOT NULL CHECK (idx >= 1 AND idx <= 16),
+    start_time  TEXT NOT NULL,
+    end_time    TEXT NOT NULL,
+    enabled     INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    UNIQUE (set_id, day_of_week, idx)
+);
