@@ -1064,7 +1064,12 @@ async function doLogin() {
     delete $('groupSel').dataset.loaded;   // 换账号后授权组可能不同，强制重拉组列表
     await loadAll();
   } catch (e) {
-    showBanner($('loginErr'), '登录失败：' + e.message + '（注意：连续失败 5 次将锁定 15 分钟——契约 §1）');
+    // 🔴 2026-11-10 文案纠正：原文写「连续失败 5 次将锁定 15 分钟」——
+    //    实际实现是**组合锁 60 秒**（api_login._LOCK_SECONDS），不是 15 分钟。
+    //    按错文案，老师会白等 15 分钟；且不该把限流阈值透露给使用者。
+    //    统一口径：只提示「会短暂锁定 / 等 1 分钟」，与后端 message 一致。
+    showBanner($('loginErr'), '登录失败：' + e.message +
+      '（请检查大小写与首尾空格；多次失败会短暂锁定，等 1 分钟再试）');
   } finally {
     btn.disabled = false;
   }
