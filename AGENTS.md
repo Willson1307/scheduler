@@ -364,6 +364,7 @@ Agent 侧读取有边界：**只给禁令不给正确做法，Agent 会绕过禁
 | ⑤ | **修改** `occupancy.py` 扩 `mode='special'` 分支 | 夏冬作息（B 刚需，`rOKKES`） | 🔴 仅扩展开分支；**位图与 idx 逻辑一行不动** | 全量绿 + special 用例 + 🔴 **`expand_periodic()` 与 `hard_violations()` 双读断言** |
 | ⑥ | **修改** `m2.py` **新增** `find_slots()` | M3 局部补排（B 刚需，`rbOAef`） | 🔴 **只许新增函数**，不改现有函数体/签名 | 全量绿 + smoke 绿；`resolve()` / `resolve_and_apply()` 行为**逐字节不变** |
 | ⑦ | `schema.sql` **末尾追加** `period_sets` + `set_slots` | 作息方案（配合 ⑤） | 🔴 纯追加，**不动 `period_slots`、不改其唯一约束** | 旧库升级**幂等**用例 + 全量绿 |
+| ⑧ | `schema.sql` **末尾追加** `resolve_snapshots` | 消解可撤销（闭环，`rvdL9a`） | 🔴 纯追加，**不动 `schedule_periodic` / `schedules`**；快照只读不改业务表结构 | 旧库升级幂等 + 🔴 **撤销后 `slot_bitmap` / `start_at` 逐字段等于应用前** |
 
 **⑤⑥⑦ 的附加条件（2026-10-25 队长批准，三条同时适用）**：
 
@@ -390,6 +391,20 @@ Agent 侧读取有边界：**只给禁令不给正确做法，Agent 会绕过禁
   那天不占用是对的，但**必须产出 advisory**（如 `special_slot_missing` + 受影响条数），
   **⛔ 不许 `continue` 静默跳过**。参照 `api_conflicts.py` 的 `activity_window_advisory`：
   不抛异常、只出提示。理由：PR #15 修的就是同一形态（活动过期 → 冲突归零且零报错）。
+
+**⑧ 的附加条件（2026-11-10 队长批准）**：
+
+- 🔴 **⑧ 是「只加表 + 只包一层」**：`resolve_snapshots` 纯追加；
+  `api_resolve.py` 里只在 `resolve_and_apply_filtered()` 调用**前后**加快照写入/回写，
+  **不改 `m2.py` 一行**（m2 是 386 项测试锁定的核心）。
+- 🔴 **撤销必须逐字段还原**：`slot_bitmap`、`schedules.start_at` / `end_at` 回写后，
+  **必须等于应用前的值**（不是"大约"、"冲突数一样"）。验收用例做逐字段比对。
+- 🔴 **快照存全量而非增量**：消解是迭代多轮（`max_rounds=24`），事前算不出会改哪几条；
+  组织级日程只有几十条，全量快照几 KB，简单且不会漏。
+- 🔴 **固化权限**：`commit` 只允许 admin / `own` 档；教师只能 `apply` 与 `revert`。
+  已 `committed` 的快照再调 `revert` → **409**（不许静默忽略）。
+- ⚠️ **`status` 三态必须显式**：`applied` / `reverted` / `committed`，用 CHECK 约束锁死；
+  不允许出现第四种或 NULL —— 否则"这版到底是临时还是定稿"会变成靠人记。
 
 **③ 的具体要求**（别自作主张扩大范围）：
 
