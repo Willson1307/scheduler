@@ -669,3 +669,194 @@ def resolve_and_apply_filtered(
         prev = now
     remaining = len(find_conflicts(build_occupancy(conn, org_id, date_from, date_to, cfg=cfg)))
     return applied, remaining, filtered_out
+
+
+# ===========================================================================
+# M3（rbOAef）：局部补排 —— 「这段连续 N 节全空，能不能排在这」
+# 🔴 例外 ⑥：以下只新增函数，未改本文件上面任何一行；
+#   resolve() / resolve_and_apply() / resolve_and_apply_filtered() / apply_plan()
+#   / schedule_masks() / build_context() 的输出逐字节不变。
+# ===========================================================================
+
+
+def find_slots(
+    conn: sqlite3.Connection,
+    org_id: str,
+    *,
+    target: str,
+    date_range: tuple[date, date],
+    duration: int = 1,
+    limit: int = 8,
+    cfg: SlotConfig | None = None,
+) -> list[dict]:
+    """给某个班 / 某位老师找「连续 duration 节全空」的可排位置，按代价升序。
+
+    🔴 这是**只读**能力：不写任何表、不改任何日程，只返回候选。
+
+    语义（卡面定死，改动前先问队长）：
+      · 返回项按 (cost, date, periods) 升序，稳定可复现；
+      · 一个候选都没有 → 返回 `[]`，**不抛异常**（"全满"是正常业务结果）；
+      · 每个候选都过 `hard_violations()`，⛔ 绝不返回会撞车的候选；
+      · `target` 可以是 group（班级）也可以是 user（教师），按 objects.kind 自动处理。
+
+    🔴 两套「节假日/作息」数据必须分开取，这是本卡最容易做错的地方：
+      ① 「这一天某对象被占用了吗」→ `build_occupancy()` 的 entries
+         （`special` / `as_of` 例外在里面已生效）；
+      ② 「这一天有哪几节可排」→ **`effective_slot_config(exc, cfg, iso)`**，
+         不是调用方传进来的默认 `cfg`。
+      若 ② 用了默认 cfg，冬季作息那天（没有第 8 节）会给出「排在第 8 节」，
+      **不报错、返回 200、老师照着排就排不进去** —— 本项目最痛的静默失效形态。
+
+    另外两条同样为了「不给出不存在的候选」：
+      · 放假（`calendar_exceptions.kind='holiday'`）当天整日跳过；
+      · 不在任何 `terms` 区间内的日期整日跳过（掩码模型下无 term 就没有周次，
+        在那里给候选等于给一个排不进去的位置）。
+
+    返回每项：
+        {date, day_of_week, periods, mask, mask_hex, cost, reasons[, as_of_dow]}
+
+    `mask` 用 m2 内部口径：**周级** 0-based 掩码（`slots.bit(dow, idx)` 的或），
+    不是 `day_slots_mask()` 的「单日 1<<period」口径 —— 两者别混。
+    `day_of_week` 是**自然周几**；调休日（`as_of`）额外给 `as_of_dow` 说明按哪天的课表排。
+    """
+    # 🔴 局部导入而不是改文件顶部的 import 行：例外 ⑥ 的边界是「只新增」，
+    #    顶部那行是既有代码，动它就有回滚风险。两个符号模块里都已存在。
+    from dataclasses import replace
+
+    from ..occupancy import effective_slot_config, pick_term
+
+    if duration < 1:
+        raise ValueError(f"duration 必须 ≥ 1，收到 {duration}")
+    if duration > 16:  # slots.MAX_PERIODS_PER_DAY，与位序上界一致
+        raise ValueError(f"duration 最多 16 节（每天位序上界），收到 {duration}")
+
+    if not isinstance(date_range, tuple) or len(date_range) != 2:
+        raise ValueError(f"date_range 必须是 (起始日期, 结束日期) 二元组，收到 {date_range!r}")
+    d0, d1 = date_range
+    if not (isinstance(d0, date) and isinstance(d1, date)):
+        raise ValueError(f"date_range 两端都必须是 datetime.date，收到 {date_range!r}")
+    if d0 > d1:
+        raise ValueError(f"date_range 起始日晚于结束日：{d0.isoformat()} > {d1.isoformat()}")
+
+    row = conn.execute(
+        "SELECT id, kind, name FROM objects WHERE id = ? AND org_id = ?",
+        (target, org_id),
+    ).fetchone()
+    if row is None:
+        # 静默返回 [] 会让调用方以为「真的没空位」——配置错误宁可报错（P0-3 语义）
+        raise ValueError(f"组织 {org_id!r} 里找不到对象 {target!r}，无法查空位")
+
+    if limit <= 0:
+        return []
+
+    base_cfg = cfg or load_slot_config(conn, org_id)
+    # ① 占用（special / as_of 例外已在 build_occupancy 内部生效）
+    entries = build_occupancy(conn, org_id, d0, d1, cfg=base_cfg)
+    base_ctx = build_context(conn, org_id, entries, cfg=base_cfg)
+    # ② 该日有哪几节可排 —— 单独取，不复用 base_ctx.cfg
+    exc = load_exceptions(conn, org_id)
+    terms = load_terms(conn, org_id)
+
+    found: list[dict] = []
+    d = d0
+    while d <= d1:
+        iso = d.isoformat()
+        if exc.is_holiday(iso) or pick_term(terms, d) is None:
+            d += timedelta(days=1)
+            continue
+        # 调休日按 as_of_dow 的课表排（位号也在 as_of_dow 空间里，与占用同源）
+        dow = exc.as_of.get(iso) or d.isoweekday()
+        day_cfg = effective_slot_config(exc, base_cfg, iso)
+        if day_cfg is base_cfg:
+            ctx = base_ctx
+        else:
+            # soft_cost 的「避开末节」按 ctx.cfg 取当天最大节次，必须换成当天生效配置
+            ctx = replace(base_ctx, cfg=day_cfg)
+
+        busy = ctx.occupancy.get((target, d), 0)
+        free = day_cfg.day_mask(dow) & ~busy
+        if not free:
+            d += timedelta(days=1)
+            continue
+
+        for run in _free_runs(day_cfg, dow, free):
+            if len(run) < duration:
+                continue
+            # prefer_idx 取本段起点：_candidate_masks 按「与 prefer 的距离」排序，
+            # 距离起点最近即 idx 升序 → 枚举出的窗口天然是连续段，不重写位运算。
+            run_mask = 0
+            for idx in run:
+                run_mask |= bit(dow, idx)
+            for cand in _candidate_masks(run_mask, duration, run[0], limit=32):
+                slots = decode_mask(cand)
+                idx_list = [i for _w, i in slots]
+                # 连续 N 节：_candidate_masks 不保证连续性（它按距离贪心），
+                # 这里做一次筛选而不是另写一套窗口生成 —— 位号口径仍只有一份。
+                if len(idx_list) != duration or idx_list[-1] - idx_list[0] + 1 != duration:
+                    continue
+                # 🔴 撞车校验：宁可少给候选，不可给一个排不进去的位置
+                if hard_violations(ctx, [target], d, cand):
+                    continue
+                cost = round(soft_cost(ctx, [target], d, cand), 3)
+                item = {
+                    "date": iso,
+                    "day_of_week": d.isoweekday(),
+                    "periods": idx_list,
+                    "mask": cand,
+                    "mask_hex": format(cand, "x"),
+                    "cost": cost,
+                    "reasons": _slot_reasons(ctx, day_cfg, target, d, dow, idx_list),
+                }
+                if dow != d.isoweekday():
+                    item["as_of_dow"] = dow
+                found.append(item)
+        d += timedelta(days=1)
+
+    found.sort(key=lambda x: (x["cost"], x["date"], x["periods"], x["mask"]))
+    return found[:limit]
+
+
+def _free_runs(day_cfg: SlotConfig, dow: int, free: int) -> list[list[int]]:
+    """把「当天空闲的启用槽位」切成若干段**连续节次**（如 [[1,2,3],[6,7]]）。
+
+    只做切片，不做位运算 —— 掩码来源仍是 `SlotConfig.day_mask()`（唯一口径）。
+    """
+    runs: list[list[int]] = []
+    cur: list[int] = []
+    for _d, idx in day_cfg.enabled_slots(dow):
+        if not free & bit(dow, idx):
+            if cur:
+                runs.append(cur)
+                cur = []
+            continue
+        if cur and idx == cur[-1] + 1:
+            cur.append(idx)
+        else:
+            if cur:
+                runs.append(cur)
+            cur = [idx]
+    if cur:
+        runs.append(cur)
+    return runs
+
+
+def _slot_reasons(
+    ctx: SolverContext, day_cfg: SlotConfig, target: str, d: date, dow: int, idx_list: list[int]
+) -> list[str]:
+    """人读理由（不参与排序，排序只看 soft_cost）。"""
+    reasons: list[str] = []
+    enabled = [i for _w, i in day_cfg.enabled_slots(dow)]
+    last_idx = max(enabled) if enabled else 0
+    if last_idx and max(idx_list) < last_idx:
+        reasons.append("避开末节")
+    if sum(idx_list) / len(idx_list) <= 4:
+        reasons.append("靠近上午")
+    before = popcount(ctx.occupancy.get((target, d), 0))
+    if ctx.daily_limit and before + len(idx_list) > ctx.daily_limit:
+        reasons.append(f"超出单日上限（已有 {before} 节）")
+    busy = ctx.occupancy.get((target, d), 0)
+    for idx in (idx_list[0] - 1, idx_list[-1] + 1):
+        if 1 <= idx <= 16 and busy & bit(dow, idx):
+            reasons.append("可连堂")
+            break
+    return reasons
