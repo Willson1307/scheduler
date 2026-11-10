@@ -138,7 +138,12 @@ def login(method: str, path: str, query: dict, body: bytes, headers: dict, conte
 
     # ① 组合锁：只锁 (login, ip) 这一组 60 秒，别的 IP / 别的账号不受影响。
     if _is_locked(login_name, ip, now):
-        return 429, {"error": {"code": "locked", "message": "连续失败过多，请 1 分钟后再试"}}
+        # 🔴 2026-11-10 补 Retry-After：原先只有 IP 限流那条带，组合锁这条漏了。
+        #    RFC 7231 §7.1.3 —— 429 应告诉客户端多久后可重试，
+        #    否则前端只能写死「请 1 分钟后再试」这类可能与实现漂移的文案。
+        return (429,
+                {"error": {"code": "locked", "message": "连续失败过多，请 1 分钟后再试"}},
+                {"Retry-After": str(_LOCK_SECONDS)})
 
     conn = config.open_db()
     try:

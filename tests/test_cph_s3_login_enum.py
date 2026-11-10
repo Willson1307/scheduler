@@ -63,7 +63,12 @@ class _Base(unittest.TestCase):
     def call(self, login, password):
         body = json.dumps({"login": login, "password": password}).encode()
         res = api_login.login("POST", LOGIN, {}, body, {})
-        if isinstance(res, tuple) and len(res) == 2 and isinstance(res[0], int):
+        # 🔴 2026-11-10：handler 返回形态有二元组与三元组两种
+        #    （三元组 = (status, payload, extra_headers)，用于 429 带 Retry-After）。
+        #    旧版辅助函数只认二元组 → 三元组落到 fallback 被当成 200，
+        #    表现为「锁定那一次变成 200」，极易误判成实现坏了。
+        #    ⛔ 这里改的是测试的取值方式，断言一句未动。
+        if isinstance(res, tuple) and isinstance(res[0], int) and len(res) in (2, 3):
             return res[0], res[1]
         return 200, res
 
@@ -138,6 +143,43 @@ class TestTimingEqualized(_Base):
         self.assertTrue(api_login._DUMMY_HASH.startswith("pbkdf2$"))
         self.assertEqual(len(api_login._DUMMY_HASH.split("$")), 3)
         self.assertFalse(og.verify_password("anything", api_login._DUMMY_HASH))
+
+
+class TestLockResponseHeaders(_Base):
+    """D. 429 必须带 Retry-After（2026-11-10 补）。
+
+    为什么单独立一组：`Retry-After` 之前只有 IP 限流那条分支有，
+    组合锁这条漏了 —— 前端因此只能写死「请 1 分钟后再试」，
+    一旦实现里的 `_LOCK_SECONDS` 改了，文案就与事实不符（静默漂移）。
+    RFC 7231 §7.1.3：429 应告知客户端多久后可重试。
+
+    ⛔ 破坏法：把 `_LOCK_SECONDS` 那条 extra_headers 去掉 → 本组必须红。
+    """
+
+    def _call_raw(self, login, password):
+        body = json.dumps({"login": login, "password": password}).encode()
+        return api_login.login("POST", LOGIN, {}, body, {})
+
+    def test_locked_returns_retry_after_header(self):
+        for _ in range(5):
+            self._call_raw("no_such_user", "x")
+        res = self._call_raw("no_such_user", "x")
+        self.assertIsInstance(res, tuple)
+        self.assertEqual(len(res), 3,
+                         f"锁定响应应为三元组 (status, payload, headers)，实际 {res!r}")
+        status, payload, headers = res
+        self.assertEqual(status, 429)
+        self.assertIsInstance(headers, dict)
+        self.assertIn("Retry-After", headers,
+                      "429 缺 Retry-After 头 → 前端无法得知重试等待时长")
+        self.assertEqual(headers["Retry-After"], str(api_login._LOCK_SECONDS),
+                         "Retry-After 必须与 _LOCK_SECONDS 同源，不得写死字面量")
+
+    def test_retry_after_not_leaked_on_success_path(self):
+        """401 失败路径不应带 Retry-After（只有 429 才该有）。"""
+        res = self._call_raw("ghost_user", "x")
+        self.assertEqual(len(res), 2, f"401 应为二元组，实际 {res!r}")
+        self.assertEqual(res[0], 401)
 
 
 if __name__ == "__main__":

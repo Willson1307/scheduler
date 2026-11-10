@@ -114,7 +114,9 @@ class TestLoginSuccess(_ServerTestBase):
 
     @staticmethod
     def _normalize(result):
-        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], int):
+        # 三元组 = (status, payload, extra_headers)（429 带 Retry-After 走这条）。
+        # 旧版只认二元组 → 三元组被当成 200，看起来像「锁定失效」。断言未改。
+        if isinstance(result, tuple) and isinstance(result[0], int) and len(result) in (2, 3):
             return result[0], result[1]
         return 200, result
 
@@ -142,7 +144,9 @@ class TestLoginBadCredentials(_ServerTestBase):
 
     @staticmethod
     def _normalize(result):
-        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], int):
+        # 三元组 = (status, payload, extra_headers)（429 带 Retry-After 走这条）。
+        # 旧版只认二元组 → 三元组被当成 200，看起来像「锁定失效」。断言未改。
+        if isinstance(result, tuple) and isinstance(result[0], int) and len(result) in (2, 3):
             return result[0], result[1]
         return 200, result
 
@@ -161,7 +165,9 @@ class TestLoginLockout(_ServerTestBase):
 
     @staticmethod
     def _normalize(result):
-        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], int):
+        # 三元组 = (status, payload, extra_headers)（429 带 Retry-After 走这条）。
+        # 旧版只认二元组 → 三元组被当成 200，看起来像「锁定失效」。断言未改。
+        if isinstance(result, tuple) and isinstance(result[0], int) and len(result) in (2, 3):
             return result[0], result[1]
         return 200, result
 
