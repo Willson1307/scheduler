@@ -1317,12 +1317,22 @@ async function loadAll() {
   await loadRequests();
 }
 
+/* 求解等待态：loader 是 index.html 里内联的纯 SMIL 循环动画，这里只负责显示/隐藏。
+   用 hidden 属性（页面末尾有 [hidden]{display:none !important} 兜底），不写 style.display——
+   后者会被内联样式残留，且「设 '' 也不一定回到原来的 display」。
+   元素缺失时不抛错：这属于纯装饰，不该让它把消解主流程带崩。 */
+function showSolveWait(on) {
+  const box = $('solveWait');
+  if (box) { box.hidden = !on; }
+}
+
 async function doResolve(btn) {
   const btns = document.querySelectorAll('#confBox button.danger');
   btns.forEach(function (b) { b.disabled = true; });
   const main = $('resolveBtn');
   main.disabled = true;
   main.textContent = '消解中…';
+  showSolveWait(true);
 
   // F5 埋点：点下「一键消解」的瞬间记 task_start（完成率分母，docs/08 §3.2）
   ping('task_start', { mode: 'minimal' });
@@ -1349,6 +1359,8 @@ async function doResolve(btn) {
       text: '一键消解失败：' + e.message + '（数据未改变，可重试；若持续 429 是限频，等 60 秒再试）',
     }));
   } finally {
+    // 最坏路径（抛错 / 限频 / 断网）也必然走到这里，等待态不会残留
+    showSolveWait(false);
     main.textContent = '一键消解（当前组）';
     main.disabled = false;
     btns.forEach(function (b) { b.disabled = false; });
