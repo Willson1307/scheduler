@@ -114,6 +114,13 @@ log "重置试用账号口令（admin + 12 教师）"
 # 🔴 写 unit 之前先把最终 TRIAL_TODAY 打出来——这是老师将要看到的「今天」，
 #    锚错了当场可见，不等试用当天才发现（TRIAL-REANCHOR）。
 log "最终 TRIAL_TODAY=$TRIAL_TODAY（即将写入 unit 的 SCHEDULER_TODAY；学期起点=$TRIAL_TERM_START）"
+
+# 🔴 2026-11-11：把「服务器上有没有 .env.local」打出来。
+#    没有 = 问答走手册原文（retrieval），属**正常**状态，不是故障；
+#    有 = 问答会走 LLM 润色（mode="llm"）。两句话写清楚，避免把
+#    「没配」误判成「配了但坏了」，也避免把「没配」当成缺陷去排查。
+ENV_STATE="$("${SSH[@]}" "[ -f '$REMOTE_ROOT/.env.local' ] && echo present || echo absent" 2>/dev/null || echo unknown)"
+log "服务器 .env.local: $ENV_STATE（absent = 问答只答手册原文，正常；present = 会走 LLM 润色）"
 UNIT_CONTENT="$(cat <<EOF
 [Unit]
 Description=Scheduler Trial Server (TRIAL-SYNC-2)
@@ -122,6 +129,13 @@ After=network.target
 [Service]
 WorkingDirectory=$REMOTE_ROOT
 Environment=SCHEDULER_TODAY=$TRIAL_TODAY
+# 🔴 2026-11-11（feat/llm-config）：LLM 问答层的三件套（BASE/KEY/MODEL）只从
+#    os.environ 读（b_llm_client.py）。没有这一行，写在 .env.local 里的配置
+#    进程根本看不到 → 问答永远停在 mode="retrieval" 且**不报任何错**
+#    （典型静默失效：功能在、只是变笨）。
+#    前面的 `-` 是「文件不存在也不报错」：没配 LLM 的机器必须仍能起服，
+#    不配 = 不启用（AGENTS §4.1 跨人契约）。
+EnvironmentFile=-$REMOTE_ROOT/.env.local
 ExecStart=/usr/bin/python3 $REMOTE_ROOT/scripts/run_server.py --host :: --port $TRIAL_PORT --db $REMOTE_ROOT/data/trial.db
 Restart=always
 RestartSec=5
