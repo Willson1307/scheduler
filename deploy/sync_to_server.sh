@@ -106,8 +106,22 @@ printf '%s\n' "$ADMIN_PW" \
 
 # ── 4. 重置 13 个试用账号口令（admin + 12 教师，各自随机串，旧共享口令作废）
 log "重置试用账号口令（admin + 12 教师）"
-"$PY_LOCAL" "$REPO/deploy/reset_trial_passwords.py" generate 2>/dev/null \
-  | "${SSH[@]}" "cd '$REMOTE_ROOT' && python3 deploy/reset_trial_passwords.py apply --db data/trial.db" \
+# 🔴 2026-11-11（第二次实测）：原来写成 `generate | ssh ... apply`，在 Windows/Git Bash
+#    下**偶发把 stdin 丢成 0 行**（同一命令时好时坏，远端报「期望 13 行，收到 0」，
+#    然后整轮同步回滚）。管道跨 ssh 不可靠 → 改成「先落临时文件，再重定向」。
+#    顺带加一道空文件守卫：本地就没生成出来时，在本地直接报错，而不是等远端数错。
+PW_TMP="$REPO/data/.pw-pipe.tmp"
+trap 'rm -f "$PW_TMP"' EXIT
+# 🔴 用**相对路径**调用：本脚本前面已 `cd "$REPO"`。
+#    绝不能传 "$REPO/..."（MSYS 的 /c/Users/... 会被 Windows 版 Python 解析成
+#    C:\c\Users\... → 脚本算不出仓库根 → 退出码 2、输出 0 行，表现为
+#    「远端收到 0 行口令」这种指不到真因的错。同类坑：run_server --db /c/tmp/...）
+"$PY_LOCAL" deploy/reset_trial_passwords.py generate 2>/dev/null > "$PW_TMP" \
+  || { rollback_data; die "本地生成口令表失败（已回滚 data/）"; }
+PW_LINES="$(wc -l < "$PW_TMP" | tr -dc '0-9')"
+[ "${PW_LINES:-0}" -ge 13 ] || { rollback_data; die "本地口令表只有 ${PW_LINES:-0} 行，应 ≥13（先跑 deploy/reset_trial_passwords.py generate）"; }
+log "本地口令表 $PW_LINES 行 → 推送服务器"
+"${SSH[@]}" "cd '$REMOTE_ROOT' && python3 deploy/reset_trial_passwords.py apply --db data/trial.db" < "$PW_TMP" \
   || { rollback_data; die "重置教师口令失败（已回滚 data/）"; }
 
 # ── 5. 写 systemd user unit（--today 走 Environment）──────
