@@ -12,6 +12,9 @@
 -->
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>课表活动调度辅助系统</title>
+<!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
+     带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
+<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261113">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -63,6 +66,19 @@
     padding: 14px 0;
     margin-bottom: var(--sp);
   }
+  /* 品牌标记与标题横排；窄屏可换行，不裁切、不横滚 */
+  .header-inner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px;
+  }
+  .brand-mark { flex: 0 0 auto; display: block; line-height: 0; }
+  /* 72×32 是交接文档给的页头取值范围下限；这里取 88×40 —— 标题是 1.35rem 粗体，
+     72px 宽的 mark 摆旁边显得又小又细（stroke 只有 1.3px 视觉重量），
+     放到 40px 高（仍在该文档 32–40px 区间内）才和两行文字块视觉配平。 */
+  .brand-mark svg { display: block; width: 88px; height: 40px; }
+  .brand-text { min-width: 0; flex: 1 1 260px; }
   header h1 { margin: 0; font-size: 1.35rem; font-weight: 700; letter-spacing: .5px; }
   header .sub { font-size: var(--fs-sm); opacity: .88; margin-top: 2px; }
 
@@ -210,6 +226,14 @@
     display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
     justify-content: space-between; margin-bottom: 8px;
   }
+  /* 一键消解按钮 + 求解等待态（loader 为内联 SVG，纯 SMIL 循环，不依赖网络） */
+  .resolve-ctl { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .solve-wait {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: var(--fs-sm); font-weight: 700; color: var(--c-primary);
+  }
+  /* hidden 由全局 [hidden] 兜底规则强制 display:none，故这里写 inline-flex 不冲突 */
+  .solve-wait svg { display: block; width: 88px; height: 40px; }
   .stats { display: flex; flex-wrap: wrap; gap: 8px; }
   .stat {
     padding: 4px 10px; border-radius: var(--radius);
@@ -333,11 +357,45 @@
 <body>
 
 <header>
-  <div class="wrap">
-    <h1>课表活动调度辅助系统</h1>
-    <div class="sub">
-      课表（周期事务）与活动（一次性事务）同框· 统一冲突检测与一键消解
-      <span id="srcTag" class="mocktag" hidden></span>
+  <div class="wrap header-inner">
+    <!-- 品牌标记：logo-mark.svg 整段内联（交接文档 §3 推荐内联——SMIL 照常播放，
+         且颜色可被页面 CSS 接管）。内联后 id="tsLine" 成为全局 id，改名要连这里一起改。
+         🔴 入场双线融合动画只播一次（animateTransform 已 fill="freeze"），播完静止：
+            页头持续动画会干扰操作，也费电。 -->
+    <span class="brand-mark">
+      <svg viewBox="0 0 160 72" role="img" aria-label="TimeSymphony 品牌标记">
+        <defs>
+          <linearGradient id="tsLine" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#4FA3E8"/>
+            <stop offset="1" stop-color="#2BD9C8"/>
+          </linearGradient>
+        </defs>
+        <g fill="none" stroke="url(#tsLine)" stroke-width="3" stroke-linecap="round">
+          <path d="M8 36 C 24 14, 40 14, 56 36 S 88 58, 104 36 S 136 14, 152 36">
+            <animateTransform attributeName="transform" type="translate"
+              values="0 -14; 0 0" keyTimes="0; 1"
+              calcMode="spline" keySplines="0.3 0 0.2 1"
+              dur="1.4s" begin="0s" fill="freeze"/>
+          </path>
+          <path d="M8 36 C 24 14, 40 14, 56 36 S 88 58, 104 36 S 136 14, 152 36" opacity="0.85">
+            <animateTransform attributeName="transform" type="translate"
+              values="0 14; 0 0" keyTimes="0; 1"
+              calcMode="spline" keySplines="0.3 0 0.2 1"
+              dur="1.4s" begin="0s" fill="freeze"/>
+          </path>
+        </g>
+        <circle cx="80" cy="36" r="3.5" fill="#E8C97A" opacity="0">
+          <animate attributeName="opacity" from="0" to="1"
+            dur="0.6s" begin="1.0s" fill="freeze"/>
+        </circle>
+      </svg>
+    </span>
+    <div class="brand-text">
+      <h1>课表活动调度辅助系统</h1>
+      <div class="sub">
+        课表（周期事务）与活动（一次性事务）同框· 统一冲突检测与一键消解
+        <span id="srcTag" class="mocktag" hidden></span>
+      </div>
     </div>
   </div>
 </header>
@@ -411,8 +469,37 @@
   <section id="secConflict">
     <div class="cl-head">
       <h2>冲突列表 <span class="hint">硬冲突必须消解</span></h2>
-      <div>
+      <div class="resolve-ctl">
         <button id="resolveBtn" class="primary" type="button">一键消解（当前组）</button>
+        <!-- 求解中：loader.svg 内联（双线融合/分离无限循环，纯 SMIL，无 JS/无网络）。
+             平时 hidden，doResolve() 请求期间显示，finally 里隐藏——最慢/最坏路径也会收起，
+             不会出现「转圈转到天荒地老」这种没人敢碰的状态。
+             aria-live + role=status：屏幕阅读器能读到期求解提示。 -->
+        <span id="solveWait" class="solve-wait" role="status" aria-live="polite" hidden>
+          <svg viewBox="0 0 160 72" role="img" aria-label="求解中">
+            <defs>
+              <linearGradient id="tsLineL" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="#4FA3E8"/>
+                <stop offset="1" stop-color="#2BD9C8"/>
+              </linearGradient>
+            </defs>
+            <g fill="none" stroke="url(#tsLineL)" stroke-width="3" stroke-linecap="round">
+              <path d="M8 36 C 24 14, 40 14, 56 36 S 88 58, 104 36 S 136 14, 152 36"/>
+              <path d="M8 36 C 24 14, 40 14, 56 36 S 88 58, 104 36 S 136 14, 152 36" opacity="0.85">
+                <animateTransform attributeName="transform" type="translate"
+                  values="0 14; 0 0; 0 14" keyTimes="0; 0.5; 1"
+                  calcMode="spline" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1"
+                  dur="2.6s" repeatCount="indefinite"/>
+              </path>
+            </g>
+            <circle cx="80" cy="36" r="3.5" fill="#E8C97A" opacity="0">
+              <animate attributeName="opacity" values="0; 1; 0" keyTimes="0; 0.5; 1"
+                calcMode="spline" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1"
+                dur="2.6s" repeatCount="indefinite"/>
+            </circle>
+          </svg>
+          <span>求解中…</span>
+        </span>
       </div>
     </div>
     <div id="confErr" class="banner error" role="alert" hidden></div>
@@ -447,7 +534,8 @@
 </div>
 
 <!-- 版本号与后端 config.ASSET_VERSION 对齐；相对路径，无外链。
-     F3b 改了 app.js → 递增此版本号强制浏览器拿新文件（配合 no-cache + ETag）。 -->
-<script src="app.js?v=20261112"></script>
+     F3b 改了 app.js → 递增此版本号强制浏览器拿新文件（配合 no-cache + ETag）。
+     2026-11-11 接 logo：ASSET_VERSION 与上方 favicon 的 ?v= 同改为 20261113。 -->
+<script src="app.js?v=20261113"></script>
 </body>
 </html>
