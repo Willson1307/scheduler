@@ -507,6 +507,43 @@ Agent 侧读取有边界：**只给禁令不给正确做法，Agent 会绕过禁
    > → `src/server/api_*.py` 里除 `api_health.py`（公开）与 `api_login.py`（登录入口）外，
    > **都可能处于「签名带 context 但从未被填充」的状态。**
 
+### 4.1 本轮文件认领（2026-11-11 → 11/16，四人并行）
+
+> 🔴 **2026-11-11 队长定：这一轮四个人同时写代码**（队长 + 张晋嘉 + 汤涵洋溢 + 助手）。
+> 上表是**长期归属**，本节是**这一轮的具体文件认领** —— 按文件切，不按功能切，
+> 保证「同一个文件永远只有一个写者」。
+
+| 谁 | 这一轮独占的新文件 | 卡 |
+|---|---|---|
+| **张晋嘉** | `src/server/api_slots.py`、`tests/test_api_slots.py` | `r76Zu4` 空位查询 |
+| **张晋嘉** | `src/server/api_chat.py`、`src/server/b_ai_kernels.py`、`tests/test_chat.py` | `rn6JxF` 问答层（检索/意图） |
+| **王思勋（队长）** | `src/server/b_llm_client.py`、`tests/test_llm_client.py` | 问答层第 2 层（LLM 客户端） |
+| **王思勋（队长）** | `src/server/api_import.py`、`src/server/b_import_kernels.py`、`tests/test_import.py` | `r18onN` CSV 导入 |
+| **汤涵洋溢** | `web/**`（`index.html` / `app.js`）、`scripts/smoke.py`、`deploy/**` | logo / `secSlots` / 「问一下」入口 |
+
+**这一轮谁都不许改的文件**（改了必冲突）：
+
+- `routes.py`、`static.py`、`src/scheduler/**`（含 `schema.sql`）
+- `src/server/config.py` —— 除 `ASSET_VERSION` 一行；**只有前端卡改**，且两处同改
+- `http_api.py`、`auth.py`、`b3_kernels.py`、`b4_kernels.py`、`b9_kernels.py`
+- `scripts/doctor.py`、`scripts/run_server.py`（这一轮无人认领，别顺手改）
+- `AGENTS.md`、`docs/**` —— 只有队长改
+
+**跨人契约：`b_llm_client.py`（问答层第 2 层的唯一接口）**
+
+```python
+# src/server/b_llm_client.py
+def polish(question: str, passages: list[str], timeout_s: float = 8.0) -> str | None
+```
+- **未配置** `SCHEDULER_LLM_BASE` / `SCHEDULER_LLM_KEY` → **返回 `None`**（不是抛异常）
+- 任何失败（超时 / 非 200 / JSON 坏 / 网络断）→ **返回 `None`**，**不抛、不 retry、不打印 headers**
+- 调用方（`api_chat.py`）拿到 `None` 就降级到检索层，`mode="retrieval"`
+- 🔴 **key 只在 `os.environ`**；`b_llm_client.py` 里不得出现任何 key 字面量
+
+> 🔴 张晋嘉**不要**创建 `b_llm_client.py`（那是队长的文件）；他可以先用
+> `try: from . import b_llm_client / except ImportError: ...` 或直接调用并在缺失时降级，
+> 两边靠上面这段签名解耦，**不需要等对方交付**。
+
 ### 🔴 命名铁律：`api_*.py` 只能是接口层（2026-10-05 立，第 7 处静默失效的根因）
 
 > **铁律**：`src/server/api_*.py` = **注册路由的接口层**，必须导出**非空** `ROUTES`。
