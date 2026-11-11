@@ -14,7 +14,7 @@
 <title>课表活动调度辅助系统</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261114">
+<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261115">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -362,6 +362,44 @@
   ul.slots .acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
   .slot-sum { font-size: var(--fs-sm); color: var(--c-text-dim); margin: 0 0 8px; }
 
+  /* ---------- 问一下（rn6JxF / POST /api/chat） ---------- */
+  /* 输入行与 .slot-form 同构：flex-wrap，窄屏（768px）换行而不横滚 */
+  .chat-form {
+    display: flex; flex-wrap: wrap; gap: var(--sp);
+    align-items: flex-end; margin-bottom: 8px;
+  }
+  .chat-form .field input { min-width: 0; }
+  /* 答案卡：展台答辩站着看 → 正文按 1 米可读给字号，且保留后端换行 */
+  .chat-ans {
+    border: 1px solid var(--c-border);
+    border-left: 5px solid var(--c-primary);
+    border-radius: var(--radius);
+    padding: 10px var(--sp);
+    background: #fff;
+  }
+  /* 首行：来源标识 + 降级说明。🔴 这一行是「诚实性」的落点，不能被折叠或隐藏 */
+  .chat-head {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    margin-bottom: 6px;
+  }
+  .chat-mode {
+    display: inline-block; padding: 2px 10px; border-radius: 8px;
+    font-size: var(--fs-sm); font-weight: 700; border: 1px solid;
+  }
+  /* llm ＝ 模型润色过的回答（蓝＝主色）；其余一律橙＝手册原文，视觉上必须能区分 */
+  .chat-mode.mode-llm { background: var(--c-primary-l); color: var(--c-primary); border-color: #b9cde2; }
+  .chat-mode.mode-ref { background: var(--c-warn-l);    color: var(--c-warn);    border-color: #e3c887; }
+  .chat-text {
+    font-size: 1.05rem;        /* 1 米可读 */
+    line-height: 1.75;
+    white-space: pre-wrap;     /* 只吃后端换行，仍走 textContent，不拼 HTML */
+  }
+  .chat-src {
+    margin-top: 8px; font-size: var(--fs-sm); color: var(--c-text-dim);
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  }
+  .chat-src .chip { font-size: var(--fs-sm); }
+
   /* ---------- 弹层（提议改期 / 拒绝） ---------- */
   .modal-overlay {
     position: fixed; inset: 0; background: rgba(15, 25, 40, .55);
@@ -584,6 +622,36 @@
     <p class="note" id="resolveHint"></p>
   </section>
 
+  <!-- ---------- 问一下（rn6JxF 前端 / B-6 POST /api/chat） ----------
+       🔴 与周视图、「一键消解」同页（AGENTS §8：单页，不做多页跳转、不做前端路由）。
+       🔴 mode 必须露在界面上：llm → 「AI 回答」；retrieval / template →
+          「手册原文（未启用 AI）」。⛔ 不能让老师以为所有回答都是 AI 生成的 ——
+          这是诚信要求，也是答辩口径（AI 只做自然语言理解与结果解释）。
+       🔴 前端不拼 prompt、不存 key：问题原样 POST 给后端，模型调用只在后端 env 里决定。
+       🔴 「手册里没有这条」不是故障：后端返 200 + mode=template，照样按原文渲染。 -->
+  <section id="secChat">
+    <div class="sec-head">
+      <h2>问一下 <span class="hint">问「这件事该怎么操作」，答案来自用户手册</span></h2>
+    </div>
+    <div class="chat-form">
+      <div class="field grow">
+        <label for="chatQ">你的问题（≤500 字，回车即可提问）</label>
+        <input id="chatQ" type="text" maxlength="500" placeholder="例如：我想把周三下午的课调开">
+      </div>
+      <div class="field">
+        <label>&nbsp;</label>
+        <button id="chatBtn" class="primary" type="button">问一下</button>
+      </div>
+    </div>
+    <!-- 失败态：401 走 handle401（清 token + 弹登录栏）；其它错误原文展示后端 message -->
+    <div id="chatErr" class="banner error" role="alert" aria-live="assertive" hidden></div>
+    <div id="chatBox"><div class="empty">尚未提问。</div></div>
+    <p class="note">
+      回答、来源标识与出处均读自 <code>/api/chat</code>。标注「手册原文（未启用 AI）」时，
+      这句话来自手册，未经模型改写。问答只做解释，改课仍走下方「变更请求」审批流，零写入。
+    </p>
+  </section>
+
   <!-- ---------- 消解前后对比 ---------- -->
   <section id="secResult">
     <h2>消解结果 <span class="hint">从 → 到，均读自接口响应，不在前端写死</span></h2>
@@ -613,7 +681,8 @@
 <!-- 版本号与后端 config.ASSET_VERSION 对齐；相对路径，无外链。
      F3b 改了 app.js → 递增此版本号强制浏览器拿新文件（配合 no-cache + ETag）。
      2026-11-11 接 logo：ASSET_VERSION 与上方 favicon 的 ?v= 同改为 20261113。
-     2026-11-12 新增「查空位」面板（secSlots）改了 app.js：两处同改为 20261114。 -->
-<script src="app.js?v=20261114"></script>
+     2026-11-12 新增「查空位」面板（secSlots）改了 app.js：两处同改为 20261114。
+     2026-11-11 新增「问一下」面板（secChat，POST /api/chat）改了 app.js：两处同改为 20261115。 -->
+<script src="app.js?v=20261115"></script>
 </body>
 </html>

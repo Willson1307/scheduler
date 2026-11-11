@@ -54,7 +54,9 @@ from scheduler.seeds import seed_demo  # noqa: E402
 #: 2026-11-12：新增「查空位」面板（secSlots，消费 GET /api/slots）改了 app.js，
 #:    两侧再一起递增到 20261114（卡面写的 20261112→20261113 已过期，
 #:    基线当时已是 20261113；值一变即强制丢旧缓存，这才是卡面要的效果）。
-ASSET_VERSION = "20261114"
+#: 2026-11-11：新增「问一下」面板（secChat，消费 POST /api/chat）改了 app.js + index.html，
+#:    两侧一起递增到 20261115。
+ASSET_VERSION = "20261115"
 
 #: 默认数据库：与队长 L8 沙盒演示库同路径，现场「删 data/ → 一条命令 →
 #: 30 秒可演示」的闭环由本模块的自动初始化兜底（CP-G）。
