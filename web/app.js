@@ -1446,9 +1446,13 @@ function bindEvents() {
   [$('slotFrom'), $('slotTo')].forEach(function (inp) {
     inp.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') querySlots(); });
   });
+  // rn6JxF：问一下（POST /api/chat，只读问答；回车与按钮等效）
+  $('chatBtn').addEventListener('click', function () { askChat(); });
+  $('chatQ').addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter') askChat();
+  });
   // F3b：登录栏（mock 模式下 loginSec 整体隐藏，绑定无害）
-  $('loginBtn').addEventListener('click', function () { doLogin(); });
-  [$('loginName'), $('loginPwd')].forEach(function (inp) {
+  $('loginBtn').addEventListener('click', function () { doLogin(); });  [$('loginName'), $('loginPwd')].forEach(function (inp) {
     inp.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') doLogin(); });
   });
   // F5 埋点：关页时若任务仍在进行，补 task_abandon（docs/08 §4.3 beforeunload 兜底）
@@ -1998,6 +2002,120 @@ async function querySlots() {
   } finally {
     btn.disabled = false;
     btn.textContent = '查空位';
+  }
+}
+
+/* =============================================================================
+ * 11. 问一下（rn6JxF / B-6 POST /api/chat）
+ * -----------------------------------------------------------------------------
+ * 契约（src/server/api_chat.py 写死）：
+ *   POST /api/chat  body {question, group?}
+ *     200 → {answer, sources:[{doc,section}], mode, degraded}
+ *     400 缺 question / 非字符串 / 超 500 字；401 未登录；403 group 越权
+ *   🔴 「手册里没有这条」是 200 + mode="template"，不是 4xx —— 正常业务态，照常渲染。
+ *
+ * 🔴 本卡最关键的一条：**mode 必须显式显示，不许含糊**。
+ *   llm                → 「AI 回答」        （这句是模型润色过的）
+ *   retrieval/template → 「手册原文（未启用 AI）」（手册原文 / 固定文案，无模型参与）
+ *   未知 mode          → 原样透出 mode 值并标「来源未知」，**绝不默认说成 AI**
+ *   让老师以为「所有回答都是 AI 写的」属虚假陈述 —— 本项目 AI 只用于自然语言理解
+ *   与结果解释，冲突检测与消解由自建求解器完成（AGENTS §9）。
+ *
+ * 🔴 前端不拼 prompt、不碰 key：问题原文直接 POST，是否调模型只由后端 env 决定。
+ * 🔴 问答只读：不据此发起任何变更，改课走审批流（「变更请求」区块）。
+ * ========================================================================== */
+
+/**
+ * mode → 界面标识。未知枚举原样显示（§12.2 第 2 条：不内置白名单、不拦截渲染）。
+ * 返回 {text, cls}：cls 只决定颜色（mode-llm 蓝 / mode-ref 橙），文案才是判据。
+ */
+function chatModeTag(mode) {
+  if (mode === 'llm') return { text: 'AI 回答', cls: 'mode-llm' };
+  if (mode === 'retrieval' || mode === 'template') {
+    return { text: '手册原文（未启用 AI）', cls: 'mode-ref' };
+  }
+  return { text: '来源未知（mode=' + (mode || '缺失') + '）', cls: 'mode-ref' };
+}
+
+/** 渲染一次问答结果：来源标识在最前，正文其次，出处最后（老师要能回查）。 */
+function renderChat(body) {
+  const box = $('chatBox');
+  clear(box);
+
+  const card = el('div', { cls: 'chat-ans' });
+
+  // ---- ① 来源标识：必须与答案同一屏可见，不折叠不隐藏 ----
+  const head = el('div', { cls: 'chat-head' });
+  const tag = chatModeTag(str(body, 'mode', ''));
+  head.appendChild(el('span', { cls: 'chat-mode ' + tag.cls, text: tag.text }));
+  if (body && body.degraded === true) {
+    // 后端「本可以调 AI 但没调成」→ 已降级为手册原文；如实说，别让人误以为是 AI 答的
+    head.appendChild(el('span', { cls: 'chip', text: '本次 AI 调用未成功，已降级为手册原文' }));
+  }
+  card.appendChild(head);
+
+  // ---- ② 正文：纯文本 + 保留后端换行（不走 innerHTML） ----
+  const answer = str(body, 'answer', '');
+  card.appendChild(el('div', {
+    cls: 'chat-text',
+    text: answer || '（接口未返回 answer 字段，请检查后端版本与契约）',
+  }));
+
+  // ---- ③ 出处：哪份文档哪一节，供回查；缺失就说缺失，不编文档号 ----
+  const sources = arr(body, 'sources');
+  const src = el('div', { cls: 'chat-src' });
+  if (!sources.length) {
+    src.appendChild(el('span', { text: '接口未给出处。' }));
+  } else {
+    src.appendChild(el('span', { text: '出处：' }));
+    sources.forEach(function (s) {
+      const label = [str(s, 'doc', ''), str(s, 'section', '')]
+        .filter(function (x) { return !!x; }).join(' ');
+      src.appendChild(el('span', { cls: 'chip', text: label || '（未标注文档/章节）' }));
+    });
+  }
+  card.appendChild(src);
+
+  box.appendChild(card);
+}
+
+/**
+ * 点「问一下」：POST /api/chat。
+ * 🔴 发请求前先把上一次的答案清掉 —— 留在屏幕上会被当成这次问题的回答（错位且不报错）。
+ * 🔴 失败文案一律用后端 message 原文（apiPost 已把它放进 e.message），不自己编。
+ */
+async function askChat() {
+  const btn = $('chatBtn');
+  const errBox = $('chatErr');
+  const box = $('chatBox');
+  const q = $('chatQ').value.trim();
+
+  showBanner(errBox, null);
+  if (!q) {
+    // 本地前置校验：空问题连请求都不发（后端也会 400，但不必打扰网络）
+    showBanner(errBox, '请先输入问题（例如：我想把周三下午的课调开）。');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '提问中…';
+  clear(box);
+  box.appendChild(el('div', { cls: 'empty', text: '正在查手册…' }));
+  try {
+    const payload = { question: q };
+    // 与其它接口同口径：只传当前已授权的组（后端会校验越权 → 403）
+    if (state.groupId) payload.group = state.groupId;
+    const body = await apiPost('/api/chat', {}, payload);
+    renderChat(body);
+  } catch (e) {
+    // 401 已在 handle401 里清 token 并弹出登录栏；400/403/断网等一律原文展示
+    showBanner(errBox, (e && e.message) ? e.message : String(e));
+    clear(box);
+    box.appendChild(el('div', { cls: 'empty', text: '未取到回答（原因见上方提示条）。' }));
+  } finally {
+    // 最坏路径（抛错 / 断网）也必然走到这里，按钮不会永久卡在「提问中…」
+    btn.disabled = false;
+    btn.textContent = '问一下';
   }
 }
 
