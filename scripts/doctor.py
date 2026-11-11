@@ -80,6 +80,9 @@ EXPECTED_ROUTES: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/api/period-sets"),
     ("GET", "/api/period-sets"),
     ("GET", "/api/period-sets/detail"),
+    # B 批·局部补排后端：GET /api/slots（只读，透出 m2.find_slots）。同 B4 事故，
+    # 整个 api_slots.py 没合进 main 时 routes.scan() 永远查不出缺失，必须显式登记。
+    ("GET", "/api/slots"),
 })
 
 CHECKS: list[tuple[str, bool, str]] = []  # (名称, 是否通过, 说明)
