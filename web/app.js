@@ -1130,6 +1130,7 @@ const state = {
   token: '',         // F3b：登录后的 Bearer token（仅内存，不落盘，刷新需重登）
   user: null,        // /api/login 返回的 user 对象（仅用于显示登录身份）
   sessionId: '',     // F5：会话级随机串（埋点平均时长用，boot() 时生成一次）
+  slotTarget: '',    // F7 secSlots：最近一次「查空位」用的对象 id（按此提议时对应）
   taskActive: false, // F5：task_start 已发、尚未 success/abandon
   taskStartedAt: 0,  // F5：task_start 时刻（ms）
   taskTimer: 0,      // F5：90 秒无操作超时定时器 id
@@ -1239,6 +1240,50 @@ function renderObjectOptions(objects) {
   sel.value = state.objectId;
 }
 
+/**
+ * 空位查询的对象下拉（secSlots 专用，与周视图的 objSel 互不影响）。
+ * 数据源与 objSel 同源（/api/schedules 的 objects，契约 §4），不另打 /api/objects：
+ * 现场只有一个真服务，少一次请求就少一处失败点。
+ * 切换组 / 重新加载时**保留用户已选的对象**（若它还在列表里），避免手一抖被重置。
+ */
+function renderSlotObjectOptions(objects) {
+  const sel = $('slotObjSel');
+  if (!sel) return;
+  const keep = sel.value;
+  clear(sel);
+  const list = Array.isArray(objects) ? objects : [];
+  if (!list.length) {
+    sel.appendChild(el('option', { text: '（无对象）', attrs: { value: '' } }));
+    return;
+  }
+  list.forEach(function (o) {
+    const id = str(o, 'id', '');
+    const bits = [str(o, 'name', '(未命名)')];
+    const k = str(o, 'kind', '');
+    if (k) bits.push(kindLabel(k));
+    sel.appendChild(el('option', { text: bits.join(' · '), attrs: { value: id } }));
+  });
+  // 优先级：上次选的（仍在列表里）> 当前组 > 第一个 —— 绝不设成不存在的 option
+  const ids = list.map(function (o) { return str(o, 'id', ''); });
+  if (keep && ids.indexOf(keep) >= 0) sel.value = keep;
+  else if (state.groupId && ids.indexOf(state.groupId) >= 0) sel.value = state.groupId;
+  else sel.value = ids[0];
+}
+
+/**
+ * 空位表单的缺省值：日期取 /api/schedules 的 days（服务端事实），不自己算周几。
+ * 🔴 用户已经填过的值不覆盖（否则每次重新加载都把手输的日期冲掉）。
+ */
+function syncSlotForm() {
+  renderSlotObjectOptions(state.objects);
+  const days = Array.isArray(state.days) ? state.days : [];
+  if (days.length) {
+    if (!$('slotFrom').value && typeof days[0] === 'string') $('slotFrom').value = days[0];
+    const last = days[days.length - 1];
+    if (!$('slotTo').value && typeof last === 'string') $('slotTo').value = last;
+  }
+}
+
 /** 一次拉齐三接口并渲染。任一失败 → 该区块显式报错，不白屏、不伪装成「无数据」。 */
 async function loadAll() {
   const fatal = $('fatal');
@@ -1282,6 +1327,8 @@ async function loadAll() {
   if (schedules) {
     state.days = arr(schedules, 'days');
     renderObjectOptions(arr(schedules, 'objects'));
+    // F7 secSlots：对象下拉同源，并给日期范围一个服务端给出的缺省值
+    syncSlotForm();
   }
 
   try {
@@ -1376,6 +1423,12 @@ function bindEvents() {
     state.objectId = '';       //换组 → 对象重选，避免看到上一个组的周视图
     clear($('resBox'));
     $('resBox').appendChild(el('div', { cls: 'empty', text: '尚未执行消解。' }));
+    // F7 secSlots：换组后旧候选属于别的组 / 别的对象 → 必须清掉，
+    // 否则「看着 A 班的候选，点按此提议却按 B 班提交」这种错位不报错。
+    $('slotObjSel').value = '';
+    showBanner($('slotErr'), null);
+    clear($('slotBox'));
+    $('slotBox').appendChild(el('div', { cls: 'empty', text: '尚未查询。选好对象与日期范围后点「查空位」。' }));
     loadAll();
   });
   $('reloadBtn').addEventListener('click', function () { loadAll(); });
@@ -1388,6 +1441,11 @@ function bindEvents() {
     if (state.schedules) renderWeek(state.schedules, state.conflicts || { items: [] });
   });
   $('resolveBtn').addEventListener('click', function () { doResolve(null); });
+  // F7 secSlots：查空位（GET /api/slots，只读）
+  $('slotBtn').addEventListener('click', function () { querySlots(); });
+  [$('slotFrom'), $('slotTo')].forEach(function (inp) {
+    inp.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') querySlots(); });
+  });
   // F3b：登录栏（mock 模式下 loginSec 整体隐藏，绑定无害）
   $('loginBtn').addEventListener('click', function () { doLogin(); });
   [$('loginName'), $('loginPwd')].forEach(function (inp) {
@@ -1472,10 +1530,19 @@ function conflictTargets(item) {
   return out;
 }
 
-/** 弹层填「日程 + 新起始日 + 理由」，提交 POST /api/approvals。 */
-function openProposeModal(targets) {
+/** 弹层填「日程 + 新起始日 + 理由」，提交 POST /api/approvals。
+ *
+ * opts（可选，F7 secSlots 用；不传时行为与原来完全一致）：
+ *   · note        弹层顶部的一句说明（如「候选空位：2026-11-17 第 3~4 节」）
+ *   · prefillDate 预填 valid_from（YYYY-MM-DD）
+ *   · emptyText   targets 为空时的占位选项文案（默认是冲突场景的措辞）
+ * 🔴 这里**不放任何新的审批逻辑**：校验、POST、状态流转全都还是原来那套。
+ */
+function openProposeModal(targets, opts) {
+  const o = opts || {};
   const md = modalOverlay();
   md.box.appendChild(el('h3', { text: '提议改期（走审批，批准后才落库）' }));
+  if (o.note) md.box.appendChild(el('p', { cls: 'note', text: o.note }));
 
   const fTarget = el('div', { cls: 'field' });
   fTarget.appendChild(el('label', { text: '要改期的日程（周期日程起始日）' }));
@@ -1487,7 +1554,10 @@ function openProposeModal(targets) {
     }));
   });
   if (!(targets || []).length) {
-    selTarget.appendChild(el('option', { text: '（该冲突未提供可改期的日程 id）', attrs: { value: '' } }));
+    selTarget.appendChild(el('option', {
+      text: o.emptyText || '（该冲突未提供可改期的日程 id）',
+      attrs: { value: '' },
+    }));
   }
   fTarget.appendChild(selTarget);
   md.box.appendChild(fTarget);
@@ -1495,6 +1565,7 @@ function openProposeModal(targets) {
   const fDate = el('div', { cls: 'field' });
   fDate.appendChild(el('label', { text: '新的起始日 valid_from（YYYY-MM-DD）' }));
   const inpDate = el('input', { attrs: { type: 'date' } });
+  if (o.prefillDate) inpDate.value = o.prefillDate;
   fDate.appendChild(inpDate);
   md.box.appendChild(fDate);
 
@@ -1724,6 +1795,210 @@ function openRejectModal(req) {
   });
 
   md.ov.addEventListener('click', function (ev) { if (ev.target === md.ov) closeModal(md.ov); });
+}
+
+/* =============================================================================
+ * 11. 空位查询（F7 前端 / B 批 GET /api/slots）
+ * -----------------------------------------------------------------------------
+ * 端点（后端卡 r76Zu4 已定死；路由精确匹配、无 path 参数）：
+ *   GET /api/slots?target=&from=YYYY-MM-DD&to=YYYY-MM-DD&duration=1|2|3&limit=
+ *   200 {"ok":true,"target":..,"duration":n,"count":N,
+ *        "candidates":[{date,day_of_week,periods,mask_hex,cost,reasons[,as_of_dow]}]}
+ *   401 未登录 / 403 跨组织 / 400 参数非法或对象不存在 / 全满 = 200 + count=0
+ *
+ * 🔴 三条铁律（答辩会被追问）：
+ *   1) **空结果必须说话**：count=0 时明确写「这段时间没有连排 N 节的空位」。
+ *      留白会被当成「没问题」，这是本项目最痛的静默失效形态。
+ *   2) **400 / 403 一律原文展示后端 message**（showBanner(e.message)），
+ *      前端不自己编文案 —— 编出来的话和后端真实原因会分叉。
+ *      401 走 apiGet → handle401（清 token + 弹登录栏），不在这里另写一套。
+ *   3) **不做位运算、不自己算节次**：periods 是后端按当天生效作息（冬季作息 /
+ *      调休 as_of）判定的 1-based 节次，原样展示；mask_hex 只透传不解析。
+ *
+ * 「按此提议」复用第 10 节的 openProposeModal()，不新写审批逻辑：
+ *   候选空位只给「日期 + 节次」，不给 schedule_id；要改期的对象只能是该查询对象
+ *   已有冲突里的日程（/api/conflicts 的 a/b 两侧，前端唯一拿得到 schedule_id 的地方）。
+ *   因此：targets = 该对象在冲突列表里的日程（去重），候选日期预填 valid_from。
+ *   提交后仍是 pending，课表零变化 —— 与冲突卡片那条路径完全一样。
+ * ========================================================================== */
+
+/** 连排节次 → 「第 3 ~ 4 节」。periods 由后端给（1-based），缺失如实说缺失。 */
+function slotPeriodsText(periods) {
+  const list = Array.isArray(periods)
+    ? periods.filter(function (n) { return typeof n === 'number' && isFinite(n); })
+    : [];
+  if (!list.length) return '节次未给出';
+  const a = list[0];
+  const b = list[list.length - 1];
+  return a === b ? ('第 ' + a + ' 节') : ('第 ' + a + ' ~ ' + b + ' 节');
+}
+
+/** 候选的「周几」说明；调休日（as_of_dow）额外标出按哪天的课表排。 */
+function slotWhenText(c) {
+  const date = str(c, 'date', '');
+  const dow = intOrNull(c, 'day_of_week');
+  const asOf = intOrNull(c, 'as_of_dow');
+  let t = (date || '日期未给出') + '（' + dowLabel(dow) + '）';
+  if (asOf !== null && dow !== null && asOf !== dow) {
+    t += ' · 调休：按' + dowLabel(asOf) + '的课表排';
+  }
+  return t;
+}
+
+/**
+ * 从当前冲突列表里收集「可改期日程」（targets 形如 [{schedule_id,title}]，与 conflictTargets 同形）。
+ * 🔴 为什么必须从 /api/conflicts 拿：/api/slots 的候选只有 {date,periods,...}，
+ *    **不带 schedule_id**；前端唯一能拿到 schedule_id 的接口就是冲突列表的 a / b 两侧。
+ *    pred 给定时只取满足条件的冲突组。
+ */
+function conflictSchedulesFiltered(pred) {
+  const items = arr(state.conflicts, 'items');
+  const out = [];
+  const seen = {};
+  items.forEach(function (it) {
+    if (pred && !pred(it)) return;
+    conflictTargets(it).forEach(function (t) {
+      if (!t.schedule_id || seen[t.schedule_id]) return;
+      seen[t.schedule_id] = true;
+      out.push(t);
+    });
+  });
+  return out;
+}
+
+/** 与本次查询对象直接相关的冲突日程（object_id 命中）。可能为空 —— 如实返回 []。 */
+function slotProposeTargets(target) {
+  return conflictSchedulesFiltered(function (it) {
+    return !target || str(it, 'object_id', '') === target;
+  });
+}
+
+/** 候选条目 → 一个「按此提议」按钮（点击进入已有审批弹窗，不直接写库）。 */
+function slotPropose(target, cand) {
+  const date = str(cand, 'date', '');
+  const periods = slotPeriodsText((cand && cand.periods) || []);
+
+  // 优先用与该对象直接相关的冲突日程；拿不到就退回本组织全部冲突日程，
+  // 并在弹层里**如实标注来源**——绝不假装那是「该对象的日程」。
+  let targets = slotProposeTargets(target);
+  let from = '该对象在冲突列表里的日程';
+  if (!targets.length) {
+    targets = conflictSchedulesFiltered(null);
+    from = '当前组织的冲突日程（空位接口只给位置，不返回日程 id）';
+  }
+
+  openProposeModal(targets, {
+    prefillDate: date,
+    note: '来自「查空位」：候选 ' + (date || '（日期未给出）') + ' ' + periods
+      + '，对象 ' + target + '。可改期日程取自' + from
+      + '；提交后仍为待审批，课表数据零变化。',
+    emptyText: '（当前组织没有冲突日程可改期 —— 空位接口只给位置，不给日程 id）',
+  });
+}
+
+/** 渲染候选列表；count=0 必须有话说，绝不留白。 */
+function renderSlots(body) {
+  const box = $('slotBox');
+  clear(box);
+  const cands = arr(body, 'candidates');
+  const count = intOrNull(body, 'count');
+  const n = (count === null) ? cands.length : count;   // count 缺失 → 用实际条数
+  const dur = intOrNull(body, 'duration');
+  const durText = (dur === null) ? (str(body, 'duration', '') || 'N') : String(dur);
+
+  if (!n || !cands.length) {
+    box.appendChild(el('div', {
+      cls: 'empty',
+      text: '这段时间没有连排 ' + durText + ' 节的空位。'
+        + '（这是后端算出的正常结论：该对象在这段时间里找不到连排 ' + durText + ' 节全空的位置。）',
+    }));
+    return;
+  }
+
+  box.appendChild(el('p', {
+    cls: 'slot-sum',
+    text: '共 ' + n + ' 个候选，已按代价升序（越靠前越省代价）。节次由后端按当天生效作息判定。',
+  }));
+
+  const ul = el('ul', { cls: 'items slots' });
+  cands.forEach(function (c) {
+    const li = el('li');
+
+    const top = el('div', { cls: 'slot-top' });
+    top.appendChild(el('span', {
+      cls: 'slot-when',
+      text: slotWhenText(c) + ' · ' + slotPeriodsText(c.periods),
+    }));
+    const costWrap = el('span', { cls: 'slot-cost' });
+    const cost = (c && typeof c.cost === 'number' && isFinite(c.cost)) ? String(c.cost) : '';
+    if (cost) {
+      costWrap.appendChild(el('span', { text: '代价 ' }));
+      costWrap.appendChild(el('b', { text: cost }));
+    } else {
+      costWrap.appendChild(el('span', { text: '接口未给出代价' }));
+    }
+    top.appendChild(costWrap);
+    li.appendChild(top);
+
+    const reasons = Array.isArray(c && c.reasons) ? c.reasons : [];
+    const rl = el('div', { cls: 'slot-reasons' });
+    if (!reasons.length) {
+      rl.appendChild(el('span', { cls: 'chip', text: '接口未给出代价理由' }));
+    } else {
+      reasons.forEach(function (r) { rl.appendChild(el('span', { cls: 'chip', text: String(r) })); });
+    }
+    li.appendChild(rl);
+
+    const acts = el('div', { cls: 'acts' });
+    const btn = el('button', { text: '按此提议', attrs: { type: 'button' } });
+    btn.addEventListener('click', function () { slotPropose(str(state, 'slotTarget', ''), c); });
+    acts.appendChild(btn);
+    li.appendChild(acts);
+
+    ul.appendChild(li);
+  });
+  box.appendChild(ul);
+}
+
+/**
+ * 点「查空位」：GET /api/slots。
+ * 🔴 失败时把 #slotBox 换成「未取到结果」，绝不保留上一次的候选 ——
+ *    旧候选留在屏幕上会被当成这次查询的结果（错位且不报错）。
+ */
+async function querySlots() {
+  const btn = $('slotBtn');
+  const errBox = $('slotErr');
+  const box = $('slotBox');
+
+  const target = $('slotObjSel').value;
+  const from = $('slotFrom').value.trim();
+  const to = $('slotTo').value.trim();
+  const duration = $('slotDur').value;
+
+  showBanner(errBox, null);
+  if (!target) {
+    // 本地前置校验：没选对象连请求都发不出去，直接说清楚
+    showBanner(errBox, '请先选择查询对象（下拉为空说明该组织当前没有可查对象）。');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '查询中…';
+  try {
+    const body = await apiGet('/api/slots', {
+      target: target, from: from, to: to, duration: duration,
+    });
+    state.slotTarget = target;   // 记下这次查询的对象，供「按此提议」对应用
+    renderSlots(body);
+  } catch (e) {
+    // 401 已在 handle401 里清 token 并弹出登录栏；403 / 400 原文展示后端 message
+    showBanner(errBox, (e && e.message) ? e.message : String(e));
+    clear(box);
+    box.appendChild(el('div', { cls: 'empty', text: '未取到空位结果（原因见上方提示条）。' }));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '查空位';
+  }
 }
 
 document.addEventListener('DOMContentLoaded', boot);

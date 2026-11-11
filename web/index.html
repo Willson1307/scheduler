@@ -14,7 +14,7 @@
 <title>课表活动调度辅助系统</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261113">
+<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261114">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -330,6 +330,38 @@
   .req-reason { font-size: var(--fs-sm); color: var(--c-text-dim); margin: 4px 0; }
   .req-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 
+  /* ---------- 空位查询（F7 / GET /api/slots） ---------- */
+  /* 表单行：与 .toolbar 同样 flex-wrap —— 窄屏（768px）自动换行，绝不横滚 */
+  .slot-form {
+    display: flex; flex-wrap: wrap; gap: var(--sp);
+    align-items: flex-end; margin-bottom: 8px;
+  }
+  .slot-form .field input, .slot-form .field select { min-width: 0; }
+  /* 候选列表：沿用 ul.items 的骨架，但用「可排」的绿色语义而不是冲突红 */
+  ul.slots { list-style: none; margin: 0; padding: 0; }
+  ul.slots > li {
+    border: 1px solid #a8d5bd;
+    border-left: 5px solid var(--c-ok);
+    border-radius: var(--radius);
+    padding: 10px var(--sp);
+    margin-bottom: 8px;
+    background: #fbfffd;
+  }
+  .slot-top {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    align-items: baseline; justify-content: space-between;
+  }
+  /* 展台答辩站着看 → 日期/节次是这一屏最该被读到的一行，加粗放大 */
+  .slot-when { font-weight: 700; font-size: 1.05rem; color: var(--c-primary); }
+  .slot-cost { font-size: var(--fs-sm); color: var(--c-text-dim); }
+  .slot-cost b { font-size: 1.05rem; color: var(--c-text); }
+  .slot-reasons {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    margin: 6px 0 0; font-size: var(--fs-sm);
+  }
+  ul.slots .acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .slot-sum { font-size: var(--fs-sm); color: var(--c-text-dim); margin: 0 0 8px; }
+
   /* ---------- 弹层（提议改期 / 拒绝） ---------- */
   .modal-overlay {
     position: fixed; inset: 0; background: rgba(15, 25, 40, .55);
@@ -465,6 +497,51 @@
     </p>
   </section>
 
+  <!-- ---------- 空位查询（F7 前端 / B 批 GET /api/slots） ----------
+       🔴 与周视图同页、紧随其后，不做前端路由（AGENTS §8：单页 idx）。
+       🔴 空结果必须说话：「这段时间没有连排 N 节的空位」是正常业务结论，
+          绝不能留白 —— 空白会被当成「没问题」，是本项目最痛的静默失效形态。
+       🔴 节次/可排位置全部由后端按当天生效作息（含冬季作息、调休 as_of）判定，
+          前端不做位运算、不自己算节次（两套位序混用会整页错一位且不报错）。 -->
+  <section id="secSlots">
+    <div class="sec-head">
+      <h2>查空位 <span class="hint">给某个班 / 某位老师找「连排 N 节全空」的位置（只读，不落库）</span></h2>
+      <div class="field">
+        <label for="slotObjSel">查询对象</label>
+        <select id="slotObjSel"></select>
+      </div>
+    </div>
+    <div class="slot-form">
+      <div class="field">
+        <label for="slotFrom">起始日期 from（YYYY-MM-DD）</label>
+        <input id="slotFrom" type="date">
+      </div>
+      <div class="field">
+        <label for="slotTo">结束日期 to（跨度 ≤ 31 天）</label>
+        <input id="slotTo" type="date">
+      </div>
+      <div class="field">
+        <label for="slotDur">连排节数</label>
+        <select id="slotDur">
+          <option value="1">1 节</option>
+          <option value="2" selected>2 节</option>
+          <option value="3">3 节</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>&nbsp;</label>
+        <button id="slotBtn" class="primary" type="button">查空位</button>
+      </div>
+    </div>
+    <!-- 失败态：401 走 handle401（清 token + 弹登录栏）；403 / 400 原文展示后端 message -->
+    <div id="slotErr" class="banner error" role="alert" aria-live="assertive" hidden></div>
+    <div id="slotBox"><div class="empty">尚未查询。选好对象与日期范围后点「查空位」。</div></div>
+    <p class="note">
+      数据读自 <code>/api/slots</code>；「按此提议」复用本页已有的审批弹窗，只把候选日期预填进
+      <code>valid_from</code> —— 提交后仍是 pending，课表数据零变化，批准才落库。
+    </p>
+  </section>
+
   <!-- ---------- 冲突列表 ---------- -->
   <section id="secConflict">
     <div class="cl-head">
@@ -535,7 +612,8 @@
 
 <!-- 版本号与后端 config.ASSET_VERSION 对齐；相对路径，无外链。
      F3b 改了 app.js → 递增此版本号强制浏览器拿新文件（配合 no-cache + ETag）。
-     2026-11-11 接 logo：ASSET_VERSION 与上方 favicon 的 ?v= 同改为 20261113。 -->
-<script src="app.js?v=20261113"></script>
+     2026-11-11 接 logo：ASSET_VERSION 与上方 favicon 的 ?v= 同改为 20261113。
+     2026-11-12 新增「查空位」面板（secSlots）改了 app.js：两处同改为 20261114。 -->
+<script src="app.js?v=20261114"></script>
 </body>
 </html>
