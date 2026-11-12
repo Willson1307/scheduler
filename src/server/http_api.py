@@ -2,7 +2,9 @@
 
 用途与设计意图（答辩口径）：
   1. 技术栈红线：HTTP 层用标准库 http.server（ThreadingHTTPServer），
-     不用 FastAPI/Flask——零第三方依赖、断网可跑是赛事章程硬要求。
+     不用 FastAPI/Flask——零第三方依赖是**本队自定约束**（不是章程要求，
+     2026-11-12 更正：`docs/24` 无此条）。核心功能不依赖外网（现场用本地
+     服务演示）；可选的 AI 增强需要外网，断了降级、页面不崩。
   2. handle(method, path, query, body, headers, context=None) 签名写死
      （AGENTS.md 跨人约定第 2 条）：本层只做"解析请求 → 查路由 → 调用"，
      领域逻辑全部在 api_*.py / 领域层，将来换框架只替换本适配层。
