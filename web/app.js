@@ -698,7 +698,7 @@ function renderWeek(schedules, conflicts) {
     when.periods.forEach(function (p) {
       const k = when.dayIndex + '|' + p;
       const cell = hits.get(k) || { day: when.date, texts: [] };
-      cell.texts.push(sideTitle(it.a) + ' × ' + sideTitle(it.b));
+      cell.texts.push(sideShort(it.a) + ' × ' + sideShort(it.b));
       hits.set(k, cell);
     });
   });
@@ -728,7 +728,14 @@ function renderWeek(schedules, conflicts) {
         // 同一格可能撞多条，去重后逐条列出（.length 驱动，不写死条数）
         const seen = [];
         hit.texts.forEach(function (t) { if (seen.indexOf(t) < 0) seen.push(t); });
-        seen.forEach(function (t) { td.appendChild(el('span', { cls: 'vs', text: t })); });
+        // 窄格里最多列 2 条：其余用一句「另 N 处」显式指路，⛔ 不静默丢掉
+        seen.slice(0, 2).forEach(function (t) { td.appendChild(el('span', { cls: 'vs', text: t })); });
+        if (seen.length > 2) {
+          td.appendChild(el('span', {
+            cls: 'vs',
+            text: '另 ' + (seen.length - 2) + ' 处（见右侧冲突列表）',
+          }));
+        }
       }
       tr.appendChild(td);
     }
@@ -805,6 +812,21 @@ function sideTitle(side) {
   if (!title) return who;
   if (who && title.indexOf(who) >= 0) return title;   // title 已含who，去重
   return who + ' ' + title;
+}
+
+/**
+ * 周视图格子里的紧凑标签：只取对象名。
+ * 🔴 为什么不复用 sideTitle()：三栏改版后中栏只有 ~700px，一条冲突用完整标题
+ *    （「学生1-09（冲突演示）高一(1)班 物理 × 学生1-09 全年级大会」）会把一个格子
+ *    撑成 6 行，整张表被顶长一倍。完整标题在右侧「冲突列表」里一字不少，
+ *    这里只负责「这一格谁和谁撞了」。
+ */
+function sideShort(side) {
+  // 优先用 title（「物理」「全年级大会」这种"事项"），并去掉开头的括注前缀
+  // （如「（冲突演示）」——那是标签不是内容）。取不到再退回对象名。
+  const t = str(side, 'title', '').replace(/^[（(][^）)]*[）)]\s*/, '');
+  if (t) return t;
+  return str(side, 'object_name', '') || '（对象未知）';
 }
 
 function dayIndexOf(date, days) {
@@ -931,7 +953,11 @@ function renderSide(side) {
   }
 
   const title = str(side, 'title', '');
-  if (title && title !== sideTitle(side)) box.appendChild(el('div', { cls: 'ti', text: title }));
+  // 2026-11-12：原来比的是 title !== sideTitle()，而 sideTitle 在多数数据里就是
+  // 「对象名 + 空格 + title」→ 永远不等 → 标题被打印两遍。改成「nm 行里没含 title 才补」。
+  if (title && sideTitle(side).indexOf(title) < 0) {
+    box.appendChild(el('div', { cls: 'ti', text: title }));
+  }
 
   // 🔴 slots 一律原样显示，绝不做字符串比较（AGENTS §9b：长度不定，比字符串会静默漏匹配）
   const s = str(side, 'slots', '');
@@ -1305,14 +1331,16 @@ function renderGroupOptions(groups) {
   }
   list.forEach(function (g) {
     const id = str(g, 'group_id', '');
+    // 左栏只有 260px：用「名称 · 权限 · 人数」的最短写法，长名称靠 select 自身截断，
+    // 完整信息挂在 title 上（鼠标悬停可读，不占版面）。
     const bits = [str(g, 'name', '(未命名组)')];
     const parent = str(g, 'parent_name', '');
     if (parent) bits.push('隶属 ' + parent);
     const level = str(g, 'level', '');
-    if (level) bits.push('权限 ' + level);
+    if (level) bits.push(level);   // 左栏窄：写 own 而不是「权限 own」，完整说明在 title 里
     const mc = intOrNull(g, 'member_count');
-    if (mc !== null) bits.push(mc + ' 人');
-    const o = el('option', { text: bits.join(' · '), attrs: { value: id } });
+    if (mc !== null) bits.push(mc + '人');
+    const o = el('option', { text: bits.join(' · '), attrs: { value: id, title: bits.join(' · ') } });
     sel.appendChild(o);
   });
   if (state.groupId) sel.value = state.groupId;
