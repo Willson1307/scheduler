@@ -11,17 +11,21 @@
      版本号由后端 config.ASSET_VERSION 统一导出，此处需与其保持一致。
 -->
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>课表活动调度辅助系统</title>
+<title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261116">
+<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261117">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
   :root {
     --c-bg:        #f6f7f9;
     --c-surface:   #ffffff;
-    --c-border:    #d8dee6;
+    /* 🔴 2026-11-12（卡 runQn7）：卡片边界原来 1.26:1（#d8dee6 对 #f6f7f9），
+       投影 / 大屏下几乎看不出分区。加深到 #7f8b99 后实测（WCAG 相对亮度算式）：
+         对 --c-bg #f6f7f9 = 3.24:1 ／ 对 --c-surface #fff = 3.47:1 ／ 对 #eef1f5 = 3.06:1
+       全部 ≥ 3:1（非文本对比度判据）。只改令牌值，不新增色相、不新增令牌。 */
+    --c-border:    #7f8b99;
     --c-border-st: #b9c2cd;
     --c-text:      #1f2733;
     --c-text-dim:  #5b6675;
@@ -80,7 +84,36 @@
   .brand-mark svg { display: block; width: 88px; height: 40px; }
   .brand-text { min-width: 0; flex: 1 1 260px; }
   header h1 { margin: 0; font-size: 1.35rem; font-weight: 700; letter-spacing: .5px; }
+  /* 品牌英文名与中文 h1 同排、小一号（2026-11-12 改名：时之交响 / TimeSymphony） */
+  header h1 .brand-en { font-size: .72em; font-weight: 600; letter-spacing: .4px; margin-left: 8px; opacity: .92; }
   header .sub { font-size: var(--fs-sm); opacity: .88; margin-top: 2px; }
+
+  /* ---------- 首屏状态条（卡 runQn7） ----------
+     形态刻意是「一条平的横条」：左＝状态 Badge + 本周冲突数，右＝主按钮「一键消解」。
+     ⛔ 不是 hero banner（不做居中大字 / 渐变 / 大留白），判据是 1440×900 不滚动可见。 */
+  .statusbar {
+    display: flex; flex-wrap: wrap; gap: var(--sp);
+    align-items: center; justify-content: space-between;
+    background: var(--c-surface);
+    border: 1px solid var(--c-border);
+    border-left: 4px solid var(--c-primary);
+    border-radius: var(--radius);
+    padding: 10px var(--sp);
+    margin-bottom: var(--sp);
+  }
+  .status-main { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; min-width: 0; flex: 1 1 320px; }
+  .status-text { font-size: 1.06rem; font-weight: 700; }
+  .status-text b { font-size: 1.35rem; }   /* 数字放大：站 1 米也要一眼读到 */
+  /* 状态 Badge：只用现有令牌（未登录 --c-warn / 加载中 --c-primary / 就绪 --c-ok / 失败 --c-danger） */
+  .status-badge {
+    display: inline-block; padding: 2px 10px; border-radius: 8px;
+    font-size: var(--fs-sm); font-weight: 700; border: 1px solid;
+    white-space: nowrap;
+  }
+  .status-badge.is-warn { background: var(--c-warn-l);    color: var(--c-warn);    border-color: #e3c887; }
+  .status-badge.is-load { background: var(--c-primary-l); color: var(--c-primary); border-color: #b9cde2; }
+  .status-badge.is-ok   { background: var(--c-ok-l);      color: var(--c-ok);      border-color: #a8d5bd; }
+  .status-badge.is-err  { background: var(--c-danger-l);  color: #7d2019;          border-color: var(--c-danger-b); }
 
   /* ---------- 工具条 ---------- */
   .toolbar {
@@ -149,6 +182,15 @@
     align-items: baseline;
     gap: 10px;
   }
+
+  /* 🔴 2026-11-12（卡 runQn7）：卡片轻阴影 —— 投影 / 大屏下能看出分区。
+     颜色用 --c-text 的 7% 透明度（rgba(31,39,51,.07)），不引入新色相；
+     ⛔ 不加 transition / animation，⛔ 不做玻璃拟态、大圆角、模糊光晕。 */
+  section,
+  .toolbar,
+  .statusbar,
+  .tech-notes { box-shadow: 0 1px 3px rgba(31, 39, 51, .07); }
+
   section > h2 .hint { font-size: var(--fs-xs); font-weight: 400; color: var(--c-text-dim); }
   .sec-head {
     display: flex; flex-wrap: wrap; gap: 10px;
@@ -329,6 +371,8 @@
   .req-diff { margin: 6px 0; font-weight: 700; }
   .req-reason { font-size: var(--fs-sm); color: var(--c-text-dim); margin: 4px 0; }
   .req-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  /* 变更请求标题行右侧：状态字 + 刷新按钮（都在 <details> 外，收起时可刷新、可看状态） */
+  .req-tools { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 
   /* ---------- 空位查询（F7 / GET /api/slots） ---------- */
   /* 表单行：与 .toolbar 同样 flex-wrap —— 窄屏（768px）自动换行，绝不横滚 */
@@ -361,6 +405,35 @@
   }
   ul.slots .acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
   .slot-sum { font-size: var(--fs-sm); color: var(--c-text-dim); margin: 0 0 8px; }
+
+  /* ---------- 折叠区（卡 runQn7） ----------
+     「问一下 / 变更请求 / 消解结果」用 <details> 默认收起（页面 6 段变 3 段）。
+     🔴 h2 一律留在 <details> 外：既保住 section > h2 的字号（字号只许持平或加大），
+        也让标题行与状态字（.fold-state）在收起时仍然可见。
+     🔴 错误横幅也放在 <details> 外 —— 折进去等于「失败无声」，
+        正是本项目最痛的静默失效形态。
+     ⛔ 不给 details / summary 设 display（会破坏默认三角与关闭态隐藏）；⛔ 无动画。 */
+  .fold { margin: 0; }
+  .fold > summary {
+    cursor: pointer; padding: 2px 0 6px;
+    color: var(--c-primary); font-size: var(--fs-sm); font-weight: 700;
+  }
+  .fold[open] > summary { margin-bottom: 6px; }
+  .fold-state { font-size: var(--fs-sm); font-weight: 700; color: var(--c-text-dim); }
+  .sec-head .fold-state { margin-left: auto; }
+  .fold-state.is-ok    { color: var(--c-ok); }
+  .fold-state.is-warn  { color: var(--c-warn); }
+  .fold-state.is-error { color: var(--c-danger); }
+
+  /* ---------- 预设问题芯片（卡 runQn7） ----------
+     克制样式：一排灰底小按钮，无图标无渐变；点击 = 预填 + 触发同一条 POST /api/chat。
+     ⛔ 前端不内置任何答案文本，芯片只带问题（data-q）。 */
+  .q-chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 10px; }
+  .q-chips-label { font-size: var(--fs-xs); color: var(--c-text-dim); }
+  .q-chip {
+    background: #eef1f5; border: 1px solid var(--c-border);
+    border-radius: 10px; padding: 4px 10px; font-size: var(--fs-sm);
+  }
 
   /* ---------- 问一下（rn6JxF / POST /api/chat） ---------- */
   /* 输入行与 .slot-form 同构：flex-wrap，窄屏（768px）换行而不横滚 */
@@ -452,7 +525,7 @@
          🔴 入场双线融合动画只播一次（animateTransform 已 fill="freeze"），播完静止：
             页头持续动画会干扰操作，也费电。 -->
     <span class="brand-mark">
-      <svg viewBox="0 0 160 72" role="img" aria-label="TimeSymphony 品牌标记">
+      <svg viewBox="0 0 160 72" role="img" aria-label="时之交响 TimeSymphony 品牌标记">
         <defs>
           <linearGradient id="tsLine" x1="0" y1="0" x2="1" y2="0">
             <stop offset="0" stop-color="#4FA3E8"/>
@@ -480,9 +553,9 @@
       </svg>
     </span>
     <div class="brand-text">
-      <h1>课表活动调度辅助系统</h1>
+      <h1>时之交响<span class="brand-en">TimeSymphony</span></h1>
       <div class="sub">
-        课表（周期事务）与活动（一次性事务）同框· 统一冲突检测与一键消解
+        课表（周期事务）与活动（一次性事务）同框 · 统一冲突检测与一键消解
         <span id="srcTag" class="mocktag" hidden></span>
       </div>
     </div>
@@ -490,6 +563,19 @@
 </header>
 
 <div class="wrap">
+
+  <!-- ---------- 首屏状态条（卡 runQn7） ----------
+       🔴 数字只来自 GET /api/conflicts 的 raw_count（缺失才用 count），前端一处都不写死。
+       🔴 接口失败 → 错误态，⛔ 不许显示 0（0 会被当成「本周没问题」，是本项目最痛的静默失效）。
+       🔴 两个「一键消解」入口（这里 + 冲突列表）共用同一个 doResolve()，状态由 syncResolveDisabled() 统一同步。
+       形态是一条平的横条：Badge + 数字 + 主按钮，1440×900 首屏不滚动可见。 -->
+  <div id="statusBar" class="statusbar">
+    <div class="status-main">
+      <span id="statusBadge" class="status-badge is-warn">未登录</span>
+      <span id="statusText" class="status-text" role="status" aria-live="polite">登录后显示本周冲突数</span>
+    </div>
+    <button id="resolveBtnTop" class="primary" type="button" disabled>一键消解</button>
+  </div>
 
   <!-- 全局错误区：🔴 零容忍空白页——任何环节失败都在这里显式说出来，
        绝不让用户误以为「没有冲突」 -->
@@ -515,7 +601,11 @@
     </div>
     <div class="field grow">
       <label>状态</label>
-      <div id="loginWho" class="note">未登录。登录后可查看课表</div>
+      <!-- Badge：未登录＝黄（--c-warn）、已登录＝绿（--c-ok）。原来是一行灰色小字，投影下读不出来 -->
+      <div class="note">
+        <span id="loginBadge" class="status-badge is-warn">未登录</span>
+        <span id="loginWho">登录后可查看课表</span>
+      </div>
     </div>
   </div>
   <div id="loginErr" class="banner error" role="alert" aria-live="assertive" hidden></div>
@@ -523,11 +613,11 @@
   <!-- ---------- 组切换器 ---------- -->
   <div class="toolbar">
     <div class="field grow">
-      <label for="groupSel">当前组（只列出你有授权的组）</label>
+      <label for="groupSel">当前组</label>
       <select id="groupSel"><option value="">加载中…</option></select>
     </div>
     <div class="field">
-      <label for="weekSel">周（缺省＝本周，服务端以周一为起点归周）</label>
+      <label for="weekSel">周（留空＝本周）</label>
       <input id="weekSel" type="text" inputmode="numeric" placeholder="YYYY-MM-DD，留空＝本周" size="12">
     </div>
     <div class="field">
@@ -639,46 +729,81 @@
           「手册原文（未启用 AI）」。⛔ 不能让老师以为所有回答都是 AI 生成的 ——
           这是诚信要求，也是答辩口径（AI 只做自然语言理解与结果解释）。
        🔴 前端不拼 prompt、不存 key：问题原样 POST 给后端，模型调用只在后端 env 里决定。
-       🔴 「手册里没有这条」不是故障：后端返 200 + mode=template，照样按原文渲染。 -->
+       🔴 「手册里没有这条」不是故障：后端返 200 + mode=template，照样按原文渲染。
+       🔴 卡 runQn7：本块默认收起（<details>）。h2 / 状态字 / 芯片 / 错误横幅都留在
+          details 外 —— 收起时也必须能看见「有没有答过、有没有失败」，也要能直接点问。 -->
   <section id="secChat">
     <div class="sec-head">
       <h2>问一下 <span class="hint">问「这件事该怎么操作」，答案来自用户手册</span></h2>
+      <span id="chatSum" class="fold-state">尚未提问</span>
     </div>
-    <div class="chat-form">
-      <div class="field grow">
-        <label for="chatQ">你的问题（≤500 字，回车即可提问）</label>
-        <input id="chatQ" type="text" maxlength="500" placeholder="例如：我想把周三下午的课调开">
-      </div>
-      <div class="field">
-        <label>&nbsp;</label>
-        <button id="chatBtn" class="primary" type="button">问一下</button>
-      </div>
+    <!-- 预设问题芯片：一排灰底小按钮。点一下 = 预填 + 触发同一条 POST /api/chat。
+         🔴 data-q 里只放问题，⛔ 前端不内置任何答案文本（答案只能来自后端）。
+         这 8 条已实测命中手册检索层（mode=retrieval），不会答「手册里没有这条」。 -->
+    <div id="chatChips" class="q-chips" role="group" aria-label="常见问题">
+      <span class="q-chips-label">常问：</span>
+      <button type="button" class="q-chip" data-q="我想把周三下午的课调开，怎么弄">调课</button>
+      <button type="button" class="q-chip" data-q="临时取消一节课怎么做">临时取消</button>
+      <button type="button" class="q-chip" data-q="调休那天按哪天的课表算">调休</button>
+      <button type="button" class="q-chip" data-q="谁能批准改课表">谁能批准</button>
+      <button type="button" class="q-chip" data-q="教师能不能直接改永久课表">永久改课</button>
+      <button type="button" class="q-chip" data-q="一键消解点了没变化">消解没反应</button>
+      <button type="button" class="q-chip" data-q="登录失败了怎么办">登录失败</button>
+      <button type="button" class="q-chip" data-q="系统会记录我点什么吗">隐私</button>
     </div>
-    <!-- 失败态：401 走 handle401（清 token + 弹登录栏）；其它错误原文展示后端 message -->
+    <!-- 失败态：401 走 handle401（清 token + 弹登录栏）；其它错误原文展示后端 message
+         🔴 放在 <details> 之外：折起来还能看见失败 -->
     <div id="chatErr" class="banner error" role="alert" aria-live="assertive" hidden></div>
-    <div id="chatBox"><div class="empty">尚未提问。</div></div>
-    <p class="note">
-      回答、来源标识与出处均由系统给出。标注「手册原文（未启用 AI）」时，
-      这句话来自手册，未经模型改写。问答只做解释，改课仍走下方「变更请求」审批流，不写入任何数据。
-    </p>
+    <details id="chatDetails" class="fold">
+      <summary>展开输入框与回答</summary>
+      <div class="chat-form">
+        <div class="field grow">
+          <label for="chatQ">你的问题（≤500 字，回车即可提问）</label>
+          <input id="chatQ" type="text" maxlength="500" placeholder="例如：我想把周三下午的课调开">
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button id="chatBtn" class="primary" type="button">问一下</button>
+        </div>
+      </div>
+      <div id="chatBox"><div class="empty">尚未提问。</div></div>
+      <p class="note">
+        回答、来源标识与出处均由系统给出。标注「手册原文（未启用 AI）」时，
+        这句话来自手册，未经模型改写。问答只做解释，改课仍走下方「变更请求」审批流，不写入任何数据。
+      </p>
+    </details>
   </section>
 
-  <!-- ---------- 消解前后对比 ---------- -->
+  <!-- ---------- 消解前后对比（卡 runQn7：默认收起） ----------
+       结果/撤销/固化的输出都写进 #resBox，全部落在 <details> 内 →
+       app.js 在写结果或写错误后一律 details.open = true，绝不让「消解完了但看不见」。 -->
   <section id="secResult">
-    <h2>消解结果 <span class="hint">消解前后对比</span></h2>
-    <div id="resBox"><div class="empty">尚未执行消解。</div></div>
+    <h2>消解结果 <span class="hint">消解前后对比</span>
+      <span id="resSum" class="fold-state">尚未执行消解</span></h2>
+    <details id="resDetails" class="fold">
+      <summary>展开查看消解前后对比</summary>
+      <div id="resBox"><div class="empty">尚未执行消解。</div></div>
+    </details>
   </section>
 
-  <!-- ---------- 变更请求（F7 / B8 审批流） ---------- -->
+  <!-- ---------- 变更请求（F7 / B8 审批流，卡 runQn7：默认收起） ----------
+       🔴 刷新按钮与两条横幅（#reqMsg / #reqErr）都留在 <details> 外：
+          放进 summary 会「刷新 + 开合」双触发；折进去则会「失败无声」。 -->
   <section id="secRequests">
     <div class="cl-head">
       <h2>变更请求 <span class="hint">永久改期走审批：批准后才生效</span></h2>
-      <button id="reqReloadBtn" type="button">刷新请求</button>
+      <div class="req-tools">
+        <span id="reqSum" class="fold-state">登录后显示</span>
+        <button id="reqReloadBtn" type="button">刷新请求</button>
+      </div>
     </div>
     <div id="reqMsg" class="banner ok" role="status" aria-live="polite" hidden></div>
     <div id="reqErr" class="banner error" role="alert" hidden></div>
-    <div id="reqBox"></div>
-    <p class="note">已处理的只读；批准时会再查一遍冲突。</p>
+    <details id="reqDetails" class="fold">
+      <summary>展开查看变更请求</summary>
+      <div id="reqBox"></div>
+      <p class="note">已处理的只读；批准时会再查一遍冲突。</p>
+    </details>
   </section>
 
   <!-- ---------- 技术说明（默认收起，答辩用） ----------
@@ -706,7 +831,8 @@
   </details>
 
   <footer>
-    本地运行 · 断网可用
+    <div>时之交响 TimeSymphony</div>
+    <div>本地运行 · 断网可用</div>
   </footer>
 </div>
 
@@ -715,7 +841,9 @@
      2026-11-11 接 logo：ASSET_VERSION 与上方 favicon 的 ?v= 同改为 20261113。
      2026-11-12 新增「查空位」面板（secSlots）改了 app.js：两处同改为 20261114。
      2026-11-11 新增「问一下」面板（secChat，POST /api/chat）改了 app.js：两处同改为 20261115。
-     2026-11-12 界面文案清理（开发期话术收进底部折叠区）改了 app.js + index.html：两处同改为 20261116。 -->
-<script src="app.js?v=20261116"></script>
+     2026-11-12 界面文案清理（开发期话术收进底部折叠区）改了 app.js + index.html：两处同改为 20261116。
+     2026-11-12 卡 runQn7：改名 + 首屏状态条 + 卡片对比 + 折叠 + 芯片，改了 app.js + index.html：三处同改为 20261117
+               （三处 = 本行 app.js?v= / 上方 favicon?v= / config.py 的 ASSET_VERSION）。 -->
+<script src="app.js?v=20261117"></script>
 </body>
 </html>

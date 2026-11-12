@@ -58,7 +58,10 @@ from scheduler.seeds import seed_demo  # noqa: E402
 #:    两侧一起递增到 20261115。
 #: 2026-11-12：界面上把开发期自证（接口名 / 契约编号）挤出去、技术说明收进底部折叠区，
 #:    改了 app.js 与 index.html，两侧一起递增到 20261116。
-ASSET_VERSION = "20261116"
+#: 2026-11-12（卡 runQn7）：对外改名「时之交响 TimeSymphony」+ 首屏状态条 / 卡片对比 /
+#:    折叠 / 预设问题芯片，改了 app.js 与 index.html，三处（本值 + app.js?v= + favicon?v=）
+#:    一起递增到 20261117。
+ASSET_VERSION = "20261117"
 
 #: 默认数据库：与队长 L8 沙盒演示库同路径，现场「删 data/ → 一条命令 →
 #: 30 秒可演示」的闭环由本模块的自动初始化兜底（CP-G）。
@@ -120,7 +123,7 @@ def load_config(argv: list[str] | None = None) -> ServerConfig:
     """
     import argparse
 
-    parser = argparse.ArgumentParser(description="课表活动调度辅助系统 · 服务端（本地运行，断网可用）")
+    parser = argparse.ArgumentParser(description="时之交响 TimeSymphony · 服务端（本地运行，断网可用）")
     parser.add_argument("--host", default=None, help="监听地址，默认 127.0.0.1")
     parser.add_argument("--port", type=int, default=None, help="监听端口，默认 8000；0 = 随机分配")
     parser.add_argument("--db", default=None, help="SQLite 数据库路径，默认 <仓库根>/data/demo.db")
