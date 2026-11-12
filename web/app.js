@@ -534,7 +534,7 @@ const TERMINATION_CN = {
   best_effort: '已尽力，仍有残留',
 };
 function terminationLabel(t) {
-  if (typeof t !== 'string' || t === '') return '接口未返回终止态';
+  if (typeof t !== 'string' || t === '') return '求解未结束';
   return TERMINATION_CN[t] || ('未知终止态：' + t);
 }
 
@@ -645,7 +645,7 @@ function renderWeek(schedules, conflicts) {
 
   const days = arr(schedules, 'days');
   if (!days.length) {
-    showBanner(errBox, '周视图数据里没有 days 字段（契约 §4），无法确定本周日期。请检查后端响应。');
+    showBanner(errBox, '本周日期没加载出来，请点「重新加载」。');
     return;
   }
   state.days = days;
@@ -834,35 +834,31 @@ function renderConflicts(counts) {
   gStat.appendChild(el('span', { text: ' 组冲突待处理' }));
   stats.appendChild(gStat);
 
-  const rStat = el('div', { cls: 'stat' });
-  rStat.appendChild(el('b', { text: counts.raw === null ? '—' : String(counts.raw) }));
-  rStat.appendChild(el('span', {
-    text: counts.raw === null ? ' 处原始冲突（接口未提供 raw_count）' : ' 处原始冲突',
-  }));
-  stats.appendChild(rStat);
+  // 原始冲突处数：取不到就不显示这一格（不在界面上暴露「字段缺失」这种开发期信息）
+  if (counts.raw !== null) {
+    const rStat = el('div', { cls: 'stat' });
+    rStat.appendChild(el('b', { text: String(counts.raw) }));
+    rStat.appendChild(el('span', { text: ' 处原始冲突' }));
+    stats.appendChild(rStat);
+  }
 
   box.appendChild(stats);
 
-  // ---- 口径说明：把count / raw_count 的区别直接写在页面上 ----
-  //     答辩时评委一定会问「为什么上面写3、下面写 23」。答案就地写在页面上，
-  //     不用口头解释，也避免答辩现场解释不清。
+  // ---- 一句话说清两个数字的关系 ----
+  //     答辩时评委会问「为什么上面写 3、下面写 23」：实时给一句对照即可，
+  //     完整的聚合口径与接口来源收在页面底部「技术说明」折叠区（展开才是原话）。
   //     🔴 这两个数字都来自响应，本页不产生、不推断任何数字。
   showBanner($('resolveHint'),
     counts.raw === null
-      ? '说明：接口未提供 raw_count，无法显示原始冲突处数。'
-      : '口径说明：「' + counts.groups + ' 组」是服务端聚合后的冲突组数（一条冲突涉及多个学生时'
-        + '只报1 组，否则同班 40 名学生会把一处冲突刷成 40 条）；「' + counts.raw
-        + ' 处」是聚合前的原始冲突条数。消解按钮调POST /api/resolve，'
-        + '由后端统一求解（契约 §5 要求服务端聚合、§6 要求前端不做位运算）。'
-        + ' 消解后结果条上可「撤销本次消解」——消解是原地改写课表，撤销按应用前的'
-        + ' 全量快照逐字段回写；管理员还可「固化此版本」，固化后不可撤销。');
+      ? null
+      : '「' + counts.groups + ' 组」＝合并后；「' + counts.raw + ' 处」＝合并前。');
 
   // ---- 列表 ----
   const items = arr(counts, 'items');
   if (!items.length) {
     box.appendChild(el('div', {
       cls: 'empty',
-      text: '接口返回 0 组冲突。注意：这是接口的真实结果，不是加载失败。',
+      text: '本周没有冲突。',
     }));
     return;
   }
@@ -910,7 +906,7 @@ function renderConflictItem(item, idx) {
   // ---- 掩码透传：a/b 两侧已各自显示过slots，这里只补冲突条目自身的 ----
   const slot = str(item, 'slots', '');
   if (slot) {
-    const meta = el('div', { cls: 'mt', text: '本组冲突占用槽位（后端原样下发，不解码）：' });
+    const meta = el('div', { cls: 'mt', text: '节次编码：' });
     meta.appendChild(el('code', { text: slot }));
     li.appendChild(meta);
   }
@@ -936,7 +932,7 @@ function renderSide(side) {
   const s = str(side, 'slots', '');
   if (s) {
     const m = el('div', { cls: 'mt' });
-    m.appendChild(el('span', { text: '槽位 ' }));
+    m.appendChild(el('span', { text: '节次编码 ' }));
     m.appendChild(el('code', { text: s }));
     box.appendChild(m);
   }
@@ -974,7 +970,7 @@ function renderResolveResult(body) {
   clear(box);
 
   if (!body || typeof body !== 'object') {
-    box.appendChild(el('div', { cls: 'empty', text: '消解接口没有返回可显示的结果（响应为空或结构不符）。' }));
+    box.appendChild(el('div', { cls: 'empty', text: '没拿到结果，请重试。' }));
     return;
   }
 
@@ -996,17 +992,17 @@ function renderResolveResult(body) {
   banner.appendChild(cmp);
   box.appendChild(banner);
 
+  // 明细行：某个数没给出来就不显示那一行（不把「字段缺失」这种开发期信息写上屏幕）
   const kv = el('div', { cls: 'kv' });
   [
-    ['已应用方案数 applied', applied],
-    ['迭代轮数 rounds', rounds],
-    ['其中因不在可改范围、未尝试的filtered_out_count', filtered],
+    ['已应用方案数', applied],
+    ['迭代轮数', rounds],
+    ['因不在你的可改范围而未尝试', filtered],
   ].forEach(function (pair) {
-    kv.appendChild(el('div', {
-      text: pair[0] + '：' + (pair[1] === null ? '接口未返回' : String(pair[1])),
-    }));
+    if (pair[1] === null) return;
+    kv.appendChild(el('div', { text: pair[0] + '：' + String(pair[1]) }));
   });
-  box.appendChild(kv);
+  if (kv.firstChild) box.appendChild(kv);
 
   if (filtered !== null && filtered > 0) {
     box.appendChild(el('div', {
@@ -1083,7 +1079,7 @@ async function doRevert(sid, btn) {
         + '（回写 ' + (restored === null ? '?' : String(restored)) + ' 条日程'
         + (exact ? '，逐字段等于消解前）'
                  : '；另有 ' + String(missN) + ' 条日程已不存在，未能还原）')
-        + ((body && body.already_reverted) ? '。这条快照先前已撤销，本次未改动数据。' : ''),
+        + ((body && body.already_reverted) ? '。这次撤销先前已经做过，本次没有改动数据。' : ''),
     }));
   } catch (e) {
     if (btn) btn.disabled = false;
@@ -1103,7 +1099,7 @@ async function doCommit(sid, btn) {
     clear($('resBox'));
     $('resBox').appendChild(el('div', {
       cls: 'banner ok',
-      text: '已固化此版本（快照 ' + sid + '）。此后再撤销会被拒绝；如需调整请重新执行消解。',
+      text: '已固化，之后不能再撤销。',
     }));
   } catch (e) {
     if (btn) btn.disabled = false;
@@ -1171,7 +1167,7 @@ async function doLogin() {
     state.token = str(body, 'token', '');
     state.user = (body && typeof body.user === 'object' && body.user) ? body.user : null;
     if (!state.token) {
-      showBanner($('loginErr'), '登录接口未返回 token（HTTP 200 但结构不符），请检查后端版本与契约 §1。');
+      showBanner($('loginErr'), '登录失败：没拿到登录凭证，请重试。');
       return;
     }
     const gid = str(body, 'default_group_id', '');
@@ -1303,7 +1299,7 @@ async function loadAll() {
       if (ids.indexOf(state.groupId) < 0) state.groupId = ids.length ? ids[0] : '';
       $('groupSel').value = state.groupId;
     } catch (e) {
-      showBanner(fatal, '组列表加载失败：' + e.message + '（无法切换组，请检查后端服务是否在运行）');
+      showBanner(fatal, '组列表加载失败：' + e.message + '（无法切换组，请确认服务已启动）');
       renderGroupOptions([]);
       return;
     }
@@ -1338,7 +1334,7 @@ async function loadAll() {
     clear($('confBox'));
     $('confBox').appendChild(el('div', {
       cls: 'empty',
-      text: '🔴 冲突数据未取到。这不等于「没有冲突」——请先修好接口再看结论。',
+      text: '冲突没加载出来，请点「重新加载」。',
     }));
   }
 
@@ -1545,7 +1541,7 @@ function conflictTargets(item) {
 function openProposeModal(targets, opts) {
   const o = opts || {};
   const md = modalOverlay();
-  md.box.appendChild(el('h3', { text: '提议改期（走审批，批准后才落库）' }));
+  md.box.appendChild(el('h3', { text: '提议改期（需批准才生效）' }));
   if (o.note) md.box.appendChild(el('p', { cls: 'note', text: o.note }));
 
   const fTarget = el('div', { cls: 'field' });
@@ -1559,7 +1555,7 @@ function openProposeModal(targets, opts) {
   });
   if (!(targets || []).length) {
     selTarget.appendChild(el('option', {
-      text: o.emptyText || '（该冲突未提供可改期的日程 id）',
+    text: o.emptyText || '（这条冲突里没有可改期的日程）',
       attrs: { value: '' },
     }));
   }
@@ -1567,14 +1563,14 @@ function openProposeModal(targets, opts) {
   md.box.appendChild(fTarget);
 
   const fDate = el('div', { cls: 'field' });
-  fDate.appendChild(el('label', { text: '新的起始日 valid_from（YYYY-MM-DD）' }));
+  fDate.appendChild(el('label', { text: '新的开始日期' }));
   const inpDate = el('input', { attrs: { type: 'date' } });
   if (o.prefillDate) inpDate.value = o.prefillDate;
   fDate.appendChild(inpDate);
   md.box.appendChild(fDate);
 
   const fReason = el('div', { cls: 'field' });
-  fReason.appendChild(el('label', { text: '理由 reason（必填）' }));
+  fReason.appendChild(el('label', { text: '理由（必填）' }));
   const taReason = el('textarea', { attrs: { rows: '3' } });
   fReason.appendChild(taReason);
   md.box.appendChild(fReason);
@@ -1609,9 +1605,7 @@ function openProposeModal(targets, opts) {
         reason: reason,
       });
       closeModal(md.ov);
-      showBanner($('reqMsg'),
-        '提议已提交：请求 ' + str(body, 'request_id', '') + '，状态 '
-        + str(body, 'status', 'pending') + '。课表数据【零变化】——要等批准后才落库。');
+      showBanner($('reqMsg'), '提议已提交，等批准后才生效，课表暂时不变。');
       await loadRequests();
     } catch (e) {
       btnOk.disabled = false;
@@ -1727,7 +1721,7 @@ async function loadRequests() {
     clear($('reqBox'));
     $('reqBox').appendChild(el('div', {
       cls: 'empty',
-      text: '🔴 变更请求未取到（这不等于「没有请求」），请检查登录状态与后端服务。',
+      text: '请求没加载出来，请点「刷新请求」。',
     }));
   }
 }
@@ -1737,8 +1731,7 @@ async function doApprove(req, btn) {
   try {
     const body = await apiPost('/api/approvals/approve', { id: req.id }, {});
     showBanner($('reqMsg'),
-      '已批准请求 ' + req.id + '，状态 ' + str(body, 'status', 'applied')
-      + '（valid_from 已落库生效）。');
+      '已批准，课表已更新（' + reqStatusLabel(str(body, 'status', 'applied')) + '）。');
     await loadRequests();
     await loadAll();   // 落库后重拉周视图/冲突列表，反映真实状态
   } catch (e) {
@@ -1751,8 +1744,7 @@ async function doWithdraw(req, btn) {
   btn.disabled = true;
   try {
     const body = await apiPost('/api/approvals/withdraw', { id: req.id }, {});
-    showBanner($('reqMsg'),
-      '已撤回请求 ' + req.id + '，状态 ' + str(body, 'status', 'withdrawn') + '。');
+    showBanner($('reqMsg'), '已撤回，课表不变。');
     await loadRequests();
   } catch (e) {
     showBanner($('reqMsg'), '撤回失败：' + httpErrText(e));
@@ -1766,7 +1758,7 @@ function openRejectModal(req) {
   md.box.appendChild(el('h3', { text: '拒绝请求（必须填写理由）' }));
 
   const fReason = el('div', { cls: 'field' });
-  fReason.appendChild(el('label', { text: '拒绝理由 reason（必填，会被写入审计日志）' }));
+  fReason.appendChild(el('label', { text: '拒绝理由（必填，会被记录）' }));
   const taReason = el('textarea', { attrs: { rows: '3' } });
   fReason.appendChild(taReason);
   md.box.appendChild(fReason);
@@ -1785,12 +1777,12 @@ function openRejectModal(req) {
 
   btnOk.addEventListener('click', async function () {
     const reason = taReason.value.trim();
-    if (!reason) { showBanner(errBox, '拒绝必须填写理由（后端会 400 拦截空理由）。'); return; }
+    if (!reason) { showBanner(errBox, '拒绝必须填写理由。'); return; }
     btnOk.disabled = true;
     try {
       const body = await apiPost('/api/approvals/reject', { id: req.id }, { reason: reason });
       closeModal(md.ov);
-      showBanner($('reqMsg'), '已拒绝请求 ' + req.id + '，状态 ' + str(body, 'status', 'rejected') + '。');
+      showBanner($('reqMsg'), '已拒绝，课表不变。');
       await loadRequests();
     } catch (e) {
       btnOk.disabled = false;
@@ -1888,7 +1880,7 @@ function slotPropose(target, cand) {
   let from = '该对象在冲突列表里的日程';
   if (!targets.length) {
     targets = conflictSchedulesFiltered(null);
-    from = '当前组织的冲突日程（空位接口只给位置，不返回日程 id）';
+    from = '当前组织的冲突日程（空位只给位置，不给具体日程）';
   }
 
   openProposeModal(targets, {
@@ -1896,7 +1888,7 @@ function slotPropose(target, cand) {
     note: '来自「查空位」：候选 ' + (date || '（日期未给出）') + ' ' + periods
       + '，对象 ' + target + '。可改期日程取自' + from
       + '；提交后仍为待审批，课表数据零变化。',
-    emptyText: '（当前组织没有冲突日程可改期 —— 空位接口只给位置，不给日程 id）',
+    emptyText: '（当前组织没有可改期的冲突日程 —— 空位只给位置，不给具体日程）',
   });
 }
 
@@ -1914,14 +1906,14 @@ function renderSlots(body) {
     box.appendChild(el('div', {
       cls: 'empty',
       text: '这段时间没有连排 ' + durText + ' 节的空位。'
-        + '（这是后端算出的正常结论：该对象在这段时间里找不到连排 ' + durText + ' 节全空的位置。）',
+        + '（该对象在这段时间里找不到连排 ' + durText + ' 节全空的位置。）',
     }));
     return;
   }
 
   box.appendChild(el('p', {
     cls: 'slot-sum',
-    text: '共 ' + n + ' 个候选，已按代价升序（越靠前越省代价）。节次由后端按当天生效作息判定。',
+    text: '共 ' + n + ' 个位置，越靠前越省事。',
   }));
 
   const ul = el('ul', { cls: 'items slots' });
@@ -1933,25 +1925,22 @@ function renderSlots(body) {
       cls: 'slot-when',
       text: slotWhenText(c) + ' · ' + slotPeriodsText(c.periods),
     }));
-    const costWrap = el('span', { cls: 'slot-cost' });
+    // 代价：没给出来就不显示这一段（不把「字段缺失」这类开发期信息写上屏幕）
     const cost = (c && typeof c.cost === 'number' && isFinite(c.cost)) ? String(c.cost) : '';
     if (cost) {
+      const costWrap = el('span', { cls: 'slot-cost' });
       costWrap.appendChild(el('span', { text: '代价 ' }));
       costWrap.appendChild(el('b', { text: cost }));
-    } else {
-      costWrap.appendChild(el('span', { text: '接口未给出代价' }));
+      top.appendChild(costWrap);
     }
-    top.appendChild(costWrap);
     li.appendChild(top);
 
     const reasons = Array.isArray(c && c.reasons) ? c.reasons : [];
-    const rl = el('div', { cls: 'slot-reasons' });
-    if (!reasons.length) {
-      rl.appendChild(el('span', { cls: 'chip', text: '接口未给出代价理由' }));
-    } else {
+    if (reasons.length) {
+      const rl = el('div', { cls: 'slot-reasons' });
       reasons.forEach(function (r) { rl.appendChild(el('span', { cls: 'chip', text: String(r) })); });
+      li.appendChild(rl);
     }
-    li.appendChild(rl);
 
     const acts = el('div', { cls: 'acts' });
     const btn = el('button', { text: '按此提议', attrs: { type: 'button' } });
@@ -2058,23 +2047,22 @@ function renderChat(body) {
   const answer = str(body, 'answer', '');
   card.appendChild(el('div', {
     cls: 'chat-text',
-    text: answer || '（接口未返回 answer 字段，请检查后端版本与契约）',
+    text: answer || '（没拿到答案，请重试）',
   }));
 
   // ---- ③ 出处：哪份文档哪一节，供回查；缺失就说缺失，不编文档号 ----
   const sources = arr(body, 'sources');
-  const src = el('div', { cls: 'chat-src' });
-  if (!sources.length) {
-    src.appendChild(el('span', { text: '接口未给出处。' }));
-  } else {
+  // 一处出处都没有就整块不显示（不写「没给出」这种开发期旁白）
+  if (sources.length) {
+    const src = el('div', { cls: 'chat-src' });
     src.appendChild(el('span', { text: '出处：' }));
     sources.forEach(function (s) {
       const label = [str(s, 'doc', ''), str(s, 'section', '')]
         .filter(function (x) { return !!x; }).join(' ');
       src.appendChild(el('span', { cls: 'chip', text: label || '（未标注文档/章节）' }));
     });
+    card.appendChild(src);
   }
-  card.appendChild(src);
 
   box.appendChild(card);
 }
