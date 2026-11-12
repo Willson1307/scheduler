@@ -14,7 +14,7 @@
 <title>课表活动调度辅助系统</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261115">
+<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261116">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -422,6 +422,25 @@
   .modal .actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
 
   footer { color: var(--c-text-dim); font-size: var(--fs-xs); text-align: center; margin-top: 16px; }
+
+  /* ---------- 技术说明（页面底部，默认收起） ----------
+     开发期的接口/字段/契约口径从主界面挪到这里：主界面只说老师能操作的话，
+     展开后保留原话（答辩被追问「这两个数字怎么来的」时直接展开给评委看）。 */
+  .tech-notes {
+    background: var(--c-surface);
+    border: 1px solid var(--c-border);
+    border-radius: var(--radius);
+    padding: 10px var(--sp);
+    margin-bottom: var(--sp);
+    font-size: var(--fs-sm);
+    color: var(--c-text-dim);
+  }
+  .tech-notes > summary {
+    cursor: pointer; font-weight: 700; color: var(--c-primary);
+    font-size: var(--fs-sm);
+  }
+  .tech-notes p { margin: 8px 0 0; font-size: var(--fs-xs); line-height: 1.8; }
+  .tech-notes code { color: var(--c-text); }
 </style>
 </head>
 <body>
@@ -496,7 +515,7 @@
     </div>
     <div class="field grow">
       <label>状态</label>
-      <div id="loginWho" class="note">未登录：接口统一要求 Bearer token（docs/07 通用约定），登录后自动加载数据。</div>
+      <div id="loginWho" class="note">未登录。登录后可查看课表</div>
     </div>
   </div>
   <div id="loginErr" class="banner error" role="alert" aria-live="assertive" hidden></div>
@@ -520,7 +539,7 @@
   <!-- ---------- 周视图 ---------- -->
   <section id="secWeek">
     <div class="sec-head">
-      <h2>周视图 <span class="hint">周一 ~ 周五 × 第 1 ~ 10 节</span></h2>
+      <h2>周视图 <span class="hint">按当天作息（起第 1 节）</span></h2>
       <div class="field">
         <label for="objSel">查看对象</label>
         <select id="objSel"></select>
@@ -528,11 +547,6 @@
     </div>
     <div id="weekErr" class="banner error" role="alert" hidden></div>
     <div id="weekBox"></div>
-    <p class="note">
-      占用格来自 <code>/api/schedules</code> 的 <code>grid</code>：前端对后端已归一化的单日掩码
-      （第 N 节 → bit N）做受控反解；红色冲突格由 <code>/api/conflicts</code> 的
-      <code>readable</code> 定位、叠加在占用格上。下方「每日占用」按掩码原样透传显示。
-    </p>
   </section>
 
   <!-- ---------- 空位查询（F7 前端 / B 批 GET /api/slots） ----------
@@ -543,7 +557,7 @@
           前端不做位运算、不自己算节次（两套位序混用会整页错一位且不报错）。 -->
   <section id="secSlots">
     <div class="sec-head">
-      <h2>查空位 <span class="hint">给某个班 / 某位老师找「连排 N 节全空」的位置（只读，不落库）</span></h2>
+      <h2>查空位 <span class="hint">给某个班 / 某位老师找「连排 N 节全空」的位置（只读，不改课表）</span></h2>
       <div class="field">
         <label for="slotObjSel">查询对象</label>
         <select id="slotObjSel"></select>
@@ -551,11 +565,11 @@
     </div>
     <div class="slot-form">
       <div class="field">
-        <label for="slotFrom">起始日期 from（YYYY-MM-DD）</label>
+        <label for="slotFrom">开始日期</label>
         <input id="slotFrom" type="date">
       </div>
       <div class="field">
-        <label for="slotTo">结束日期 to（跨度 ≤ 31 天）</label>
+        <label for="slotTo">结束日期</label>
         <input id="slotTo" type="date">
       </div>
       <div class="field">
@@ -574,10 +588,7 @@
     <!-- 失败态：401 走 handle401（清 token + 弹登录栏）；403 / 400 原文展示后端 message -->
     <div id="slotErr" class="banner error" role="alert" aria-live="assertive" hidden></div>
     <div id="slotBox"><div class="empty">尚未查询。选好对象与日期范围后点「查空位」。</div></div>
-    <p class="note">
-      数据读自 <code>/api/slots</code>；「按此提议」复用本页已有的审批弹窗，只把候选日期预填进
-      <code>valid_from</code> —— 提交后仍是 pending，课表数据零变化，批准才落库。
-    </p>
+    <p class="note">点「按此提议」不会立刻改课表，要走审批。</p>
   </section>
 
   <!-- ---------- 冲突列表 ---------- -->
@@ -647,34 +658,55 @@
     <div id="chatErr" class="banner error" role="alert" aria-live="assertive" hidden></div>
     <div id="chatBox"><div class="empty">尚未提问。</div></div>
     <p class="note">
-      回答、来源标识与出处均读自 <code>/api/chat</code>。标注「手册原文（未启用 AI）」时，
-      这句话来自手册，未经模型改写。问答只做解释，改课仍走下方「变更请求」审批流，零写入。
+      回答、来源标识与出处均由系统给出。标注「手册原文（未启用 AI）」时，
+      这句话来自手册，未经模型改写。问答只做解释，改课仍走下方「变更请求」审批流，不写入任何数据。
     </p>
   </section>
 
   <!-- ---------- 消解前后对比 ---------- -->
   <section id="secResult">
-    <h2>消解结果 <span class="hint">从 → 到，均读自接口响应，不在前端写死</span></h2>
+    <h2>消解结果 <span class="hint">消解前后对比</span></h2>
     <div id="resBox"><div class="empty">尚未执行消解。</div></div>
   </section>
 
   <!-- ---------- 变更请求（F7 / B8 审批流） ---------- -->
   <section id="secRequests">
     <div class="cl-head">
-      <h2>变更请求 <span class="hint">永久改期走审批：pending 不改数据，批准才落库</span></h2>
+      <h2>变更请求 <span class="hint">永久改期走审批：批准后才生效</span></h2>
       <button id="reqReloadBtn" type="button">刷新请求</button>
     </div>
     <div id="reqMsg" class="banner ok" role="status" aria-live="polite" hidden></div>
     <div id="reqErr" class="banner error" role="alert" hidden></div>
     <div id="reqBox"></div>
-    <p class="note">
-      自己提的只显示「撤回」；别人提的显示「同意 / 拒绝」（拒绝须填理由）；已终结（已生效 / 已拒绝 / 已撤回）只读。
-      批准会重跑硬约束，撞车返回 409 并说明撞了什么，零写入。
-    </p>
+    <p class="note">已处理的只读；批准时会再查一遍冲突。</p>
   </section>
 
+  <!-- ---------- 技术说明（默认收起，答辩用） ----------
+       🔴 不加 open 属性＝默认不展开，不要改成 open。
+       🔴 这里刻意保留开发期原话（接口名 / 字段名 / 契约编号）：
+          主界面不再出现这些词，但评委追问实现细节时要能当场展开。 -->
+  <details id="techNotes" class="tech-notes">
+    <summary>技术说明（展开看实现细节，答辩用）</summary>
+    <p>
+      占用格来自 <code>/api/schedules</code> 的 <code>grid</code>：前端对后端已归一化的单日掩码
+      （第 N 节 → bit N）做受控反解；红色冲突格由 <code>/api/conflicts</code> 的
+      <code>readable</code> 定位、叠加在占用格上。下方「每日占用」按掩码原样透传显示。
+    </p>
+    <p>
+      口径说明：「3 组」是服务端聚合后的冲突组数（一条冲突涉及多个学生时只报 1 组，
+      否则同班 40 名学生会把一处冲突刷成 40 条）；「23 处」是聚合前的原始冲突条数。
+      消解按钮调 POST <code>/api/resolve</code>，由后端统一求解（契约 §5 要求服务端聚合、
+      §6 要求前端不做位运算）。消解后结果条上可「撤销本次消解」——消解是原地改写课表，
+      撤销按应用前的全量快照逐字段回写；管理员还可「固化此版本」，固化后不可撤销。
+    </p>
+    <p>
+      空位：数据读自 <code>/api/slots</code>；「按此提议」复用本页已有的审批弹窗，
+      只把候选日期预填进 <code>valid_from</code> —— 提交后仍是 pending，课表数据零变化，批准才落库。
+    </p>
+  </details>
+
   <footer>
-    本地运行 · 断网可用 · 零第三方依赖 · 动态文本一律 textContent
+    本地运行 · 断网可用
   </footer>
 </div>
 
@@ -682,7 +714,8 @@
      F3b 改了 app.js → 递增此版本号强制浏览器拿新文件（配合 no-cache + ETag）。
      2026-11-11 接 logo：ASSET_VERSION 与上方 favicon 的 ?v= 同改为 20261113。
      2026-11-12 新增「查空位」面板（secSlots）改了 app.js：两处同改为 20261114。
-     2026-11-11 新增「问一下」面板（secChat，POST /api/chat）改了 app.js：两处同改为 20261115。 -->
-<script src="app.js?v=20261115"></script>
+     2026-11-11 新增「问一下」面板（secChat，POST /api/chat）改了 app.js：两处同改为 20261115。
+     2026-11-12 界面文案清理（开发期话术收进底部折叠区）改了 app.js + index.html：两处同改为 20261116。 -->
+<script src="app.js?v=20261116"></script>
 </body>
 </html>
