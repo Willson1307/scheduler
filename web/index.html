@@ -14,7 +14,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261117">
+<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261118">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -43,6 +43,15 @@
     --fs-xs:       12px;
     --sp:          12px;
     --radius:      6px;
+    /* ===== 字体三档（2026-11-12：原来全站只有一条黑体，标题与正文同声调 → 层次扁） =====
+       学术工具页的惯例是「标题用衬线（宋体系）、正文用黑体、数字与代码用等宽」：
+         · 衬线只用于 h1 / h2 / 折叠区摘要 / 首屏大数字 —— 字号都 ≥1.05rem，1 米外仍清楚；
+         · 正文继续黑体，保证小字号可读性（宋体小字在投影上会发虚）；
+         · 等宽只给掩码、机读字段（.mono / code），沿用原 Consolas 栈。
+       🔴 全部是本机系统字体，零外链、零下载 —— 断网可用这条不能破。 */
+    --font-sans:  "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans CJK SC", sans-serif;
+    --font-serif: "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", "STSong", "SimSun", serif;
+    --font-mono:  Consolas, "Courier New", monospace;
   }
 
   /* 盒模型统一，避免 padding/border 把窄屏撑出横向滚动条 */
@@ -54,7 +63,9 @@
     padding: 0 0 40px;
     background: var(--c-bg);
     color: var(--c-text);
-    font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", sans-serif;
+    font-family: var(--font-sans);
+    /* 等宽数字：冲突数 / 节次 / 日期在刷新时不会左右跳（tabular-nums 只影响数字宽度） */
+    font-variant-numeric: tabular-nums;
     line-height: 1.6;
     /* 长串（掩码、id）必须允许换行，否则会把 body 撑宽 → 出现页面级横向滚动条 */
     overflow-wrap: anywhere;
@@ -62,6 +73,43 @@
   }
 
   .wrap { max-width: 1400px; margin: 0 auto; padding: 0 var(--sp); }
+
+  /* ---------- 主体三栏（2026-11-12） ----------
+     左 232 ＝ 筛选 + 身份；中 1fr ＝ 周视图 + 查空位；右 412 ＝ 冲突列表 / 结果 / 请求 / 问一下。
+     原来 6 个区块竖着排，1440×900 要滚三屏；现在一屏能看到「课表 + 冲突结论」。
+     🔴 1180px 以下堆回单栏（DOM 顺序即阅读顺序，不靠 order 反转）。
+     🔴 用 minmax(0, 1fr) 而不是 1fr：网格子项默认 min-width:auto，会被宽表格顶出横向滚动。 */
+  .layout {
+    display: grid;
+    grid-template-columns: 268px minmax(0, 1fr) 392px;
+    gap: var(--sp);
+    align-items: start;
+  }
+  .col { display: flex; flex-direction: column; gap: var(--sp); min-width: 0; }
+  .col > section { margin-bottom: 0; }   /* 列内用 gap 控制间距，避免双倍下边距 */
+
+  .rail-card {
+    background: var(--c-surface);
+    border: 1px solid var(--c-border);
+    border-left: 4px solid var(--c-primary);
+    border-radius: var(--radius);
+    padding: var(--sp);
+    box-shadow: 0 1px 3px rgba(31, 39, 51, .07);
+  }
+  .rail-card[hidden] { display: none; }
+  .rail-title {
+    font-family: var(--font-serif);
+    font-size: 1rem; font-weight: 700; color: var(--c-text);
+    margin-bottom: 10px;
+  }
+  .rail-card .field { margin-bottom: 10px; }
+  .rail-card .field:last-child { margin-bottom: 0; }
+  .rail-card select, .rail-card input[type="date"], .rail-card input[type="text"] { width: 100%; }
+  button.block { width: 100%; }
+
+  @media (max-width: 1180px) {
+    .layout { grid-template-columns: minmax(0, 1fr); }
+  }
 
   /* ---------- 页头 ---------- */
   header {
@@ -83,9 +131,14 @@
      放到 40px 高（仍在该文档 32–40px 区间内）才和两行文字块视觉配平。 */
   .brand-mark svg { display: block; width: 88px; height: 40px; }
   .brand-text { min-width: 0; flex: 1 1 260px; }
-  header h1 { margin: 0; font-size: 1.35rem; font-weight: 700; letter-spacing: .5px; }
-  /* 品牌英文名与中文 h1 同排、小一号（2026-11-12 改名：时之交响 / TimeSymphony） */
-  header h1 .brand-en { font-size: .72em; font-weight: 600; letter-spacing: .4px; margin-left: 8px; opacity: .92; }
+  /* 标题走衬线（宋体系）＝学术感；正文仍黑体（小字号更清楚） */
+  header h1 { margin: 0; font-family: var(--font-serif); font-size: 1.42rem; font-weight: 700; letter-spacing: 2px; }
+  /* 品牌英文名：与中文同排、小一号，大写 + 字距拉开（对齐队友商标稿的 TIME SYMPHONY 排法） */
+  header h1 .brand-en {
+    font-family: var(--font-sans);
+    font-size: .58em; font-weight: 600; letter-spacing: .22em;
+    margin-left: 10px; opacity: .9; vertical-align: .12em;
+  }
   header .sub { font-size: var(--fs-sm); opacity: .88; margin-top: 2px; }
 
   /* ---------- 首屏状态条（卡 runQn7） ----------
@@ -103,7 +156,7 @@
   }
   .status-main { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; min-width: 0; flex: 1 1 320px; }
   .status-text { font-size: 1.06rem; font-weight: 700; }
-  .status-text b { font-size: 1.35rem; }   /* 数字放大：站 1 米也要一眼读到 */
+  .status-text b { font-family: var(--font-serif); font-size: 1.42rem; }   /* 数字放大 + 衬线：站 1 米也要一眼读到 */
   /* 状态 Badge：只用现有令牌（未登录 --c-warn / 加载中 --c-primary / 就绪 --c-ok / 失败 --c-danger） */
   .status-badge {
     display: inline-block; padding: 2px 10px; border-radius: 8px;
@@ -130,9 +183,10 @@
   .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
   .field > label { font-size: var(--fs-xs); color: var(--c-text-dim); }
   .field.grow { flex: 1 1 220px; }
-  /* 登录栏内嵌一行表单（F3b）：登录后整行收起，身份提示保留 */
-  .login-row { display: flex; flex-wrap: wrap; gap: var(--sp); align-items: flex-end; }
+  /* 登录控件竖排在左栏（2026-11-12 三栏化：横排在一列宽 232 里会被挤成两行） */
+  .login-row { display: flex; flex-direction: column; gap: 8px; }
   .login-row[hidden] { display: none; }
+  .login-who { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
 
   select, button, input {
     font: inherit;
@@ -145,6 +199,13 @@
     max-width: 100%;
   }
   button { cursor: pointer; }
+  /* 键盘可达性（2026-11-12）：原来只有浏览器默认虚线。用主色描边、不位移、不缩放。 */
+  button:focus-visible, select:focus-visible, input:focus-visible,
+  textarea:focus-visible, summary:focus-visible, a:focus-visible {
+    outline: 2px solid var(--c-primary);
+    outline-offset: 2px;
+  }
+  header :focus-visible { outline-color: #fff; }
   button:hover:not(:disabled) { background: var(--c-primary-l); }
   button:disabled { cursor: not-allowed; opacity: .55; }
   button.primary {
@@ -192,6 +253,8 @@
   .tech-notes { box-shadow: 0 1px 3px rgba(31, 39, 51, .07); }
 
   section > h2 .hint { font-size: var(--fs-xs); font-weight: 400; color: var(--c-text-dim); }
+  /* 区块标题统一走衬线（学术感），提示语仍黑体小字（信息层级） */
+  section > h2, .sec-head h2, .cl-head h2 { font-family: var(--font-serif); }
   .sec-head {
     display: flex; flex-wrap: wrap; gap: 10px;
     align-items: center; justify-content: space-between;
@@ -264,6 +327,11 @@
   .chip code { font-family: Consolas, "Courier New", monospace; }
 
   /* ---------- 冲突列表 ---------- */
+  /* 右栏（窄）里 a / b 两栏放不下并排 → 竖排，中间「撞」居中对齐，层级更清楚 */
+  .col-side .it-vs { flex-direction: column; align-items: stretch; }
+  .col-side .it-vs .vs-mark { align-self: center; }
+  /* .side 原本 flex:1 1 260px，竖排时 260px 变成"高度"→ 两张卡各撑 260px 高，中间空一大片 */
+  .col-side .it-vs .side { flex: 0 0 auto; }
   .cl-head {
     display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
     justify-content: space-between; margin-bottom: 8px;
@@ -323,7 +391,7 @@
   .kind.k-resource{ background: var(--c-ok-l);     color: var(--c-ok); }
   /* 未知 kind 落.k-other（默认样式）→ 契约 §3/§12.2 第2、4 条：不内置白名单 */
 
-  code, .mono { font-family: Consolas, "Courier New", monospace; }
+  code, .mono { font-family: var(--font-mono); }
 
   /* ---------- 消解结果 ---------- */
   .cmp {
@@ -520,11 +588,15 @@
 
 <header>
   <div class="wrap header-inner">
-    <!-- 品牌标记：logo-mark.svg 整段内联（交接文档 §3 推荐内联——SMIL 照常播放，
-         且颜色可被页面 CSS 接管）。内联后 id="tsLine" 成为全局 id，改名要连这里一起改。
+    <!-- 🔴 品牌标记槽位（id="brandMark"）。
+         2026-11-12：队友的新 logo 是 canvas 渲染（其 index.html 只引用 assets/icon.js +
+         icon.css，两个文件均未随消息提供），**待文件到齐后替换本槽位内容** ——
+         替换时保持 .brand-mark 的尺寸约束（高 40px、与标题基线对齐），其余页面不用动。
+         当前仍是旧的内联 logo-mark.svg（双波浪 + 金点）。内联后 id="tsLine" 成为全局 id，
+         改名要连这里一起改。
          🔴 入场双线融合动画只播一次（animateTransform 已 fill="freeze"），播完静止：
             页头持续动画会干扰操作，也费电。 -->
-    <span class="brand-mark">
+    <span class="brand-mark" id="brandMark">
       <svg viewBox="0 0 160 72" role="img" aria-label="时之交响 TimeSymphony 品牌标记">
         <defs>
           <linearGradient id="tsLine" x1="0" y1="0" x2="1" y2="0">
@@ -553,7 +625,7 @@
       </svg>
     </span>
     <div class="brand-text">
-      <h1>时之交响<span class="brand-en">TimeSymphony</span></h1>
+      <h1>时之交响<span class="brand-en">TIME SYMPHONY</span></h1>
       <div class="sub">
         课表（周期事务）与活动（一次性事务）同框 · 统一冲突检测与一键消解
         <span id="srcTag" class="mocktag" hidden></span>
@@ -581,50 +653,50 @@
        绝不让用户误以为「没有冲突」 -->
   <div id="fatal" class="banner error" role="alert" aria-live="assertive" hidden></div>
 
-  <!-- ---------- 登录（F3b）：B3/B4 接入鉴权后（P0 r13kE9），未登录一律 401 ----------
-       登录成功后只收起表单（loginForm），身份提示（loginWho）保留显示——
-       现场演示时评委要能一眼看出「当前以谁的身份操作」。 -->
-  <div id="loginSec" class="toolbar" hidden>
-    <div id="loginForm" class="login-row">
-      <div class="field">
-        <label for="loginName">登录名</label>
-        <input id="loginName" type="text" autocomplete="username" size="14">
-      </div>
-      <div class="field">
-        <label for="loginPwd">密码</label>
-        <input id="loginPwd" type="password" autocomplete="current-password" size="14">
-      </div>
-      <div class="field">
-        <label>&nbsp;</label>
-        <button id="loginBtn" class="primary" type="button">登录</button>
-      </div>
-    </div>
-    <div class="field grow">
-      <label>状态</label>
-      <!-- Badge：未登录＝黄（--c-warn）、已登录＝绿（--c-ok）。原来是一行灰色小字，投影下读不出来 -->
-      <div class="note">
-        <span id="loginBadge" class="status-badge is-warn">未登录</span>
-        <span id="loginWho">登录后可查看课表</span>
-      </div>
-    </div>
-  </div>
   <div id="loginErr" class="banner error" role="alert" aria-live="assertive" hidden></div>
 
-  <!-- ---------- 组切换器 ---------- -->
-  <div class="toolbar">
-    <div class="field grow">
-      <label for="groupSel">当前组</label>
-      <select id="groupSel"><option value="">加载中…</option></select>
-    </div>
-    <div class="field">
-      <label for="weekSel">周（留空＝本周）</label>
-      <input id="weekSel" type="text" inputmode="numeric" placeholder="YYYY-MM-DD，留空＝本周" size="12">
-    </div>
-    <div class="field">
-      <label>&nbsp;</label>
-      <button id="reloadBtn" type="button">重新加载</button>
-    </div>
-  </div>
+  <!-- ==========================================================================
+       主体三栏（2026-11-12）
+       左＝筛选与身份（组 / 周 / 重新加载 / 登录）；中＝周视图 + 查空位（看与找时间）；
+       右＝冲突列表 / 消解结果 / 变更请求 / 问一下（处理问题）。
+       🔴 DOM 顺序 = 阅读顺序（不靠 order 反转）；1180px 以下自动堆回单栏。
+       🔴 登录成功后只收起表单（#loginForm），身份 Badge 与登录名保留 ——
+          现场评委要看得出「现在以谁的身份操作」。
+       ========================================================================== -->
+  <div class="layout">
+
+    <aside class="col col-rail">
+      <div class="rail-card">
+        <div class="rail-title">视图</div>
+        <div class="field">
+          <label for="groupSel">当前组</label>
+          <select id="groupSel"><option value="">加载中…</option></select>
+        </div>
+        <div class="field">
+          <label for="weekSel">周（留空＝本周）</label>
+          <input id="weekSel" type="date">
+        </div>
+        <div class="field">
+          <button id="reloadBtn" class="block" type="button">重新加载</button>
+        </div>
+      </div>
+
+      <div class="rail-card" id="loginSec" hidden>
+        <div class="rail-title">身份</div>
+        <!-- Badge：未登录＝黄（--c-warn）、已登录＝绿（--c-ok）。原来是一行灰色小字，投影下读不出来 -->
+        <div class="note login-who">
+          <span id="loginBadge" class="status-badge is-warn">未登录</span>
+          <span id="loginWho">登录后可查看课表</span>
+        </div>
+        <div id="loginForm" class="login-row">
+          <input id="loginName" type="text" autocomplete="username" placeholder="登录名">
+          <input id="loginPwd" type="password" autocomplete="current-password" placeholder="密码">
+          <button id="loginBtn" class="primary block" type="button">登录</button>
+        </div>
+      </div>
+    </aside>
+
+    <div class="col col-main">
 
   <!-- ---------- 周视图 ---------- -->
   <section id="secWeek">
@@ -681,6 +753,10 @@
     <p class="note">点「按此提议」不会立刻改课表，要走审批。</p>
   </section>
 
+  </div><!-- /col-main -->
+
+  <aside class="col col-side">
+
   <!-- ---------- 冲突列表 ---------- -->
   <section id="secConflict">
     <div class="cl-head">
@@ -721,6 +797,38 @@
     <div id="confErr" class="banner error" role="alert" hidden></div>
     <div id="confBox"></div>
     <p class="note" id="resolveHint"></p>
+  </section>
+
+  <!-- ---------- 消解前后对比（卡 runQn7：默认收起） ----------
+       结果/撤销/固化的输出都写进 #resBox，全部落在 <details> 内 →
+       app.js 在写结果或写错误后一律 details.open = true，绝不让「消解完了但看不见」。 -->
+  <section id="secResult">
+    <h2>消解结果 <span class="hint">消解前后对比</span>
+      <span id="resSum" class="fold-state">尚未执行消解</span></h2>
+    <details id="resDetails" class="fold">
+      <summary>展开查看消解前后对比</summary>
+      <div id="resBox"><div class="empty">尚未执行消解。</div></div>
+    </details>
+  </section>
+
+  <!-- ---------- 变更请求（F7 / B8 审批流，卡 runQn7：默认收起） ----------
+       🔴 刷新按钮与两条横幅（#reqMsg / #reqErr）都留在 <details> 外：
+          放进 summary 会「刷新 + 开合」双触发；折进去则会「失败无声」。 -->
+  <section id="secRequests">
+    <div class="cl-head">
+      <h2>变更请求 <span class="hint">永久改期走审批：批准后才生效</span></h2>
+      <div class="req-tools">
+        <span id="reqSum" class="fold-state">登录后显示</span>
+        <button id="reqReloadBtn" type="button">刷新请求</button>
+      </div>
+    </div>
+    <div id="reqMsg" class="banner ok" role="status" aria-live="polite" hidden></div>
+    <div id="reqErr" class="banner error" role="alert" hidden></div>
+    <details id="reqDetails" class="fold">
+      <summary>展开查看变更请求</summary>
+      <div id="reqBox"></div>
+      <p class="note">已处理的只读；批准时会再查一遍冲突。</p>
+    </details>
   </section>
 
   <!-- ---------- 问一下（rn6JxF 前端 / B-6 POST /api/chat） ----------
@@ -774,37 +882,9 @@
     </details>
   </section>
 
-  <!-- ---------- 消解前后对比（卡 runQn7：默认收起） ----------
-       结果/撤销/固化的输出都写进 #resBox，全部落在 <details> 内 →
-       app.js 在写结果或写错误后一律 details.open = true，绝不让「消解完了但看不见」。 -->
-  <section id="secResult">
-    <h2>消解结果 <span class="hint">消解前后对比</span>
-      <span id="resSum" class="fold-state">尚未执行消解</span></h2>
-    <details id="resDetails" class="fold">
-      <summary>展开查看消解前后对比</summary>
-      <div id="resBox"><div class="empty">尚未执行消解。</div></div>
-    </details>
-  </section>
 
-  <!-- ---------- 变更请求（F7 / B8 审批流，卡 runQn7：默认收起） ----------
-       🔴 刷新按钮与两条横幅（#reqMsg / #reqErr）都留在 <details> 外：
-          放进 summary 会「刷新 + 开合」双触发；折进去则会「失败无声」。 -->
-  <section id="secRequests">
-    <div class="cl-head">
-      <h2>变更请求 <span class="hint">永久改期走审批：批准后才生效</span></h2>
-      <div class="req-tools">
-        <span id="reqSum" class="fold-state">登录后显示</span>
-        <button id="reqReloadBtn" type="button">刷新请求</button>
-      </div>
-    </div>
-    <div id="reqMsg" class="banner ok" role="status" aria-live="polite" hidden></div>
-    <div id="reqErr" class="banner error" role="alert" hidden></div>
-    <details id="reqDetails" class="fold">
-      <summary>展开查看变更请求</summary>
-      <div id="reqBox"></div>
-      <p class="note">已处理的只读；批准时会再查一遍冲突。</p>
-    </details>
-  </section>
+  </aside>
+  </div><!-- /layout -->
 
   <!-- ---------- 技术说明（默认收起，答辩用） ----------
        🔴 不加 open 属性＝默认不展开，不要改成 open。
@@ -843,7 +923,8 @@
      2026-11-11 新增「问一下」面板（secChat，POST /api/chat）改了 app.js：两处同改为 20261115。
      2026-11-12 界面文案清理（开发期话术收进底部折叠区）改了 app.js + index.html：两处同改为 20261116。
      2026-11-12 卡 runQn7：改名 + 首屏状态条 + 卡片对比 + 折叠 + 芯片，改了 app.js + index.html：三处同改为 20261117
+              2026-11-12 队评反馈：三栏布局 + 字体分层（衬线标题/黑体正文/等宽数字）+ 焦点样式，改了 index.html：三处同改为 20261118
                （三处 = 本行 app.js?v= / 上方 favicon?v= / config.py 的 ASSET_VERSION）。 -->
-<script src="app.js?v=20261117"></script>
+<script src="app.js?v=20261118"></script>
 </body>
 </html>
