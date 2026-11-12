@@ -7,18 +7,19 @@
 #   3. 重建试用库（--per-teacher，一师一组织）+ 重置 13 个账号口令为随机串
 #      🔴 重建前查 event_log：已有真实试用数据则拒绝（须 FORCE_REBUILD=1）
 #      🔴 admin 口令经 stdin 灌入远端建库命令（服务器无口令表）
-#   4. 写 systemd user unit（--today 走 Environment=SCHEDULER_TODAY）+ reload/restart
+#   4. 写 systemd user unit（**不钉 today**，运行期跟系统日期走）+ reload/restart
 #   5. enable-linger + 复验 + 服务器侧自检 + 外网连通性（3 次 curl）
 #
 # 用法：
 #   bash deploy/sync_to_server.sh
 # 可覆盖：
 #   SCHEDULER_HOST=106.53.214.131  SCHEDULER_SSH_KEY=$HOME/.ssh/wb_deploy
-#   SCHEDULER_TODAY=YYYY-MM-DD     （🔴 缺省=运行当日，写进 systemd unit 的
-#                                   SCHEDULER_TODAY，并把试用学期起点锚定到
-#                                   该日所在周周一；只有要复现旧日期时才显式传。
-#                                   旧注释教人写死 2026-10-12 —— 谁忘了传，老师
-#                                   看到的就是过期的课表，且没有任何报错）
+#   SCHEDULER_TODAY=YYYY-MM-DD     （缺省=运行当日；**只用于重建试用库时锚定学期起点**，
+#                                   不写进 systemd unit —— 2026-11-12 改。
+#                                   原因：钉死后服务器「今天」会停在上次部署那天，
+#                                   第二天起老师看到的日期就是错的且不报错
+#                                   （实测 11/12 部署后 health 仍报 2026-11-11）。
+#                                   要复现固定日期请用命令行 --today。）
 #
 # 通道：tar over ssh（唯一实测可用）；rsync 本机未装、服务器私有库无凭据、不 git clone。
 set -euo pipefail
@@ -127,7 +128,7 @@ log "本地口令表 $PW_LINES 行 → 推送服务器"
 # ── 5. 写 systemd user unit（--today 走 Environment）──────
 # 🔴 写 unit 之前先把最终 TRIAL_TODAY 打出来——这是老师将要看到的「今天」，
 #    锚错了当场可见，不等试用当天才发现（TRIAL-REANCHOR）。
-log "最终 TRIAL_TODAY=$TRIAL_TODAY（即将写入 unit 的 SCHEDULER_TODAY；学期起点=$TRIAL_TERM_START）"
+log "重建用的 TRIAL_TODAY=$TRIAL_TODAY（仅用于学期起点锚定，**不写进 unit**；学期起点=$TRIAL_TERM_START）"
 
 # 🔴 2026-11-11：把「服务器上有没有 .env.local」打出来。
 #    没有 = 问答走手册原文（retrieval），属**正常**状态，不是故障；
@@ -142,7 +143,12 @@ After=network.target
 
 [Service]
 WorkingDirectory=$REMOTE_ROOT
-Environment=SCHEDULER_TODAY=$TRIAL_TODAY
+# 🔴 2026-11-12：**不再写 Environment=SCHEDULER_TODAY=...**
+#    原因：钉死后服务器上的「今天」会停在上次部署那天，第二天起老师看到的
+#    日期就是错的（实测 11/12 部署后 health 仍报 server_date=2026-11-11）。
+#    日期每天都要准，所以交给系统日期；部署时会话用的是临时值只用于
+#    学期起点锚定（上面的 TRIAL_TODAY），与运行期解耦。
+#    演示要复现固定日期时，用命令行 `--today`（现场演示不走这台服务器）。
 # 🔴 2026-11-11（feat/llm-config）：LLM 问答层的三件套（BASE/KEY/MODEL）只从
 #    os.environ 读（b_llm_client.py）。没有这一行，写在 .env.local 里的配置
 #    进程根本看不到 → 问答永远停在 mode="retrieval" 且**不报任何错**
