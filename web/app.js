@@ -1673,7 +1673,30 @@ function bindEvents() {
   });
 }
 
+/* =============================================================================
+ * 页头品牌标记：时之交响图标
+ * -----------------------------------------------------------------------------
+ * 图标由 brand-icon.js 在 canvas 上逐帧绘制（千级粒子 / 光弧 / 三指针 / 中心光点），
+ * 尺寸、粒子密度、发光半径都按画布实际像素自适应，这里是唯一的挂载点。
+ * 🔴 三条边界：
+ *   - 图形一律画在 brand-icon.js 里，app.js 不画任何一笔 —— 换图只改那一个文件；
+ *   - 脚本没加载（或 2d 上下文拿不到）时静默跳过，页头只剩深色托盘，绝不阻塞 boot；
+ *   - 标签页不可见时浏览器本就不派发 requestAnimationFrame，不另写暂停逻辑。
+ * ========================================================================== */
+
+function mountBrandIcon() {
+  const mark = $('brandMark');
+  const canvas = $('brandIcon');
+  if (!mark || !canvas || !window.TimeSymphonyIcon) return null;
+  try {
+    return window.TimeSymphonyIcon.create(canvas, { stage: mark, quality: 'smooth' });
+  } catch (e) {
+    return null;   // 画不出来就当没有 logo，页头仍是完整可用的
+  }
+}
+
 function boot() {
+  mountBrandIcon();
   state.sessionId = newSessionId();   // F5：每次打开页面生成一个会话串（埋点时长统计用）
   // runQn7：首屏状态条初始态（未登录＝黄 Badge，不显示任何数字）
   setStatus('unauth', '登录后显示本周冲突数');
