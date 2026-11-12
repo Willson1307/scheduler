@@ -733,7 +733,7 @@ function renderWeek(schedules, conflicts) {
         if (seen.length > 2) {
           td.appendChild(el('span', {
             cls: 'vs',
-            text: '另 ' + (seen.length - 2) + ' 处（见右侧冲突列表）',
+            text: '另 ' + (seen.length - 2) + ' 处（见下方冲突列表）',
           }));
         }
       }
@@ -910,17 +910,18 @@ function renderConflictItem(item, idx) {
 
   // F7（B8）：冲突旁「提议改期」入口 → 弹层选日程 + 填新起始日 + 理由 → POST /api/approvals。
   // 🔴 入口不做权限预判（后端鉴权 + 自己批自己 403），前端只负责把请求如实交上去、把错误如实显示。
+  // 两个动作收进一组、统一右对齐：原来「提议改期 | 一键消解」和左侧文字三分天下，
+  // 中间那个按钮看着像悬空。
+  const acts = el('div', { cls: 'it-acts' });
   const proposeBtn = el('button', { text: '提议改期', attrs: { type: 'button' } });
   proposeBtn.addEventListener('click', function () { openProposeModal(conflictTargets(item)); });
-  top.appendChild(proposeBtn);
+  acts.appendChild(proposeBtn);
 
-  const btn = el('button', {
-    cls: 'danger',
-    text: '一键消解',
-    attrs: { type: 'button', 'data-idx': String(idx) },
-  });
-  btn.addEventListener('click', function () { doResolve(btn); });
-  top.appendChild(btn);
+  // 🔴 2026-11-12：删掉条目内的「一键消解」。
+  //    它和标题栏那个按钮发的是**同一条** POST /api/resolve（data-idx 从未被读取，
+  //    doResolve(btn) 也不看 btn）—— 纯重复入口。三条冲突 = 三个红按钮，
+  //    老师第一眼就在"点哪一个"上犹豫。按条处理请用「提议改期」。
+  top.appendChild(acts);
   li.appendChild(top);
 
   // ---- 中部：a × b ----
@@ -930,13 +931,8 @@ function renderConflictItem(item, idx) {
   vs.appendChild(renderSide(item.b));
   li.appendChild(vs);
 
-  // ---- 掩码透传：a/b 两侧已各自显示过slots，这里只补冲突条目自身的 ----
-  const slot = str(item, 'slots', '');
-  if (slot) {
-    const meta = el('div', { cls: 'mt', text: '节次编码：' });
-    meta.appendChild(el('code', { text: slot }));
-    li.appendChild(meta);
-  }
+  // 2026-11-12：条目级的「节次编码」行已删 —— a / b 两侧各自带「节次 0xN · 日期」，
+  // 这一行永远与两侧重复，三条冲突白占 3 行高度。要查总掩码看两侧即可。
 
   return li;
 }
@@ -960,15 +956,19 @@ function renderSide(side) {
   }
 
   // 🔴 slots 一律原样显示，绝不做字符串比较（AGENTS §9b：长度不定，比字符串会静默漏匹配）
+  // 2026-11-12：节次编码与日期并成一行 —— 整行宽版里一条冲突原来要 4 行副信息，
+  // 并成 2 行后三条冲突合计省出 ~80px，第一屏能多露出一条。
   const s = str(side, 'slots', '');
-  if (s) {
+  const d = str(side, 'date', '');
+  if (s || d) {
     const m = el('div', { cls: 'mt' });
-    m.appendChild(el('span', { text: '节次编码 ' }));
-    m.appendChild(el('code', { text: s }));
+    if (s) {
+      m.appendChild(el('span', { text: '节次 ' }));
+      m.appendChild(el('code', { text: s }));
+    }
+    if (d) m.appendChild(el('span', { text: (s ? ' · ' : '') + d }));
     box.appendChild(m);
   }
-  const d = str(side, 'date', '');
-  if (d) box.appendChild(el('div', { cls: 'mt', text: '日期 ' + d }));
   return box;
 }
 
@@ -1625,6 +1625,7 @@ function bindEvents() {
     showBanner($('slotErr'), null);
     clear($('slotBox'));
     $('slotBox').appendChild(el('div', { cls: 'empty', text: '尚未查询。选好对象与日期范围后点「查空位」。' }));
+    setFoldState('slotSum', '尚未查询', '');   // 换组后旧结论作废，标题行同步复位
     loadAll();
   });
   $('reloadBtn').addEventListener('click', function () { loadAll(); });
@@ -2207,11 +2208,18 @@ async function querySlots() {
     });
     state.slotTarget = target;   // 记下这次查询的对象，供「按此提议」对应用
     renderSlots(body);
+    // runQn7b：结果在折叠区内 → 必须展开；标题行常显结论（空结果也要说话）
+    openFold('slotDetails');
+    const n = intOrNull(body, 'count');
+    const cnt = (n === null) ? arr(body, 'candidates').length : n;
+    setFoldState('slotSum', cnt > 0 ? ('共 ' + cnt + ' 个候选') : '没有空位', cnt > 0 ? 'ok' : 'warn');
   } catch (e) {
     // 401 已在 handle401 里清 token 并弹出登录栏；403 / 400 原文展示后端 message
     showBanner(errBox, (e && e.message) ? e.message : String(e));
     clear(box);
     box.appendChild(el('div', { cls: 'empty', text: '未取到空位结果（原因见上方提示条）。' }));
+    openFold('slotDetails');
+    setFoldState('slotSum', '查询失败，见提示', 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = '查空位';
