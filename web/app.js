@@ -1,5 +1,5 @@
 /* =============================================================================
- * 课表活动调度辅助系统 · 前端（F1 骨架）
+ * 时之交响 TimeSymphony · 前端（F1 骨架）
  * -----------------------------------------------------------------------------
  * 归属：web/**（前端独占）。🔴 本文件不碰 src/**、tests/**、scripts/**、static.py。
  *
@@ -337,6 +337,11 @@ function authHeaders(base) {
 function handle401(body) {
   state.token = '';
   state.user = null;
+  // runQn7：旧冲突数据当场作废，状态条退回「未登录」——
+  // 否则会留着上一个身份的「本周 23 处冲突」，那是最坏的一种错数字。
+  state.conflicts = null;
+  state.statusSeq += 1;
+  setStatus('unauth', '登录已过期，请重新登录');
   showLogin('登录已过期或未登录（HTTP 401），请重新登录。');
   throw new Error(extractMessage(body) || 'HTTP 401 未登录');
 }
@@ -1081,6 +1086,8 @@ async function doRevert(sid, btn) {
                  : '；另有 ' + String(missN) + ' 条日程已不存在，未能还原）')
         + ((body && body.already_reverted) ? '。这次撤销先前已经做过，本次没有改动数据。' : ''),
     }));
+    openFold('resDetails');
+    setFoldState('resSum', '已撤销，冲突回到 ' + (after === null ? '?' : String(after)) + ' 处', 'ok');
   } catch (e) {
     if (btn) btn.disabled = false;
     clear($('resBox'));
@@ -1088,6 +1095,8 @@ async function doRevert(sid, btn) {
       cls: 'banner error',
       text: '撤销失败：' + httpErrText(e) + '（409 = 该版本已固化，需管理员重新消解）',
     }));
+    openFold('resDetails');
+    setFoldState('resSum', '撤销失败，见详情', 'error');
   }
 }
 
@@ -1101,6 +1110,8 @@ async function doCommit(sid, btn) {
       cls: 'banner ok',
       text: '已固化，之后不能再撤销。',
     }));
+    openFold('resDetails');
+    setFoldState('resSum', '已固化此版本', 'ok');
   } catch (e) {
     if (btn) btn.disabled = false;
     clear($('resBox'));
@@ -1108,6 +1119,8 @@ async function doCommit(sid, btn) {
       cls: 'banner error',
       text: '固化失败：' + httpErrText(e) + '（403 = 需要管理员或 own 档权限）',
     }));
+    openFold('resDetails');
+    setFoldState('resSum', '固化失败，见详情', 'error');
   }
 }
 
@@ -1130,9 +1143,93 @@ const state = {
   taskActive: false, // F5：task_start 已发、尚未 success/abandon
   taskStartedAt: 0,  // F5：task_start 时刻（ms）
   taskTimer: 0,      // F5：90 秒无操作超时定时器 id
+  status: 'unauth',  // runQn7：首屏状态条四态 unauth / loading / ok / error
+  statusSeq: 0,      // runQn7：状态写入序号（旧请求后返回时不覆盖新状态）
+  resolving: false,  // runQn7：消解进行中（两个「一键消解」入口共用一把锁）
 };
 
 const $ = function (id) { return document.getElementById(id); };
+
+/* =============================================================================
+ * 8b. 首屏状态条 + 折叠区状态字（卡 runQn7）
+ * -----------------------------------------------------------------------------
+ * 🔴 数字只有一个来源：GET /api/conflicts 的响应。前端一处都不写死。
+ * 🔴 接口失败 → error 态（「冲突没加载出来，请点重新加载」），⛔ 绝不显示 0：
+ *    0 会被老师读成「本周没问题」，而实际情况是「没取到」—— 这正是本项目
+ *    反复踩的那类静默失效（把失败伪装成正常结论）。
+ * 🔴 raw_count / count 都缺 → 也算 error，⛔ 不猜、不用 items.length 合成 0
+ *    （readCounts() 会那样兜底，所以这里**不复用**它，直接读原始字段）。
+ * ========================================================================== */
+
+const STATUS_BADGE = {
+  unauth:  { cls: 'is-warn', text: '未登录' },
+  loading: { cls: 'is-load', text: '加载中' },
+  ok:      { cls: 'is-ok',   text: '已更新' },
+  error:   { cls: 'is-err',  text: '取数失败' },
+};
+
+/**
+ * 写状态条。数字单独放大（<b>）便于 1 米外读到，其余文字走 textContent。
+ * @param kind 'unauth' | 'loading' | 'ok' | 'error'
+ * @param lead 数字前的文字（如「本周 」）
+ * @param num  数字（null / undefined 表示没有数字）
+ * @param tail 数字后的文字（如「 处冲突」）
+ */
+function setStatus(kind, lead, num, tail) {
+  const key = STATUS_BADGE[kind] ? kind : 'error';
+  state.status = key;
+  const b = STATUS_BADGE[key];
+  const badge = $('statusBadge');
+  if (badge) {
+    badge.className = 'status-badge ' + b.cls;
+    badge.textContent = b.text;
+  }
+  const t = $('statusText');
+  if (t) {
+    clear(t);
+    if (lead) t.appendChild(el('span', { text: lead }));
+    if (num !== undefined && num !== null) t.appendChild(el('b', { text: String(num) }));
+    if (tail) t.appendChild(el('span', { text: tail }));
+  }
+  syncResolveDisabled();
+}
+
+/**
+ * 从 /api/conflicts 响应里取「处 / 组」计数。
+ * raw_count 优先（「23 处」是聚合前条数，与页面其它口径一致）；缺失才用 count。
+ * 两者都缺 → null（调用方按 error 处理，⛔ 不当 0）。
+ */
+function conflictCounts(body) {
+  const raw = intOrNull(body, 'raw_count');
+  if (raw !== null) return { n: raw, unit: ' 处冲突' };
+  const groups = intOrNull(body, 'count');
+  if (groups !== null) return { n: groups, unit: ' 组冲突' };
+  return null;
+}
+
+/** 两个「一键消解」入口（首屏状态条 / 冲突列表）共用同一套禁用规则。 */
+function syncResolveDisabled() {
+  const cnt = (state.status === 'ok') ? conflictCounts(state.conflicts) : null;
+  const off = state.resolving || cnt === null || !(cnt.n > 0);
+  ['resolveBtn', 'resolveBtnTop'].forEach(function (id) {
+    const b = $(id);
+    if (b) b.disabled = off;
+  });
+}
+
+/** 折叠区标题行的常显状态字（收起时也要能看见「有没有结果 / 有没有失败」）。 */
+function setFoldState(id, text, kind) {
+  const n = $(id);
+  if (!n) return;
+  n.className = 'fold-state' + (kind ? ' is-' + kind : '');
+  n.textContent = text || '';
+}
+
+/** 打开折叠区（写结果 / 写错误之后必须调用，否则「做完了却看不见」）。 */
+function openFold(id) {
+  const d = $(id);
+  if (d) d.open = true;
+}
 
 /* ── F3b 登录闭环：POST /api/login → 存 token → 首次 loadAll ──────────────
  * 为什么必须有这一步：B3/B4 接入鉴权后未登录一律 401（docs/07 通用约定），
@@ -1143,6 +1240,9 @@ function showLogin(msg) {
   if (sec) sec.hidden = false;
   const form = $('loginForm');
   if (form) form.hidden = false;
+  // runQn7：未登录从「灰色小字」改成黄色 Badge（投影下才读得出来）
+  const badge = $('loginBadge');
+  if (badge) { badge.className = 'status-badge is-warn'; badge.textContent = '未登录'; }
   if (msg) showBanner($('loginErr'), msg);
 }
 
@@ -1173,7 +1273,9 @@ async function doLogin() {
     const gid = str(body, 'default_group_id', '');
     if (gid) state.groupId = gid;   // 默认组＝该用户所在的最高组（契约 §1，队长 10-01 定）
     $('loginPwd').value = '';
-    $('loginWho').textContent = '已登录：' + (state.user ? (str(state.user, 'login', '') || name) : name);
+    $('loginWho').textContent = (state.user ? (str(state.user, 'login', '') || name) : name);
+    const badge = $('loginBadge');
+    if (badge) { badge.className = 'status-badge is-ok'; badge.textContent = '已登录'; }
     hideLogin();
     delete $('groupSel').dataset.loaded;   // 换账号后授权组可能不同，强制重拉组列表
     await loadAll();
@@ -1184,6 +1286,9 @@ async function doLogin() {
     //    统一口径：只提示「会短暂锁定 / 等 1 分钟」，与后端 message 一致。
     showBanner($('loginErr'), '登录失败：' + e.message +
       '（请检查大小写与首尾空格；多次失败会短暂锁定，等 1 分钟再试）');
+    // runQn7：没登上就不该留着任何冲突数字
+    state.conflicts = null;
+    setStatus('unauth', '未登录：登录后显示本周冲突数');
   } finally {
     btn.disabled = false;
   }
@@ -1285,6 +1390,15 @@ async function loadAll() {
   const fatal = $('fatal');
   showBanner(fatal, null);
 
+  // ---- runQn7：状态条进入「加载中」；seq 用来挡住「旧请求后返回覆盖新状态」----
+  const seq = ++state.statusSeq;
+  const applyStatus = function (kind, lead, num, tail) {
+    if (seq !== state.statusSeq) return;   // 已有更新的加载批次 → 本次结果作废
+    setStatus(kind, lead, num, tail);
+  };
+  if (state.token) applyStatus('loading', '正在检查本周冲突…');
+  else applyStatus('unauth', '登录后显示本周冲突数');
+
   // ---- 1. 组列表（仅首次；组切换时不重拉，避免无谓闪烁）----
   if (!$('groupSel').dataset.loaded) {
     try {
@@ -1299,6 +1413,10 @@ async function loadAll() {
       if (ids.indexOf(state.groupId) < 0) state.groupId = ids.length ? ids[0] : '';
       $('groupSel').value = state.groupId;
     } catch (e) {
+      // 🔴 原来这里直接 return，状态条会永远停在「加载中」——
+      //    提前退出前必须把 error 态写出来（runQn7）。
+      if (!state.token) { applyStatus('unauth', '登录已过期，请重新登录'); }
+      else { applyStatus('error', '组列表加载失败：' + e.message); }
       showBanner(fatal, '组列表加载失败：' + e.message + '（无法切换组，请确认服务已启动）');
       renderGroupOptions([]);
       return;
@@ -1330,12 +1448,25 @@ async function loadAll() {
   try {
     conflicts = await apiGet('/api/conflicts', withGroup({}));
   } catch (e) {
+    // 🔴 401 已在 handle401 里把状态条改成「未登录」并把 statusSeq +1；
+    //    这里不能再写 error（会把「未登录」覆盖成「取数失败」）。
+    if (!state.token) applyStatus('unauth', '登录已过期，请重新登录');
+    else applyStatus('error', '冲突没加载出来，请点「重新加载」');
     showBanner($('confErr'), '冲突列表加载失败：' + e.message);
     clear($('confBox'));
     $('confBox').appendChild(el('div', {
       cls: 'empty',
       text: '冲突没加载出来，请点「重新加载」。',
     }));
+  }
+
+  // ---- runQn7：状态条结论（数字只从响应读；两字段都没有 → error，不是 0）----
+  if (conflicts) {
+    const cnt = conflictCounts(conflicts);
+    if (cnt) applyStatus('ok', '本周 ', cnt.n, cnt.unit);
+    else applyStatus('error', '冲突数没取到（接口未返回 count / raw_count）');
+  } else if (state.token) {
+    applyStatus('error', '冲突没加载出来，请点「重新加载」');
   }
 
   // ---- 3. 渲染（有数据才渲染，缺数据保留上面的错误提示）----
@@ -1354,7 +1485,8 @@ async function loadAll() {
     renderWeek(schedules, conflicts || { items: [] });
   }
 
-  $('resolveBtn').disabled = !(conflicts && readCounts(conflicts).groups > 0);
+  // runQn7：两个「一键消解」入口共用同一套禁用规则（数字来自响应，0 则禁用）
+  syncResolveDisabled();
 
   // ---- 4. 变更请求（F7/B8）：org 级列表，登录/切组/重载后都刷新 ----
   await loadRequests();
@@ -1369,12 +1501,27 @@ function showSolveWait(on) {
   if (box) { box.hidden = !on; }
 }
 
+/* runQn7：两个入口的原始文案（执行中统一显示「消解中…」，结束后各自还原）。 */
+const RESOLVE_LABEL = { resolveBtn: '一键消解（当前组）', resolveBtnTop: '一键消解' };
+
+function setResolveBusy(on) {
+  Object.keys(RESOLVE_LABEL).forEach(function (id) {
+    const b = $(id);
+    if (!b) return;
+    b.textContent = on ? '消解中…' : RESOLVE_LABEL[id];
+    if (on) b.disabled = true;
+  });
+  if (!on) syncResolveDisabled();   // 结束后按「当前是否有冲突」决定能否再点
+}
+
 async function doResolve(btn) {
+  // 两个入口 + 列表内按钮可能被连点：一把锁挡住重复提交
+  if (state.resolving) return;
+  state.resolving = true;
+
   const btns = document.querySelectorAll('#confBox button.danger');
   btns.forEach(function (b) { b.disabled = true; });
-  const main = $('resolveBtn');
-  main.disabled = true;
-  main.textContent = '消解中…';
+  setResolveBusy(true);
   showSolveWait(true);
 
   // F5 埋点：点下「一键消解」的瞬间记 task_start（完成率分母，docs/08 §3.2）
@@ -1391,6 +1538,14 @@ async function doResolve(btn) {
     });
     markTaskDone();
     renderResolveResult(body);
+    // runQn7：结果在折叠区内 → 必须展开 + 在标题行留一句结论，否则「消解完了看不见」
+    openFold('resDetails');
+    const after = intOrNull(body, 'remaining_after');
+    const before = intOrNull(body, 'remaining_before');
+    setFoldState('resSum',
+      '已消解 ' + (before === null ? '?' : String(before))
+        + ' → ' + (after === null ? '?' : String(after)) + ' 处',
+      after === 0 ? 'ok' : 'warn');
     await loadAll();   // 重新拉数据，让周视图与冲突列表反映消解后的真实状态
   } catch (e) {
     // F5 埋点：失败/取消记 task_abandon（单独说明，不是失败，docs/08 §3.2）
@@ -1401,13 +1556,30 @@ async function doResolve(btn) {
       cls: 'banner error',
       text: '一键消解失败：' + e.message + '（数据未改变，可重试；若持续 429 是限频，等 60 秒再试）',
     }));
+    openFold('resDetails');   // 失败信息也在折叠区内 → 同样要展开
+    setFoldState('resSum', '消解失败，见详情', 'error');
   } finally {
     // 最坏路径（抛错 / 限频 / 断网）也必然走到这里，等待态不会残留
     showSolveWait(false);
-    main.textContent = '一键消解（当前组）';
-    main.disabled = false;
-    btns.forEach(function (b) { b.disabled = false; });
+    state.resolving = false;
+    // 🔴 不能无条件 disabled=false：消解到 0 冲突后按钮又被点亮 = 可重复提交。
+    //    统一交给 syncResolveDisabled() 按「当前状态条 + 冲突数」判定。
+    setResolveBusy(false);
+    btns.forEach(function (b) { if (b.isConnected) b.disabled = false; });
   }
+}
+
+/**
+ * runQn7：给「问一下」加一层只做展示的包装 —— 展开折叠区 + 更新标题行状态字。
+ * 🔴 askChat() / renderChat() 一行都不改：取数（POST /api/chat）与渲染仍是原实现，
+ *    这里只负责「结果在折叠区内，必须先展开」和「收起时标题行也得说清有没有答过」。
+ */
+async function askChatWithStatus() {
+  openFold('chatDetails');
+  setFoldState('chatSum', '正在查手册…', '');
+  await askChat();
+  const answered = !!($('chatBox') && $('chatBox').querySelector('.chat-ans'));
+  setFoldState('chatSum', answered ? '已回答，展开查看' : '提问失败，见上方提示', answered ? 'ok' : 'error');
 }
 
 /* =============================================================================
@@ -1437,15 +1609,28 @@ function bindEvents() {
     if (state.schedules) renderWeek(state.schedules, state.conflicts || { items: [] });
   });
   $('resolveBtn').addEventListener('click', function () { doResolve(null); });
+  // runQn7：首屏状态条上的「一键消解」与冲突列表那个是同一个动作、同一条埋点
+  $('resolveBtnTop').addEventListener('click', function () { doResolve(null); });
+  // runQn7：预设问题芯片 —— 只做「预填 + 展开 + 调现有 askChat()」。
+  // 🔴 不在前端拼答案、不内置答案文本；请求仍是同一条 POST /api/chat。
+  const chipBox = $('chatChips');
+  if (chipBox) {
+    chipBox.addEventListener('click', async function (ev) {
+      const b = (ev.target && ev.target.closest) ? ev.target.closest('button[data-q]') : null;
+      if (!b) return;
+      $('chatQ').value = b.getAttribute('data-q') || '';
+      await askChatWithStatus();       // 取数与渲染逻辑原样复用，一行未改
+    });
+  }
   // F7 secSlots：查空位（GET /api/slots，只读）
   $('slotBtn').addEventListener('click', function () { querySlots(); });
   [$('slotFrom'), $('slotTo')].forEach(function (inp) {
     inp.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') querySlots(); });
   });
   // rn6JxF：问一下（POST /api/chat，只读问答；回车与按钮等效）
-  $('chatBtn').addEventListener('click', function () { askChat(); });
+  $('chatBtn').addEventListener('click', function () { askChatWithStatus(); });
   $('chatQ').addEventListener('keydown', function (ev) {
-    if (ev.key === 'Enter') askChat();
+    if (ev.key === 'Enter') askChatWithStatus();
   });
   // F3b：登录栏（mock 模式下 loginSec 整体隐藏，绑定无害）
   $('loginBtn').addEventListener('click', function () { doLogin(); });  [$('loginName'), $('loginPwd')].forEach(function (inp) {
@@ -1462,6 +1647,8 @@ function bindEvents() {
 
 function boot() {
   state.sessionId = newSessionId();   // F5：每次打开页面生成一个会话串（埋点时长统计用）
+  // runQn7：首屏状态条初始态（未登录＝黄 Badge，不显示任何数字）
+  setStatus('unauth', '登录后显示本周冲突数');
   const tag = $('srcTag');
   if (USE_MOCK) {
     tag.hidden = false;
@@ -1716,6 +1903,14 @@ async function loadRequests() {
   try {
     const body = await apiGet('/api/approvals', withGroup({}));
     renderRequests(body);
+    // runQn7：收起时也要能看见「有没有请求、有几条待审批」
+    const items = arr(body, 'requests');
+    const pending = items.filter(function (r) { return str(r, 'status', '') === 'pending'; }).length;
+    setFoldState('reqSum',
+      items.length
+        ? ('共 ' + items.length + ' 条' + (pending ? ' · 待审批 ' + pending : ''))
+        : '暂无变更请求',
+      pending ? 'warn' : '');
   } catch (e) {
     showBanner(errBox, '变更请求加载失败：' + httpErrText(e));
     clear($('reqBox'));
@@ -1723,6 +1918,7 @@ async function loadRequests() {
       cls: 'empty',
       text: '请求没加载出来，请点「刷新请求」。',
     }));
+    setFoldState('reqSum', '加载失败，见上方提示', 'error');
   }
 }
 
