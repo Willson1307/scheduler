@@ -49,6 +49,12 @@ def health(method: str, path: str, query: dict, body: bytes, headers: dict, cont
         "status": "ok" if db_state == "ok" else "degraded",
         "server_date": cfg.today.isoformat(),
         "asset_version": cfg.asset_version,
+        #: 2026-11-13 新增（纯追加）：给人看的版本与发布日期。
+        #: ⚠️ 与上面的 asset_version 是两个概念 —— 那个是缓存键（形如 20261202，
+        #:    不是日期），这两个才是关于弹层/材料里该出现的东西。
+        #: 两者都不敏感（公开的产品号），不放宽 CP-H 收紧到 `ok` 的安全口径。
+        "version": cfg.version,
+        "release_date": cfg.release_date,
         "db": db_state,
     }
     if db_state != "ok":

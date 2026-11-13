@@ -2370,9 +2370,14 @@ function closeModal(ov) {
  * 为什么要有：试用老师打开页面，不知道这是谁的、出了问题找谁；页面上原本
  * 一条联系方式都没有，全靠队长在微信里逐个说。
  *
- * 🔴 版本号从 `/api/health` **动态取**，⛔ 前端不再写第二份 —— 四处同源已经
+ * 🔴 版本从 `/api/health` **动态取**，⛔ 前端不再写第二份 —— 四处同源已经
  *    够容易错了（2026-11-13 就因为版本号撞号丢过一次缓存）。
- * 🔴 反馈方式刻意不写手机号 / 邮箱明文：页面在公网上，写死等于给爬虫送名单。
+ *    ⚠️ 取的是 `version` + `release_date`（给人看的 v1.0.0 / 2026-11-13），
+ *    **不是** `asset_version`（那是 `app.js?v=` 的缓存键，形如 20261202，
+ *    连日期都不是 —— 2026-11-13 曾把它当版本显示，属于给评委错误信息）。
+ * 🔴 反馈只写「微信」，⛔ 不写手机号与邮箱：页面在公网，手机号是可被直接
+ *    骚扰/诈骗的强标识；微信号需要好友验证，暴露面小得多，且入口页早已
+ *    公开同一个号，两处必须一致。
  * 🔴 内容一律 textContent，⛔ 不拼 HTML 字符串。
  */
 function openAbout() {
@@ -2393,15 +2398,11 @@ function openAbout() {
   addRow('项目', '时之交响 TimeSymphony');
   addRow('定位', '课表与活动统一冲突检测 · 一键消解');
   const verVal = addRow('版本', '读取中…');
+  const dateVal = addRow('发布', '读取中…');
   addRow('团队', '王思勋（队长 · 后端）· 张晋嘉（后端）· 汤涵洋溢（前端）');
-  addRow('反馈', '请通过发放本链接的老师转达');
+  addRow('反馈', '王思勋（队长）· 微信 wsx130307');
   addRow('数据', '页面为脱敏的试用数据，不含任何真实学生信息');
   box.appendChild(list);
-
-  box.appendChild(el('p', {
-    cls: 'note',
-    text: '「脑洞上线」参赛作品 · 本地运行、断网可用。',
-  }));
 
   const btnRow = el('div', { cls: 'field' });
   const closeBtn = el('button', { cls: 'primary block', text: '关闭', attrs: { type: 'button' } });
@@ -2420,11 +2421,17 @@ function openAbout() {
   m.ov.addEventListener('click', onOverlay);
   closeBtn.focus();
 
-  // 版本号：拿不到就显示「—」，⛔ 绝不编一个数字
+  // 版本与发布日期：拿不到就显示「—」，⛔ 绝不编一个数字
   fetch('/api/health', { headers: { Accept: 'application/json' } })
     .then(function (r) { return r.ok ? r.json() : null; })
-    .then(function (d) { verVal.textContent = (d && d.asset_version) ? d.asset_version : '—'; })
-    .catch(function () { verVal.textContent = '—'; });
+    .then(function (d) {
+      verVal.textContent = (d && d.version) ? ('v' + d.version) : '—';
+      dateVal.textContent = (d && d.release_date) ? d.release_date : '—';
+    })
+    .catch(function () {
+      verVal.textContent = '—';
+      dateVal.textContent = '—';
+    });
 }
 
 /* =============================================================================
