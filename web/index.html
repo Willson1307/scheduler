@@ -14,7 +14,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/png" href="favicon.png?v=20261129">
+<link rel="icon" type="image/png" href="favicon.png?v=20261130">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -52,6 +52,15 @@
     --font-sans:  "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans CJK SC", sans-serif;
     --font-serif: "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", "STSong", "SimSun", serif;
     --font-mono:  Consolas, "Courier New", monospace;
+
+    /* 品牌字（只给页头那两个词用，正文不许跟）：
+       中文走**楷体系**——有毛笔骨架、又不至于像行草那样认不出；
+       英文走 **Palatino / Georgia**（人文主义衬线，笔画有书写味道），
+       靠大写字距拉开做「乐谱标题」的呼吸感。
+       🔴 全是 Windows / macOS 预装字体，零下载、断网可用（AGENTS §9b 零外链）。
+       楷体在中文字号 < 20px 时笔画会糊，所以页头字号必须 ≥ 1.5rem。 */
+    --font-brand:    "KaiTi", "STKaiti", "Kaiti SC", "楷体", "Source Han Serif SC", "Songti SC", "SimSun", serif;
+    --font-brand-en: "Palatino Linotype", "Book Antiqua", Palatino, Georgia, "Times New Roman", serif;
   }
 
   /* 盒模型统一，避免 padding/border 把窄屏撑出横向滚动条 */
@@ -183,13 +192,21 @@
   }
   .brand-mark canvas { display: block; }
   .brand-text { min-width: 0; flex: 1 1 260px; }
-  /* 标题走衬线（宋体系）＝学术感；正文仍黑体（小字号更清楚） */
-  header h1 { margin: 0; font-family: var(--font-serif); font-size: 1.42rem; font-weight: 700; letter-spacing: 2px; }
+  /* 品牌标题：中文楷体（毛笔骨架 + 高辨识），英文 Palatino 大写拉字距。
+     🔴 字号从 1.42rem 提到 1.5rem —— 楷体笔画细，20px 以下会糊成一片。
+     🔴 字重只到 600：楷体没有真粗体，700 会走合成加粗，笔画粘连反而更不清楚。 */
+  header h1 {
+    margin: 0;
+    font-family: var(--font-brand);
+    font-size: 1.5rem; font-weight: 600;
+    letter-spacing: .1em;
+    line-height: 1.25;
+  }
   /* 品牌英文名：与中文同排、小一号，大写 + 字距拉开（对齐队友商标稿的 TIME SYMPHONY 排法） */
   header h1 .brand-en {
-    font-family: var(--font-sans);
-    font-size: .58em; font-weight: 600; letter-spacing: .22em;
-    margin-left: 10px; opacity: .9; vertical-align: .12em;
+    font-family: var(--font-brand-en);
+    font-size: .56em; font-weight: 600; letter-spacing: .3em;
+    margin-left: 12px; opacity: .86; vertical-align: .18em;
   }
   header .sub { font-size: var(--fs-sm); opacity: .88; margin-top: 2px; }
 
@@ -658,6 +675,42 @@
     line-height: 1.75;
     white-space: pre-wrap;     /* 只吃后端换行，仍走 textContent，不拼 HTML */
   }
+
+  /* ---------------------------------------------------------------------------
+     问答正文的 Markdown 渲染（web/app.js 的 mdToDom，纯 DOM 构建，无 innerHTML）
+     只做「足够读懂」的排版：标题/列表/表格/引用/代码块。
+     ⛔ 别在这里加 font-family 花活：正文要 1 米可读，艺术感留给页头。
+     --------------------------------------------------------------------------- */
+  .chat-text.md { white-space: normal; }
+  .md > *:first-child { margin-top: 0; }
+  .md > *:last-child  { margin-bottom: 0; }
+  .md .md-p { margin: 0 0 8px; }
+  .md .md-h { margin: 12px 0 6px; font-size: 1.02rem; font-weight: 700; color: var(--c-text); }
+  .md .md-list { margin: 0 0 8px; padding-left: 1.4em; }
+  .md .md-list li { margin: 2px 0; }
+  .md .md-quote {
+    margin: 0 0 8px; padding: 4px 10px;
+    border-left: 3px solid var(--c-border-st); color: var(--c-text-dim);
+  }
+  .md .md-hr { border: 0; border-top: 1px solid var(--c-border-st); margin: 10px 0; }
+  .md code {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
+    font-size: 0.92em; padding: 0 3px; border-radius: 4px; background: rgba(31, 78, 121, 0.08);
+  }
+  .md .md-pre {
+    margin: 0 0 8px; padding: 8px 10px; border-radius: 6px;
+    background: rgba(31, 78, 121, 0.06); overflow-x: auto;
+  }
+  .md .md-pre code { background: none; padding: 0; font-size: 0.86rem; }
+  /* 表格：自己横滚，页面不横滚（768px 铁律） */
+  .md .md-tablewrap { overflow-x: auto; margin: 0 0 10px; }
+  .md .md-table { border-collapse: collapse; font-size: 0.95rem; min-width: 100%; }
+  .md .md-table th,
+  .md .md-table td {
+    border: 1px solid var(--c-border-st); padding: 4px 8px;
+    text-align: left; vertical-align: top; white-space: nowrap;
+  }
+  .md .md-table th { background: var(--c-primary-l); font-weight: 700; }
   .chat-src {
     margin-top: 8px; font-size: var(--fs-sm); color: var(--c-text-dim);
     display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
@@ -1111,7 +1164,7 @@
 <!-- 版本号唯一来源 = src/server/config.py 的 ASSET_VERSION；本文件三处 ?v= 必须与它一致。
      版本沿革写在 config.py 的注释里（服务端文件，不会随页面下发）。
      ⛔ 不要在这里记流水：这是 HTML 注释，闭合符写错一行就会整段漏到页面上（2026-11-13 已踩过）。 -->
-<script src="brand-icon.js?v=20261129"></script>
-<script src="app.js?v=20261129"></script>
+<script src="brand-icon.js?v=20261130"></script>
+<script src="app.js?v=20261130"></script>
 </body>
 </html>
