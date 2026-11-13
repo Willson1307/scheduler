@@ -653,7 +653,14 @@ _SURNAMES = (
 )
 
 _TEACHER_RE = re.compile(rf"[{_SURNAMES}][\u4e00-\u9fff]{{0,2}}老师")
+_TITLE_RE = re.compile(rf"[{_SURNAMES}][\u4e00-\u9fff]{{0,2}}(?:主任|校长|同学)")
 _CLASS_RE = re.compile(r"[\u4e00-\u9fff]{0,3}\s*[（(]?\s*\d{1,2}\s*[)）]?\s*班")
+#: 中文数字班名（高一一班 / 高二(3)班 / 示例一班）—— 2026-11-13 补：
+#: 原实现只认阿拉伯数字，`高一一班` 会原样漏给模型（外部审查发现）。
+_CN_CLASS_RE = re.compile(
+    r"(?:初|高|小)[一二三四五六七八九十]{1,2}\s*[（(]?\s*[一二三四五六七八九十\d]{0,2}\s*[)）]?\s*班"
+    r"|[\u4e00-\u9fff]{0,2}[一二三四五六七八九十]{1,2}班"
+)
 _OBJ_ID_RE = re.compile(r"\b(?:obj|grp|g|sch|usr|org|exc|dem)_[0-9a-zA-Z]{6,}\b")
 _HEX_ID_RE = re.compile(r"\b[0-9a-f]{16,32}\b")
 
@@ -661,24 +668,49 @@ _HEX_ID_RE = re.compile(r"\b[0-9a-f]{16,32}\b")
 PH_TEACHER = "[教师]"
 PH_CLASS = "[班级]"
 PH_ID = "[对象ID]"
+PH_PERSON = "[人员]"
+PH_PLACE = "[场所]"
+
+#: 对象 kind → 占位符（供 `scrub(vocab=...)` 使用）。
+VOCAB_PLACEHOLDER = {"user": PH_PERSON, "group": PH_CLASS, "resource": PH_PLACE}
 
 
-def scrub(text: str) -> str:
+def _apply_vocab(text: str, vocab: dict[str, str] | None) -> str:
+    """按「已知对象名」精确替换（最长优先）。
+
+    🔴 2026-11-13 补：正则只能猜「姓氏+老师」「数字班名」这类**格式**，
+    裸姓名（如「王思勋负责的…」）和中文数字班名（「高一一班」）会漏。
+    真实名字本来就在库里，由调用方（`api_chat`）取出来传进来即可精确命中，
+    既不误伤普通词，也不依赖猜。
+    """
+    if not vocab:
+        return text
+    # 最长优先：避免「高一(1)班」被「一班」先切一刀
+    for name in sorted(vocab, key=len, reverse=True):
+        if len(name) >= 2 and name in text:
+            text = text.replace(name, vocab[name])
+    return text
+
+
+def scrub(text: str, vocab: dict[str, str] | None = None) -> str:
     """把可能识别到具体老师 / 班级 / 对象的字样换成占位符。
 
-    🔴 卡面红线：开 LLM 前必须脱敏。做法是**白名单式替换**，不是「猜谁是姓名」：
-      - 姓氏 + 「老师」（张老师 / 欧阳老师）→ `[教师]`；
-      - 带数字的班级（高一(3)班 / 示例1班 / 2 班）→ `[班级]`；
-      - 对象 / 日程 id（obj_xxx / sch_xxx / 16~32 位 hex）→ `[对象ID]`。
+    🔴 卡面红线：开 LLM 前必须脱敏。两层做法：
+      ① **精确层**：调用方传入 `vocab`（库里真实的对象名 → 占位符），最长优先替换。
+         这一层才靠得住 —— 名单本来就在库里，不需要猜；
+      ② **格式层**（无 vocab 时的兜底）：姓氏 + 「老师/主任/校长/同学」、
+         阿拉伯数字或中文数字班名、对象 / 日程 id（obj_xxx / 16~32 位 hex）。
 
     ⛔ 不替换的东西及原因：`trial_t01` 这类**试用编号**是假名短码（手册 §5.5-E 明确
-    允许出现在埋点里），替换掉反而会让 LLM 看不懂手册原文。学生姓名**根本不进本层**
-    —— 本模块结构上只拿得到「用户问题 + 手册段落」，拿不到课表与名单。
+    允许出现在埋点里），替换掉反而会让 LLM 看不懂手册原文。
     """
     if not text:
         return ""
-    out = _TEACHER_RE.sub(PH_TEACHER, text)
+    out = _apply_vocab(text, vocab)
+    out = _TEACHER_RE.sub(PH_TEACHER, out)
+    out = _TITLE_RE.sub(PH_TEACHER, out)
     out = _CLASS_RE.sub(PH_CLASS, out)
+    out = _CN_CLASS_RE.sub(PH_CLASS, out)
     out = _OBJ_ID_RE.sub(PH_ID, out)
     out = _HEX_ID_RE.sub(PH_ID, out)
     return out
@@ -733,7 +765,7 @@ def _call_polish(question: str, passages: list[str], polish=None) -> str | None:
 # 对外主入口
 # ---------------------------------------------------------------------------
 
-def answer(question: str, polish=None) -> dict:
+def answer(question: str, polish=None, vocab: dict[str, str] | None = None) -> dict:
     """问答主入口：三层降级，返回 `{answer, sources, mode, degraded}`。
 
     参数 `polish` 仅用于测试注入（真实调用走 `b_llm_client.polish`）。
@@ -775,8 +807,14 @@ def answer(question: str, polish=None) -> dict:
     enabled = llm_enabled()
     polished = None
     if enabled:
-        # 🔴 脱敏在**本层**做（卡面红线 4）：问题与段落一起过 scrub，再交给 b_llm_client
-        polished = _call_polish(scrub(text), [scrub(h["text"]) for h in hits], polish=polish)
+        # 🔴 脱敏在**本层**做（卡面红线 4）：问题与段落一起过 scrub，再交给 b_llm_client。
+        #    `vocab` 由 api_chat 从库里取真实对象名传入 —— 正则猜不准裸姓名与中文数字班名，
+        #    名单本来就在库里，精确替换才不会漏（2026-11-13 外部审查补）。
+        polished = _call_polish(
+            scrub(text, vocab),
+            [scrub(h["text"], vocab) for h in hits],
+            polish=polish,
+        )
     if polished:
         return {"answer": polished, "sources": sources, "mode": "llm", "degraded": False}
     return {
