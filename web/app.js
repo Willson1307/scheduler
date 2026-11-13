@@ -30,7 +30,9 @@
  * F3b（2026-10-10）切到真实接口时新增的唯一一件事：登录。
  * B3/B4 接入鉴权后（P0 r13kE9），未登录一律 401（docs/07 通用约定），所以取数前
  * 必须先 POST /api/login 拿 token，之后所有请求带 Authorization: Bearer <token>。
- * 登录栏只在真实接口模式显示；token 只存内存不落盘（演示系统最小实现，刷新需重登）。
+ * 登录栏只在真实接口模式显示。登录态存 localStorage（卡 r4kJEe：
+ * 刷新 / 新标签 / 关浏览器重开都不用重登），12h 滑动过期 + 24h 绝对上限，
+ * 判据与取舍见下方「0b. 登录态持久化」。
  * ========================================================================== */
 'use strict';
 
@@ -38,6 +40,168 @@
  * 0. 数据来源开关
  * ========================================================================== */
 const USE_MOCK = false;   // F3b：真实接口（mock 分支保留，供离线兜底演示随时切回）
+
+/* =============================================================================
+ * 0b. 登录态持久化（卡 r4kJEe）
+ * -----------------------------------------------------------------------------
+ * 为什么是 localStorage（不是 cookie，也不是 sessionStorage）：
+ *   1. auth.py 的 verify_token 只验签名，**不看 iat、没有 exp**，密钥落盘
+ *      → 放进 HttpOnly cookie 等于「永久自动登录」，共用演示机更危险；
+ *      而且改 cookie 要动鉴权层（Set-Cookie / 读 Cookie / CSRF / 退出接口）。
+ *   2. 老师从入口页点链接往往新开标签，sessionStorage 不跨标签 → 每次都要重登，
+ *      手感不符（2026-11-13 队长拍板改 localStorage）。
+ *   3. XSS 面已压得很小（禁 innerHTML / 零外链 / 零三方脚本）。
+ *
+ * 🔴 代价（答辩必须如实说）：
+ *   · localStorage **明文落盘**（含 login 与 global_role），共用演示机演示后要手动退出；
+ *   · 12h / 24h **只是前端自我约束**——后端令牌无 TTL、无吊销接口，
+ *     「退出登录」只是本机丢弃，不会让服务端令牌失效。
+ *
+ * 记录结构（v1，写死）：
+ *   {v:1, token, user, groupId, loginAt, exp}
+ *   exp = min(now + 12h, loginAt + 24h)   → 活跃即滑动，但登录满 24h 必须重登
+ * ========================================================================== */
+const AUTH_KEY = 'sk_auth_v1';
+const AUTH_SLIDE_MS = 12 * 60 * 60 * 1000;   // 单次有效期（每次成功取数后续期）
+const AUTH_ABS_MS = 24 * 60 * 60 * 1000;     // 登录后的绝对上限
+
+/** localStorage 句柄。🔴 隐私模式 / 沙箱 iframe 下**取属性本身**就可能抛 → 一律 try。 */
+function _ls() {
+  try { return window.localStorage || null; } catch (e) { return null; }
+}
+
+/**
+ * 存储不可用时的纯内存退化（隐私模式 / 存储被禁）。
+ * 🔴 语义：本页仍可正常登录使用，只是**刷新后必然丢**——这比崩掉或谎称已保存好。
+ */
+let authMem = null;
+
+/** 记录合法性（时间判据全在这里）。⛔ 手改 exp 不能绕过 24h 上限。 */
+function authValid(r, now) {
+  if (!r || typeof r !== 'object') return false;
+  if (r.v !== 1) return false;
+  if (typeof r.token !== 'string' || !r.token) return false;
+  if (r.user != null && typeof r.user !== 'object') return false;
+  if (typeof r.groupId !== 'string') return false;
+  if (typeof r.loginAt !== 'number' || !isFinite(r.loginAt)) return false;
+  if (typeof r.exp !== 'number' || !isFinite(r.exp)) return false;
+  if (r.loginAt <= 0 || r.loginAt > now + 60000) return false;   // 时钟回拨 / 伪造未来时间
+  if (r.exp <= r.loginAt) return false;                          // exp 必须晚于 loginAt
+  if (r.exp > r.loginAt + AUTH_ABS_MS) return false;             // 伪造远期 exp 也要被 24h 挡住
+  return r.exp > now;
+}
+
+/**
+ * 读登录态。🔴 纯读，**不顺手清**——某标签清除会让其它标签收到 storage 事件、
+ * 连锁把所有人踢下线。坏记录留在那里无害，下次登录自然覆盖。
+ * 读序：storage 优先（别的标签写的新记录不能被本标签旧内存遮住）；
+ *      storage 明确「没有」→ 就是没有（⛔ 不回退内存，否则别的标签退出会被本页复活）。
+ */
+function readAuth() {
+  const now = Date.now();
+  const ls = _ls();
+  if (ls) {
+    let raw;
+    try { raw = ls.getItem(AUTH_KEY); } catch (e) { raw = undefined; }   // undefined = 读失败
+    if (raw !== undefined) {
+      if (raw === null) return null;
+      let rec = null;
+      try { rec = JSON.parse(raw); } catch (e) { rec = null; }
+      return authValid(rec, now) ? rec : null;
+    }
+  }
+  return authValid(authMem, now) ? authMem : null;
+}
+
+/** 落盘（失败静默，调用方不因存储问题中断登录）。 */
+function _writeAuth(rec) {
+  authMem = rec;
+  const ls = _ls();
+  if (!ls) return false;   // 退化为纯内存
+  try { ls.setItem(AUTH_KEY, JSON.stringify(rec)); return true; } catch (e) { return false; }
+}
+
+/**
+ * 写记录。
+ * @param {{keepExpiry?:boolean}} [opts] keepExpiry=true 只更新 groupId，沿用 loginAt/exp
+ *        （切组不是活跃信号，不续期）。记录必须存在且是本标签的 token，
+ *        ⛔ 否则会把「别的标签刚退出」的记录复活。
+ */
+function saveAuth(opts) {
+  const o = opts || {};
+  if (!state.token) return false;
+  if (o.keepExpiry) {
+    const prev = readAuth();
+    if (!prev || prev.token !== state.token) return false;
+    return _writeAuth({
+      v: 1, token: prev.token, user: prev.user,
+      groupId: state.groupId || '', loginAt: prev.loginAt, exp: prev.exp,
+    });
+  }
+  const now = Date.now();
+  state.authDeadline = now + AUTH_ABS_MS;
+  state.authTouchedAt = now;
+  scheduleAuthDeadline();
+  return _writeAuth({
+    v: 1, token: state.token, user: state.user,
+    groupId: state.groupId || '', loginAt: now, exp: now + AUTH_SLIDE_MS,
+  });
+}
+
+/** 清本机记录（⛔ 服务端令牌不会因此失效——无吊销接口，文案不得写成「安全退出」）。 */
+function clearAuth() {
+  authMem = null;
+  const ls = _ls();
+  if (!ls) return;
+  try { ls.removeItem(AUTH_KEY); } catch (e) { /* 存储被禁：本页无记录可清 */ }
+}
+
+/**
+ * 滑动续期：exp = min(now + 12h, loginAt + 24h)。
+ * 🔴 三个「不许写」：没有 token / 记录不存在（别的标签已退出）/ 记录 token ≠ 本标签 token。
+ * 60 秒节流：12h 窗口秒级精度没意义，顺带少一次磁盘写与跨标签 storage 事件。
+ */
+function touchAuth() {
+  if (!state.token) return false;
+  const now = Date.now();
+  if (state.authTouchedAt && now - state.authTouchedAt < 60000) return false;
+  const prev = readAuth();
+  if (!prev || prev.token !== state.token) return false;
+  const exp = Math.min(now + AUTH_SLIDE_MS, prev.loginAt + AUTH_ABS_MS);
+  if (exp <= now) {
+    endSession({ clearStorage: true, msg: '登录已超过 24 小时，请重新登录。' });
+    return false;
+  }
+  const ok = _writeAuth({
+    v: 1, token: prev.token, user: prev.user,
+    groupId: state.groupId || prev.groupId || '', loginAt: prev.loginAt, exp: exp,
+  });
+  if (ok) state.authTouchedAt = now;
+  return ok;
+}
+
+/**
+ * 24h 绝对上限的定时器。到点即结束会话（⛔ 不许「一直活跃就永不掉线」）。
+ * ⚠️ 后台标签的 setTimeout 会被浏览器节流到分钟级 → 请求层还有一道 authExpiredByDeadline() 兜底。
+ */
+function scheduleAuthDeadline() {
+  clearTimeout(state.authTimer);
+  state.authTimer = 0;
+  if (!state.token || !state.authDeadline) return;
+  const left = state.authDeadline - Date.now();
+  if (left <= 0) return;   // 交给下一次请求或 readAuth 判死，避免在这里递归结束会话
+  state.authTimer = setTimeout(function () {
+    endSession({ clearStorage: true, msg: '登录已超过 24 小时，请重新登录。' });
+  }, Math.min(left, 2147483647));
+}
+
+/** 请求前兜底检查 24h 上限（覆盖被节流的后台标签）。返回 true 表示会话已结束。 */
+function authExpiredByDeadline() {
+  if (!state.token || !state.authDeadline) return false;
+  if (Date.now() < state.authDeadline) return false;
+  endSession({ clearStorage: true, msg: '登录已超过 24 小时，请重新登录。' });
+  return true;
+}
 
 /* =============================================================================
  * 1. Mock 数据（严格对齐 docs/07-API契约.md v1.0 的响应结构）
@@ -370,22 +534,83 @@ function clearPrivateView() {
 }
 
 /**
- * 401 统一处理：清 token、清已渲染的私有数据、弹出登录栏、给出可读错误。
- * 🔴 绝不静默当成「空数据」——那会把「没登录」伪装成「没有冲突」。
+ * 身份卡三态（卡 r4kJEe）。🔴 恢复期必须是**中性态**：
+ *   记住的 token 已失效时若先亮绿「已登录」再被打回未登录，比不恢复还难看。
+ *   只有首个请求批次确认「本会话仍是当前会话」（authOk）后才转绿。
  */
-function handle401(body) {
-  // 先清内容再改状态：避免任何一帧里出现「未登录 + 旧课表」的组合
+function paintLoggedIn(fallbackName) {
+  const sec = $('loginSec');
+  if (sec) sec.hidden = false;
+  const badge = $('loginBadge');
+  if (badge) { badge.className = 'status-badge is-ok'; badge.textContent = '已登录'; }
+  const who = $('loginWho');
+  if (who) {
+    const name = state.user ? str(state.user, 'login', '') : '';
+    who.textContent = name || fallbackName || '已登录';
+  }
+  const out = $('logoutBtn');
+  if (out) out.hidden = false;
+}
+
+/** 恢复中：中性蓝徽章「正在恢复…」，⛔ 不许 is-ok（验收第 6 条盯的就是这一帧）。 */
+function paintRestoring() {
+  const sec = $('loginSec');
+  if (sec) sec.hidden = false;
+  const badge = $('loginBadge');
+  if (badge) { badge.className = 'status-badge is-load'; badge.textContent = '正在恢复…'; }
+  const who = $('loginWho');
+  if (who) {
+    const name = state.user ? str(state.user, 'login', '') : '';
+    who.textContent = name ? (name + '（正在恢复登录态）') : '正在恢复登录态';
+  }
+  const out = $('logoutBtn');
+  if (out) out.hidden = true;   // 登录未被确认前不给「退出登录」，避免误点
+}
+
+/**
+ * 结束会话的唯一出口：401 / 退出按钮 / 跨标签退出 / 24h 到点 四路共用。
+ * 🔴 为什么必须收口：四套各写一遍，必然漏掉 loginWho、groupSel.dataset.loaded、
+ *    旧红条、在途响应渲染中的至少一项（那会留下「已退出但课表还在屏上」）。
+ * @param {{clearStorage?:boolean, msg?:string|null}} [opts]
+ */
+function endSession(opts) {
+  const o = opts || {};
+  // 先清内容再改状态：避免任何一帧出现「未登录 + 旧课表」
   clearPrivateView();
+  if (o.clearStorage) clearAuth();
+  state.authEpoch += 1;          // 在途请求的渲染 / 续期全部作废
   state.token = '';
   state.user = null;
-  // runQn7：旧冲突数据当场作废，状态条退回「未登录」——
-  // 否则会留着上一个身份的「本周 23 处冲突」，那是最坏的一种错数字。
   state.conflicts = null;
+  state.groupId = '';
+  state.objectId = '';
+  state.authDeadline = 0;
+  state.authTouchedAt = 0;
+  clearTimeout(state.authTimer);
+  state.authTimer = 0;
+  markTaskDone();
   state.statusSeq += 1;
-  setStatus('unauth', '登录已过期，请重新登录');
-  showLogin('登录已过期或未登录（HTTP 401），请重新登录。');
+  setStatus('unauth', '登录后显示本周冲突数');
+  showLogin(o.msg || null);      // 身份卡 / 退出按钮 / 组下拉的复位都在 showLogin 里
+  ['weekErr', 'confErr', 'reqErr', 'fatal'].forEach(function (id) {
+    showBanner($(id), null);
+  });
+  const pwd = $('loginPwd');
+  if (pwd) pwd.value = '';
+}
+
+/**
+ * 401 统一处理：先断开持久化，再清 token / 已渲染的私有数据，弹出登录栏。
+ * 🔴 绝不静默当成「空数据」——那会把「没登录」伪装成「没有冲突」。
+ * 🔴 403 不走这里：403 是「这个组没权限」，回退组即可（见 loadAll 的组失效回退）。
+ */
+function handle401(body) {
+  // 首行断开持久化：否则刷新后又拿同一个废 token「恢复」→ 弹登录 ⇄ 又登录的死循环
+  if (state.token) clearAuth();
+  endSession({ msg: '登录已过期或未登录（HTTP 401），请重新登录。' });
   throw new Error(extractMessage(body) || 'HTTP 401 未登录');
 }
+
 
 /** 取查询串里的 group（可空＝隐式模式，走服务端默认）。 */
 function withGroup(params) {
@@ -395,6 +620,8 @@ function withGroup(params) {
 }
 
 async function apiGet(pathname, params) {
+  // 24h 硬上限的请求层兜底（后台标签的 setTimeout 会被节流，不能只靠 timer）
+  if (authExpiredByDeadline()) throw new Error('登录已超过 24 小时，请重新登录。');
   if (USE_MOCK) {
     const r = mockRoute(pathname, 'GET');
     if (r.status !== 200) throw new Error(extractMessage(r.body) || ('HTTP ' + r.status));
@@ -422,6 +649,8 @@ async function apiGet(pathname, params) {
 }
 
 async function apiPost(pathname, params, payload) {
+  // 24h 硬上限的请求层兜底（同 apiGet）
+  if (authExpiredByDeadline()) throw new Error('登录已超过 24 小时，请重新登录。');
   if (USE_MOCK) {
     const r = mockRoute(pathname, 'POST');
     if (r.status !== 200) throw new Error(extractMessage(r.body) || ('HTTP ' + r.status));
@@ -460,6 +689,8 @@ async function apiPost(pathname, params, payload) {
  *    不渲染入口，这里再兜一层，避免静默发到一个不存在的 mock 路由。
  */
 async function apiDelete(pathname, params) {
+  // 24h 硬上限的请求层兜底（同 apiGet）
+  if (authExpiredByDeadline()) throw new Error('登录已超过 24 小时，请重新登录。');
   if (USE_MOCK) {
     throw new Error('离线演示（USE_MOCK）不支持 DELETE：本功能需连真实服务');
   }
@@ -1296,8 +1527,14 @@ const state = {
   schedules: null,   // 最近一次 /api/schedules 原始响应（切对象时重画用，不重复打接口）
   conflicts: null,   // 最近一次 /api/conflicts 原始响应
   lastResult: null,
-  token: '',         // F3b：登录后的 Bearer token（仅内存，不落盘，刷新需重登）
+  token: '',         // F3b：登录后的 Bearer token（内存副本；落盘见 AUTH_KEY，12h/24h）
   user: null,        // /api/login 返回的 user 对象（仅用于显示登录身份）
+  authDeadline: 0,   // r4kJEe：loginAt + 24h（ms）。请求层与定时器共用，到点必须重登
+  authTouchedAt: 0,  // r4kJEe：上次续期时刻（60s 节流，避免每次取数都写盘 + 跨标签事件）
+  authTimer: 0,      // r4kJEe：24h 上限的定时器 id
+  authEpoch: 0,      // r4kJEe：会话代次。退出/401/超时 +1，用来作废在途请求的渲染
+  loggingIn: false,  // r4kJEe：登录请求互斥（回车与按钮会并发触发 doLogin）
+  groupFallbackPending: false,  // r4kJEe：403 组失效回退后待提示一次
   sessionId: '',     // F5：会话级随机串（埋点平均时长用，boot() 时生成一次）
   slotTarget: '',    // F7 secSlots：最近一次「查空位」用的对象 id（按此提议时对应）
   taskActive: false, // F5：task_start 已发、尚未 success/abandon
@@ -1407,7 +1644,18 @@ function showLogin(msg) {
   // runQn7：未登录从「灰色小字」改成黄色 Badge（投影下才读得出来）
   const badge = $('loginBadge');
   if (badge) { badge.className = 'status-badge is-warn'; badge.textContent = '未登录'; }
-  if (msg) showBanner($('loginErr'), msg);
+  // r4kJEe：身份卡上的「上一个身份」必须一起清掉 —— 否则未登录却写着 admin
+  const who = $('loginWho');
+  if (who) who.textContent = '登录后可查看课表';
+  const out = $('logoutBtn');
+  if (out) out.hidden = true;      // 未登录时的「退出登录」是纯误导
+  const sel = $('groupSel');
+  if (sel) {                       // 换身份后授权组可能不同，强制重拉，且不留旧选中值
+    delete sel.dataset.loaded;
+    sel.value = '';
+  }
+  // 无消息时也要清：否则上一轮的 401 红字会留在「未登录」旁边（静默过期尤其明显）
+  showBanner($('loginErr'), msg || null);
 }
 
 /** 登录成功：只收起表单行，loginSec 与身份提示保留（现场要能看出登录身份）。 */
@@ -1418,6 +1666,9 @@ function hideLogin() {
 }
 
 async function doLogin() {
+  // r4kJEe：回车与按钮会并发触发（keydown 不看 disabled）→ 两个请求两个 token，
+  // 最后落盘的记录可能「token 来自 A、loginAt 来自 B」，必须互斥。
+  if (state.loggingIn) return;
   const name = $('loginName').value.trim();
   const pwd = $('loginPwd').value;
   if (!name || !pwd) {
@@ -1425,9 +1676,13 @@ async function doLogin() {
     return;
   }
   const btn = $('loginBtn');
+  state.loggingIn = true;
   btn.disabled = true;
+  const epoch = state.authEpoch;   // 登录在途时用户点了退出 / 会话超时 → 晚到响应必须丢弃
+  let ok = false;
   try {
     const body = await apiPost('/api/login', {}, { login: name, password: pwd });
+    if (epoch !== state.authEpoch) return;
     state.token = str(body, 'token', '');
     state.user = (body && typeof body.user === 'object' && body.user) ? body.user : null;
     if (!state.token) {
@@ -1437,13 +1692,14 @@ async function doLogin() {
     const gid = str(body, 'default_group_id', '');
     if (gid) state.groupId = gid;   // 默认组＝该用户所在的最高组（契约 §1，队长 10-01 定）
     $('loginPwd').value = '';
-    $('loginWho').textContent = (state.user ? (str(state.user, 'login', '') || name) : name);
-    const badge = $('loginBadge');
-    if (badge) { badge.className = 'status-badge is-ok'; badge.textContent = '已登录'; }
+    // 🔴 先落盘再取数：写失败不影响登录（本页仍用内存 token），只是刷新后要重登
+    saveAuth();
+    paintLoggedIn(name);
     hideLogin();
     delete $('groupSel').dataset.loaded;   // 换账号后授权组可能不同，强制重拉组列表
-    await loadAll();
+    ok = true;
   } catch (e) {
+    if (epoch !== state.authEpoch) return;
     // 🔴 2026-11-10 文案纠正：原文写「连续失败 5 次将锁定 15 分钟」——
     //    实际实现是**组合锁 60 秒**（api_login._LOCK_SECONDS），不是 15 分钟。
     //    按错文案，老师会白等 15 分钟；且不该把限流阈值透露给使用者。
@@ -1454,8 +1710,12 @@ async function doLogin() {
     state.conflicts = null;
     setStatus('unauth', '未登录：登录后显示本周冲突数');
   } finally {
+    state.loggingIn = false;
     btn.disabled = false;
   }
+  // 🔴 取数放在 try 之外：loadAll 失败不能显示成「登录失败」，
+  //    否则会出现「提示登录失败，但本机其实已有有效凭证」的自相矛盾。
+  if (ok) await loadAll();
 }
 
 /** 组切换器。只列有授权的组——后端不返回未授权的组，前端不做灰显（契约 §2）。 */
@@ -1551,8 +1811,31 @@ function syncSlotForm() {
   }
 }
 
-/** 一次拉齐三接口并渲染。任一失败 → 该区块显式报错，不白屏、不伪装成「无数据」。 */
-async function loadAll() {
+/**
+ * 403 只在「记住的组授权被收回」时回退，⛔ 绝不登出（401 才是登出）。
+ * 回退目标：清掉 groupId 与组列表缓存 → 重跑后由 /api/groups 落到第一个有授权的组。
+ * 提示在拿到组名之后发（`loadAll` 里），文案写**实际组名**——⛔ 不写「默认组」：
+ * 服务端默认组与列表首项不保证同一个，写错就成了本项目最忌的「看着 A 实际 B」。
+ * 一次性由 `loadAll(retried)` 形参控制，⛔ 不用模块级标志（否则换账号后永不回退）。
+ */
+function fallbackGroup403() {
+  state.groupId = '';
+  state.groupFallbackPending = true;
+  const sel = $('groupSel');
+  if (sel) { sel.value = ''; delete sel.dataset.loaded; }
+}
+
+/**
+ * 一次拉齐三接口并渲染。任一失败 → 该区块显式报错，不白屏、不伪装成「无数据」。
+ *
+ * r4kJEe 追加三条边界：
+ *   1) `retried`：403（组授权被收回）一次性回退，不把人踢下线；
+ *   2) `sessionOk()` 会话门：退出 / 401 / 超时之后，在途响应的渲染与续期一律作废；
+ *   3) 续期只在**取数成功**后做（失败续期会让废 token 无限续命）。
+ * @param {boolean} [retried] 是否已因 403 回退过一次
+ * @returns {Promise<boolean>} 本批次是否「仍是当前会话且取数成功」
+ */
+async function loadAll(retried) {
   const fatal = $('fatal');
   showBanner(fatal, null);
   // rrr4vM：loadAll 是「切组 / 切周 / 重新加载 / 登录 / 消解后」的共同入口，
@@ -1562,9 +1845,16 @@ async function loadAll() {
 
   // ---- runQn7：状态条进入「加载中」；seq 用来挡住「旧请求后返回覆盖新状态」----
   const seq = ++state.statusSeq;
+  const batchToken = state.token;        // r4kJEe：本批次属于哪个会话
+  const batchEpoch = state.authEpoch;
   const applyStatus = function (kind, lead, num, tail) {
     if (seq !== state.statusSeq) return;   // 已有更新的加载批次 → 本次结果作废
     setStatus(kind, lead, num, tail);
+  };
+  // 会话门：token 没被清、没换过账号、没退出过，且没有更新批次接管
+  const sessionOk = function () {
+    return !!batchToken && state.token === batchToken &&
+      state.authEpoch === batchEpoch && seq === state.statusSeq;
   };
   if (state.token) applyStatus('loading', '正在检查本周冲突…');
   else applyStatus('unauth', '登录后显示本周冲突数');
@@ -1580,16 +1870,31 @@ async function loadAll() {
       // 但若它不在授权列表里（或为空），回退到第一个授权组，绝不保留无效值
       // ——select.value 设成不存在的 option 会导致后续切组静默失效。
       const ids = list.map(function (g) { return str(g, 'group_id', ''); });
-      if (ids.indexOf(state.groupId) < 0) state.groupId = ids.length ? ids[0] : '';
+      const remembered = state.groupId;
+      if (ids.indexOf(remembered) < 0) {
+        state.groupId = ids.length ? ids[0] : '';
+        if (remembered) state.groupFallbackPending = true;   // 记住的组被收回 → 提示一次
+      }
       $('groupSel').value = state.groupId;
+      if (state.groupFallbackPending) {
+        state.groupFallbackPending = false;
+        const picked = list.filter(function (g) {
+          return str(g, 'group_id', '') === state.groupId;
+        })[0];
+        showBanner($('excMsg'), '之前的组已无权限，已切回「' +
+          (picked ? str(picked, 'name', state.groupId) : state.groupId) + '」。');
+      }
     } catch (e) {
+      // 401 已由 handle401 清场（屏已清、登录栏已弹）：⛔ 不再补一条红字
+      if (!state.token) return false;
       // 🔴 原来这里直接 return，状态条会永远停在「加载中」——
       //    提前退出前必须把 error 态写出来（runQn7）。
-      if (!state.token) { applyStatus('unauth', '登录已过期，请重新登录'); }
-      else { applyStatus('error', '组列表加载失败：' + e.message); }
+      applyStatus('error', '组列表加载失败：' + e.message);
       showBanner(fatal, '组列表加载失败：' + e.message + '（无法切换组，请确认服务已启动）');
       renderGroupOptions([]);
-      return;
+      // r4kJEe：恢复路径必须有终态，⛔ 不许停在「正在恢复…」（断网启动必现）
+      if (sessionOk()) paintLoggedIn();
+      return false;
     }
   }
   state.groupId = $('groupSel').value || state.groupId;
@@ -1604,24 +1909,32 @@ async function loadAll() {
   try {
     schedules = await apiGet('/api/schedules', params);
   } catch (e) {
+    // 401 已由 handle401 清场（token 已被清空）：本批次到此为止，
+    // 不再对后面两个接口各吃一次 401、各弹一次登录框。
+    if (!state.token) return false;
+    if (!sessionOk()) return false;
+    // 403 ＝ 这个组没权限（不是登出）：回退一次再重跑
+    if (e.status === 403 && !retried) {
+      fallbackGroup403();
+      return loadAll(true);
+    }
     showBanner($('weekErr'), '周视图加载失败：' + e.message);
     clear($('weekBox'));
     $('weekBox').appendChild(el('div', { cls: 'empty', text: '周视图数据未取到（不是「本周没课」）。' }));
-  }
-  if (schedules) {
-    state.days = arr(schedules, 'days');
-    renderObjectOptions(arr(schedules, 'objects'));
-    // F7 secSlots：对象下拉同源，并给日期范围一个服务端给出的缺省值
-    syncSlotForm();
   }
 
   try {
     conflicts = await apiGet('/api/conflicts', withGroup({}));
   } catch (e) {
+    if (!state.token) return false;
+    if (!sessionOk()) return false;
+    if (e.status === 403 && !retried) {
+      fallbackGroup403();
+      return loadAll(true);
+    }
     // 🔴 401 已在 handle401 里把状态条改成「未登录」并把 statusSeq +1；
     //    这里不能再写 error（会把「未登录」覆盖成「取数失败」）。
-    if (!state.token) applyStatus('unauth', '登录已过期，请重新登录');
-    else applyStatus('error', '冲突没加载出来，请点「重新加载」');
+    applyStatus('error', '冲突没加载出来，请点「重新加载」');
     showBanner($('confErr'), '冲突列表加载失败：' + e.message);
     clear($('confBox'));
     $('confBox').appendChild(el('div', {
@@ -1640,6 +1953,14 @@ async function loadAll() {
   }
 
   // ---- 3. 渲染（有数据才渲染，缺数据保留上面的错误提示）----
+  // 🔴 会话门也管渲染：退出后晚到的 200 响应绝不能把课表画回已清空的屏上。
+  if (!sessionOk()) return false;
+  if (schedules) {
+    state.days = arr(schedules, 'days');
+    renderObjectOptions(arr(schedules, 'objects'));
+    // F7 secSlots：对象下拉同源，并给日期范围一个服务端给出的缺省值
+    syncSlotForm();
+  }
   // 顺序有讲究：renderConflicts 会填 state.hitDates（冲突涉及的日期），
   // 周视图的「每日占用」芯片要用它把撞车那天的掩码标红，所以先渲染冲突列表。
   state.schedules = schedules;
@@ -1659,7 +1980,19 @@ async function loadAll() {
   syncResolveDisabled();
 
   // ---- 4. 变更请求（F7/B8）：org 级列表，登录/切组/重载后都刷新 ----
-  await loadRequests();
+  const reqOk = await loadRequests();
+
+  const authOk = sessionOk();
+  const dataOk = !!(schedules && conflicts);
+  if (authOk) {
+    // loadAll 可能把无效的 groupId 改成了授权列表首项 → 把修正值写回记录（不续期）
+    saveAuth({ keepExpiry: true });
+    // 恢复路径的终态：身份已知就转绿（取数失败也要转，⛔ 不许停在「正在恢复…」）
+    paintLoggedIn();
+  }
+  // 🔴 只有真的取到数据才续期：断网 / 接口挂掉时续期 = 让废 token 无限续命
+  if (authOk && dataOk && reqOk) touchAuth();
+  return authOk && dataOk;
 }
 
 /* 求解等待态：loader 是 index.html 里内联的纯 SMIL 循环动画，这里只负责显示/隐藏。
@@ -1758,6 +2091,8 @@ async function askChatWithStatus() {
 function bindEvents() {
   $('groupSel').addEventListener('change', function () {
     state.groupId = $('groupSel').value;
+    // r4kJEe：记住用户切过的组（只更新 groupId，沿用原 loginAt/exp —— 切组不算活跃信号）
+    saveAuth({ keepExpiry: true });
     state.objectId = '';       //换组 → 对象重选，避免看到上一个组的周视图
     clear($('resBox'));
     $('resBox').appendChild(el('div', { cls: 'empty', text: '尚未执行消解。' }));
@@ -1807,6 +2142,32 @@ function bindEvents() {
   $('loginBtn').addEventListener('click', function () { doLogin(); });  [$('loginName'), $('loginPwd')].forEach(function (inp) {
     inp.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') doLogin(); });
   });
+  // r4kJEe：退出登录（⛔ 不叫「安全退出」——服务端令牌无吊销接口，只是本机丢弃）
+  // 🔴 null 守卫：旧 HTML + 新 JS 时 $('logoutBtn') 为 null，不守卫会让 bindEvents
+  //    在中途抛错 → 后面所有绑定（含登录按钮）全部失效，整页变砖。
+  const logoutBtn = $('logoutBtn');
+  if (logoutBtn) {
+    logoutBtn.addEventListener('click', function () {
+      endSession({ clearStorage: true, msg: '已退出登录（仅本机丢弃凭证，服务端令牌未吊销）。' });
+    });
+  }
+  // r4kJEe：跨标签同步退出 —— 别的标签清了 sk_auth_v1 → 本标签同步回未登录。
+  // 🔴 处理器内**只读不写**：写入会触发对方 storage 事件，形成 A→B→A 风暴。
+  window.addEventListener('storage', function (e) {
+    if (USE_MOCK) return;
+    const ls = _ls();
+    if (e.storageArea && ls && e.storageArea !== ls) return;
+    if (e.key !== AUTH_KEY && e.key !== null) return;   // e.key===null 是 localStorage.clear()
+    if (e.newValue !== null) return;                    // 续期 / 切组写入 → 不处理
+    if (!state.token) return;
+    // 只有「被删掉的那条正是本标签在用的」才算同步退出；
+    // 否则「别的标签用另一个账号登录后又退出」会把本标签的无辜会话踢掉。
+    let oldToken = '';
+    try { oldToken = (JSON.parse(e.oldValue || '{}') || {}).token || ''; } catch (err) { oldToken = ''; }
+    if (oldToken && oldToken !== state.token) return;
+    // 静默退出：这是别人主动做的动作，不是错误 → ⛔ 不弹红字，只把身份卡与内容清干净
+    endSession({});
+  });
   // F5 埋点：关页时若任务仍在进行，补 task_abandon（docs/08 §4.3 beforeunload 兜底）
   window.addEventListener('pagehide', function () {
     if (state.taskActive) {
@@ -1838,6 +2199,12 @@ function mountBrandIcon() {
   }
 }
 
+/**
+ * 启动。r4kJEe 起的顺序（每一句都有理由，别随手调）：
+ *   埋点串 ✓ → 首屏状态条 ✓ → **bindEvents 先绑**（否则首次 loadAll 期间
+ *   退出按钮与跨标签监听还没生效）→ mock 直接取数 →
+ *   有持久化记录就恢复（中性态「正在恢复…」→ loadAll）→ 否则画未登录。
+ */
 function boot() {
   mountBrandIcon();
   state.sessionId = newSessionId();   // F5：每次打开页面生成一个会话串（埋点时长统计用）
@@ -1848,11 +2215,29 @@ function boot() {
     tag.hidden = false;
     tag.textContent = '演示数据（mock）';
   } else {
-    // F3b：真实接口须先登录（未登录一律 401）；登录成功后由 doLogin() 触发首次加载
+    // F3b：真实接口须先登录（未登录一律 401）；下方若恢复成功会立刻覆盖成中性态
     showLogin(null);
   }
   bindEvents();
-  if (USE_MOCK) loadAll();
+
+  if (USE_MOCK) { loadAll(); return; }
+
+  // r4kJEe：恢复登录态。不合法 / 过期 / 版本不对 → readAuth 静默返回 null，
+  // 页面就是「未登录」，⛔ 不弹「登录已过期」红字（自动恢复失败不该像报错）。
+  const rec = readAuth();
+  if (!rec) return;
+
+  state.token = rec.token;
+  state.user = rec.user;
+  state.groupId = rec.groupId || '';
+  state.authDeadline = rec.loginAt + AUTH_ABS_MS;
+  state.authTouchedAt = 0;
+  const sec = $('loginSec');
+  if (sec) sec.hidden = false;
+  hideLogin();
+  paintRestoring();      // 🔴 中性态，⛔ 不许先亮「已登录」绿标
+  scheduleAuthDeadline();
+  loadAll();             // 成功 → 转绿并续期；401 → handle401 清盘；断网 → 保留凭证只报错
 }
 
 /* =============================================================================
@@ -2092,6 +2477,7 @@ function renderRequests(body) {
   box.appendChild(ul);
 }
 
+/** @returns {Promise<boolean>} 是否成功取到（r4kJEe：续期判据之一，失败不许续期） */
 async function loadRequests() {
   const errBox = $('reqErr');
   try {
@@ -2105,7 +2491,15 @@ async function loadRequests() {
         ? ('共 ' + items.length + ' 条' + (pending ? ' · 待审批 ' + pending : ''))
         : '暂无变更请求',
       pending ? 'warn' : '');
+    return true;
   } catch (e) {
+    // 401 已由 handle401 清场（屏已清空、登录栏已弹）→ 不再补一条「加载失败」红字
+    if (!state.token) return false;
+    // 403 = 该组没权限：交给 loadAll 的回退路径统一提示，这里不写红条（否则两条自相矛盾）
+    if (e && e.status === 403) {
+      setFoldState('reqSum', '当前组无权限查看变更请求', 'warn');
+      return false;
+    }
     showBanner(errBox, '变更请求加载失败：' + httpErrText(e));
     clear($('reqBox'));
     $('reqBox').appendChild(el('div', {
@@ -2113,6 +2507,7 @@ async function loadRequests() {
       text: '请求没加载出来，请点「刷新请求」。',
     }));
     setFoldState('reqSum', '加载失败，见上方提示', 'error');
+    return false;
   }
 }
 
@@ -3239,6 +3634,7 @@ function _showExcMsg(kind, text) {
 async function refreshWeekAndConflicts() {
   const out = { ok: false, schedules: null, conflicts: null };
   const seq = ++state.statusSeq;
+  const epoch = state.authEpoch;   // r4kJEe：退出/超时后晚到的响应不许画回屏上
   const params = withGroup({});
   const weekInput = $('weekSel');
   const w = weekInput ? weekInput.value.trim() : '';
@@ -3252,12 +3648,15 @@ async function refreshWeekAndConflicts() {
     out.schedules = both[0];
     out.conflicts = both[1];
   } catch (e) {
-    if (e && e.status === 401) return out;     // handle401 已清场
+    // 🔴 401 由 handle401 清场（它抛的是裸 Error，没有 .status）→ 只能靠 token 判
+    if (!state.token) return out;
     showBanner($('weekErr'),
       '刷新失败：' + ((e && e.message) ? e.message : String(e))
       + '（下面的冲突数与周视图可能还是操作前的，请点「重新加载」）');
     return out;
   }
+
+  if (epoch !== state.authEpoch) return out;
 
   state.schedules = out.schedules;
   state.conflicts = out.conflicts;
