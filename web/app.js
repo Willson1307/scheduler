@@ -504,6 +504,22 @@ function authHeaders(base) {
  * 原则：**取不到就清空**，绝不留「看起来还能用」的旧数据。
  */
 function clearPrivateView() {
+  // rTVvb8：公告是「上一个身份」的内容，401 / 退出后必须一起清掉。
+  // 与本函数开头 500-504 行记录的教训同类：屏幕上留着旧身份的公告，
+  // 是比「空屏」更坏的错数据（老师会以为还能看）。
+  state.announcement = null;
+  state.annSeq += 1;        // 作废在途的 GET /api/announcements
+  state.groupLevels = {};   // 旧身份的组级档位不能留给下一个身份
+  closeAnnouncementEditor();
+  const annBarNode = $('annBar');
+  if (annBarNode) {
+    annBarNode.hidden = true;
+    annBarNode.classList.remove('is-error', 'is-empty');
+  }
+  if ($('annTitle')) $('annTitle').textContent = '';
+  if ($('annMeta')) $('annMeta').textContent = '';
+  if ($('annBody')) clear($('annBody'));
+
   state.objects = [];
   state.days = [];
   state.hitDates = [];
@@ -1581,6 +1597,13 @@ const state = {
   // 所以关闭必须显式：切组/切周/重载(loadAll) / 401(clearPrivateView) / 用户点关闭。
   excPanel: null,
   excBusy: false,    // 面板内的动作锁：连点两次会得到 409，也浪费一次写入
+  // rTVvb8：组织公告
+  announcement: null,   // 最近一次 GET /api/announcements 的 announcement；null = 无公告
+  annSeq: 0,            // 请求代次：切组 / 退出后，旧响应不能覆盖新状态
+  groupLevels: {},      // group_id -> /api/groups 的 level（有效档位，含继承与天花板）
+  annEditor: null,      // 公告编辑弹层句柄（null = 未打开）
+  annSaving: false,     // 保存 / 停用互斥，防连点
+  annPreviewTimer: 0,   // 实时预览防抖定时器
 };
 
 const $ = function (id) { return document.getElementById(id); };
@@ -1756,6 +1779,10 @@ async function doLogin() {
 function renderGroupOptions(groups) {
   const sel = $('groupSel');
   clear(sel);
+  // rTVvb8：顺手记住每组对我而言的**有效档位**（含继承与天花板）。
+  // 公告的「编辑入口」就靠它判断 —— ⛔ 不要改用 global_role==='admin'：
+  // 权限是按组的，而且教师即便被授 own 也封顶到 propose。
+  state.groupLevels = {};
   const list = Array.isArray(groups) ? groups : [];
   if (!list.length) {
     sel.appendChild(el('option', { text: '（没有你有授权的组）', attrs: { value: '' } }));
@@ -1769,6 +1796,7 @@ function renderGroupOptions(groups) {
     const parent = str(g, 'parent_name', '');
     if (parent) bits.push('隶属 ' + parent);
     const level = str(g, 'level', '');
+    if (id && level) state.groupLevels[id] = level;   // rTVvb8：公告入口判据
     if (level) bits.push(level);   // 左栏窄：写 own 而不是「权限 own」，完整说明在 title 里
     const mc = intOrNull(g, 'member_count');
     if (mc !== null) bits.push(mc + '人');
@@ -1932,6 +1960,12 @@ async function loadAll(retried) {
     }
   }
   state.groupId = $('groupSel').value || state.groupId;
+
+  // rTVvb8：公告与周视图互不依赖。
+  // 🔴 必须放在这里，不能放 loadAll 末尾 —— 后面的 schedules / conflicts 任一失败
+  //    都会提前 return，放末尾就等于「公告永远不刷新」。
+  // 不 await：公告失败不能拖垮主流程，函数内部自带错误态与代次守卫。
+  refreshAnnouncement();
 
   // ---- 2. 周视图数据 ----
   let schedules = null;
@@ -2190,6 +2224,17 @@ function bindEvents() {
   if (aboutBtn) {
     aboutBtn.addEventListener('click', function () { openAbout(); });
   }
+  // rTVvb8：公告的「编辑 / 发布」与错误态「重新加载」。
+  // null 守卫与上面同理：旧 HTML + 新 JS 时节点不存在，不守卫会让 bindEvents 中途抛错、
+  // 整个页面变砖（比少一个按钮严重得多）。
+  const annEditBtn = $('annEditBtn');
+  if (annEditBtn) {
+    annEditBtn.addEventListener('click', function () { openAnnouncementEditor(); });
+  }
+  const annRetryBtn = $('annRetryBtn');
+  if (annRetryBtn) {
+    annRetryBtn.addEventListener('click', function () { refreshAnnouncement(); });
+  }
   // r4kJEe：跨标签同步退出 —— 别的标签清了 sk_auth_v1 → 本标签同步回未登录。
   // 🔴 处理器内**只读不写**：写入会触发对方 storage 事件，形成 A→B→A 风暴。
   window.addEventListener('storage', function (e) {
@@ -2380,6 +2425,293 @@ function openAbout() {
     .then(function (r) { return r.ok ? r.json() : null; })
     .then(function (d) { verVal.textContent = (d && d.asset_version) ? d.asset_version : '—'; })
     .catch(function () { verVal.textContent = '—'; });
+}
+
+/* =============================================================================
+ * 10.5 组织公告（卡 rTVvb8）
+ * -----------------------------------------------------------------------------
+ * 🔴 正文是用户输入：只允许 textContent / mdToDom()，绝不 innerHTML。
+ *    mdToDom 全程 createElement + textContent，所以 `<img src=x onerror=…>`
+ *    只会变成一段**字面文本**，不会产生 img 节点、不会执行脚本。
+ * 🔴 「没有公告」与「公告没取到」必须区分：
+ *    前者 announcement=null（200），后者走错误态 —— 页面绝不把「接口失败」
+ *    显示成「暂无公告」（本项目最痛的静默失效就是这一类）。
+ * 🔴 权限判据用**当前组的有效档位**（/api/groups 给的 level，含继承与天花板），
+ *    与后端 authz.can(..., 'own') 同源，不会「看得到按钮但一点就 403」。
+ * ========================================================================== */
+
+/** 当前组是否达到「修改组」（own）档 —— 决定公告入口是否出现。 */
+function canEditAnnouncement() {
+  return state.groupLevels[state.groupId] === 'own';
+}
+
+/** 取一次当前组的公告。不抛：失败走错误态（不拖垮 loadAll 主流程）。 */
+async function refreshAnnouncement() {
+  if (USE_MOCK) {
+    // mockRoute 不认识 /api/announcements → 直接隐藏，离线演示不报错
+    state.announcement = null;
+    renderAnnouncement();
+    return;
+  }
+  if (!state.token) {
+    state.announcement = null;
+    renderAnnouncement();
+    return;
+  }
+
+  const seq = ++state.annSeq;
+  const groupAtRequest = state.groupId;
+  try {
+    const body = await apiGet('/api/announcements', withGroup({}));
+    if (seq !== state.annSeq || state.groupId !== groupAtRequest) return;  // 已有更新的请求/切了组
+    state.announcement = (body && body.announcement) ? body.announcement : null;
+    renderAnnouncement();
+  } catch (e) {
+    if (seq !== state.annSeq || state.groupId !== groupAtRequest) return;
+    if (!state.token) return;              // 401 已由 handle401 清场，不必再补红字
+    if (e.status === 403) {
+      // 组刚被收回：loadAll 的 403 回退会重跑并刷新，这里不额外弹错避免噪音
+      state.announcement = null;
+      renderAnnouncement();
+      return;
+    }
+    renderAnnouncementError(e);
+  }
+}
+
+/** 画横幅：有公告 → 标题 + Markdown 正文；无公告 → 有 own 档的人看到「发布」入口。 */
+function renderAnnouncement() {
+  const bar = $('annBar');
+  if (!bar) return;                        // 旧 HTML + 新 JS：静默降级，不抛
+  if (USE_MOCK) { bar.hidden = true; return; }
+
+  const titleEl = $('annTitle');
+  const bodyEl = $('annBody');
+  const metaEl = $('annMeta');
+  const editBtn = $('annEditBtn');
+  const retryBtn = $('annRetryBtn');
+  if (!titleEl || !bodyEl || !metaEl || !editBtn) { bar.hidden = true; return; }
+
+  bar.classList.remove('is-error', 'is-empty');
+  if (retryBtn) retryBtn.hidden = true;
+
+  const a = state.announcement;
+
+  if (!a) {
+    // 没有公告：无权写的人整条隐藏；own 档的人需要入口，否则没人能创建第一条
+    if (!state.token || !canEditAnnouncement()) {
+      bar.hidden = true;
+      titleEl.textContent = '';
+      metaEl.textContent = '';
+      clear(bodyEl);
+      editBtn.hidden = true;
+      return;
+    }
+    bar.classList.add('is-empty');
+    titleEl.textContent = '暂无公告';
+    metaEl.textContent = '发布后本组织所有成员都能看到。';
+    clear(bodyEl);
+    editBtn.textContent = '发布公告';
+    editBtn.hidden = false;
+    bar.hidden = false;
+    return;
+  }
+
+  titleEl.textContent = str(a, 'title', '');
+  clear(bodyEl);
+  // 🔴 正文一律走 mdToDom（纯 DOM 构建）。⛔ 不许自己写 Markdown 解析器，更不许 innerHTML。
+  bodyEl.appendChild(mdToDom(str(a, 'body_md', '')));
+
+  // 后端时间列是 UTC（datetime('now')）；原样显示并标注，⛔ 不在前端猜时区
+  const at = str(a, 'updated_at', '');
+  const by = str(a, 'updated_by_name', '');
+  const bits = [];
+  if (at) bits.push('更新于 ' + at + ' UTC');
+  if (by) bits.push('· ' + by);
+  metaEl.textContent = bits.join(' ');
+
+  editBtn.textContent = '编辑公告';
+  editBtn.hidden = !canEditAnnouncement();
+  bar.hidden = false;
+}
+
+/** 取公告失败：红边 + 明确写「这不是没有公告」，并给「重新加载」。 */
+function renderAnnouncementError(e) {
+  const bar = $('annBar');
+  if (!bar) return;
+  const titleEl = $('annTitle');
+  const bodyEl = $('annBody');
+  const metaEl = $('annMeta');
+  if (!titleEl || !bodyEl || !metaEl) { bar.hidden = true; return; }
+
+  bar.hidden = false;
+  bar.classList.add('is-error');
+  bar.classList.remove('is-empty');
+  titleEl.textContent = '公告加载失败';
+  clear(bodyEl);
+  bodyEl.appendChild(el('div', { cls: 'md-p', text: httpErrText(e) }));
+  metaEl.textContent = '这不是「没有公告」—— 接口没取到。';
+  if ($('annEditBtn')) $('annEditBtn').hidden = true;
+  if ($('annRetryBtn')) $('annRetryBtn').hidden = false;
+}
+
+/** 关掉编辑弹层（幂等：未打开时直接返回）。 */
+function closeAnnouncementEditor() {
+  const h = state.annEditor;
+  if (!h) return;
+  state.annEditor = null;
+  state.annSaving = false;
+  if (state.annPreviewTimer) {
+    clearTimeout(state.annPreviewTimer);
+    state.annPreviewTimer = 0;
+  }
+  document.removeEventListener('keydown', h.onKey);
+  h.ov.removeEventListener('click', h.onOverlay);
+  closeModal(h.ov);
+}
+
+/** 打开编辑弹层：标题 input + 正文 textarea + 实时预览 + 停用/取消/保存。 */
+function openAnnouncementEditor() {
+  if (USE_MOCK || !state.token || !canEditAnnouncement()) return;
+  if (state.annEditor) closeAnnouncementEditor();
+
+  const m = modalOverlay();
+  const box = m.box;
+  const editing = !!state.announcement;
+
+  box.appendChild(el('h3', { text: editing ? '编辑公告' : '发布公告' }));
+  box.appendChild(el('p', {
+    cls: 'note',
+    text: '正文支持 Markdown（# 标题 / - 列表 / 表格 / **加粗**）。HTML 不解析，会原样当文本显示。',
+  }));
+
+  const titleInput = el('input', {
+    attrs: { type: 'text', maxlength: '200', placeholder: '标题（必填，200 字以内）' },
+  });
+  titleInput.value = str(state.announcement || {}, 'title', '');
+  const titleField = el('div', { cls: 'field' });
+  titleField.appendChild(el('label', { text: '标题' }));
+  titleField.appendChild(titleInput);
+  box.appendChild(titleField);
+
+  const bodyInput = el('textarea', { attrs: { rows: '8', placeholder: '正文（Markdown 原文）' } });
+  bodyInput.value = str(state.announcement || {}, 'body_md', '');
+  const bodyField = el('div', { cls: 'field' });
+  bodyField.appendChild(el('label', { text: '正文' }));
+  bodyField.appendChild(bodyInput);
+  box.appendChild(bodyField);
+
+  box.appendChild(el('p', { cls: 'note', text: '预览（仅本人可见，点保存后才对全组生效）' }));
+  const preview = el('div', { cls: 'md ann-preview' });   // md 类不能少
+  box.appendChild(preview);
+
+  const errBox = el('div', { cls: 'banner error' });
+  errBox.hidden = true;
+  box.appendChild(errBox);
+
+  const actions = el('div', { cls: 'actions' });
+  const delBtn = editing
+    ? el('button', { cls: 'danger', text: '停用公告', attrs: { type: 'button' } })
+    : null;
+  const cancelBtn = el('button', { cls: 'secondary', text: '取消', attrs: { type: 'button' } });
+  const saveBtn = el('button', { cls: 'primary', text: '保存', attrs: { type: 'button' } });
+  if (delBtn) actions.appendChild(delBtn);
+  actions.appendChild(cancelBtn);
+  actions.appendChild(saveBtn);
+  box.appendChild(actions);
+
+  function paintPreview() {
+    clear(preview);
+    // 🔴 与横幅同一条渲染路径：mdToDom 纯 DOM，无 innerHTML
+    preview.appendChild(mdToDom(bodyInput.value));
+  }
+  function schedulePreview() {
+    // 180ms 防抖的取舍：不防抖时每键全量重解析（长表格会卡）；
+    // 防抖太长（>300ms）中文输入法逐字上屏会「跟不上」。180ms 低于人的即时感知阈值。
+    if (state.annPreviewTimer) clearTimeout(state.annPreviewTimer);
+    state.annPreviewTimer = setTimeout(function () {
+      state.annPreviewTimer = 0;
+      paintPreview();
+    }, 180);
+  }
+  function onKey(e) { if (e.key === 'Escape') closeAnnouncementEditor(); }
+  function onOverlay(e) { if (e.target === m.ov) closeAnnouncementEditor(); }
+
+  bodyInput.addEventListener('input', schedulePreview);
+  cancelBtn.addEventListener('click', closeAnnouncementEditor);
+  document.addEventListener('keydown', onKey);
+  m.ov.addEventListener('click', onOverlay);
+
+  state.annEditor = { ov: m.ov, onKey: onKey, onOverlay: onOverlay };
+
+  saveBtn.addEventListener('click', function () {
+    saveAnnouncement(titleInput, bodyInput, errBox, saveBtn);
+  });
+  if (delBtn) {
+    delBtn.addEventListener('click', function () {
+      deactivateAnnouncement(delBtn, errBox);
+    });
+  }
+
+  paintPreview();
+  titleInput.focus();
+}
+
+/** 保存（发布或覆盖）。 */
+async function saveAnnouncement(titleInput, bodyInput, errBox, saveBtn) {
+  if (state.annSaving) return;
+  const title = String(titleInput.value || '').trim();
+  if (!title) { showBanner(errBox, '标题不能为空。'); return; }
+  const bodyMd = String(bodyInput.value || '');   // 正文不 trim：原文保存（后端也不转义）
+
+  state.annSaving = true;
+  saveBtn.disabled = true;
+  showBanner(errBox, null);
+  try {
+    const r = await apiPost('/api/announcements', {}, {
+      group: state.groupId,
+      title: title,
+      body_md: bodyMd,
+    });
+    if (!state.annEditor) return;    // 401 已把弹层拆掉，别再碰已移除的节点
+    state.announcement = (r && r.announcement) ? r.announcement : null;
+    renderAnnouncement();
+    closeAnnouncementEditor();
+  } catch (e) {
+    if (!state.annEditor) return;
+    showBanner(errBox, '保存失败：' + httpErrText(e));
+  } finally {
+    state.annSaving = false;
+    if (state.annEditor) saveBtn.disabled = false;
+  }
+}
+
+/** 停用（软删）。两步内联确认，不用 window.confirm（与本文件其它弹层风格一致）。 */
+async function deactivateAnnouncement(btn, errBox) {
+  if (state.annSaving || !state.announcement) return;
+
+  if (btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    btn.textContent = '再点一次确认停用';
+    return;
+  }
+
+  state.annSaving = true;
+  btn.disabled = true;
+  showBanner(errBox, null);
+  try {
+    await apiDelete('/api/announcements', withGroup({ id: state.announcement.id }));
+    if (!state.annEditor) return;
+    state.announcement = null;
+    renderAnnouncement();
+    closeAnnouncementEditor();
+  } catch (e) {
+    if (!state.annEditor) return;
+    showBanner(errBox, '停用失败：' + httpErrText(e));
+  } finally {
+    state.annSaving = false;
+    if (state.annEditor) btn.disabled = false;
+  }
 }
 
 /* ---- 提议改期 ---- */

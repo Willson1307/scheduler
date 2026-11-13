@@ -14,7 +14,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/png" href="favicon.png?v=20261130">
+<link rel="icon" type="image/png" href="favicon.png?v=20261201">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -411,6 +411,54 @@
   .banner.ok      { background: var(--c-ok-l);     border-color: #a8d5bd;          color: #14512f; }
   .banner.warn    { background: var(--c-warn-l);   border-color: #e3c887;          color: #6d4c00; }
   .banner .t { font-weight: 700; }
+
+  /* ---------- 组织公告（卡 rTVvb8） ----------
+     位置：首屏状态条之后、新手引导之前 —— 公告是「全组都要看」的信息，
+     但不抢「本周几处冲突」的主结论。
+     🔴 768px 不横滚：flex-wrap + min-width:0 + overflow-wrap:anywhere；
+        超长无空格串（例如 XSS 载荷）也不会把 body 撑宽。
+     🔴 字号只用 --fs-sm / --fs-xs，⛔ 不下调 --fs-base（现场 1 米可读）。 */
+  .annbar {
+    display: flex; flex-wrap: wrap; gap: 10px var(--sp);
+    align-items: flex-start; justify-content: space-between;
+    background: var(--c-surface);
+    border: 1px solid var(--c-border);
+    border-left: 4px solid var(--c-primary);
+    border-radius: var(--radius);
+    padding: 10px var(--sp);
+    margin-bottom: var(--sp);
+    min-width: 0;
+  }
+  .annbar[hidden] { display: none; }
+  .annbar.is-error { border-left-color: var(--c-danger); background: var(--c-danger-l); }
+  .annbar.is-empty { border-left-color: var(--c-border-st); }
+  .annbar-main { flex: 1 1 320px; min-width: 0; }
+  .annbar-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; min-width: 0; }
+  .annbar-tag {
+    flex: 0 0 auto; padding: 1px 8px; border-radius: 8px;
+    background: var(--c-primary-l); color: var(--c-primary);
+    border: 1px solid #b9cde2; font-size: var(--fs-xs); font-weight: 700;
+  }
+  #annTitle { font-size: 1.02rem; overflow-wrap: anywhere; }
+  .annbar-body {
+    margin-top: 4px;
+    max-height: 10.5em; overflow-y: auto; overflow-x: hidden;
+    overflow-wrap: anywhere; word-break: break-word;
+  }
+  .annbar-body.md { white-space: normal; }
+  .annbar-meta { margin-top: 4px; font-size: var(--fs-sm); color: var(--c-text-dim); }
+  .annbar-actions { display: flex; flex-wrap: wrap; gap: 8px; flex: 0 0 auto; }
+  /* 编辑弹层里的实时预览：与正文同源（mdToDom），自带滚动不撑破弹层 */
+  .ann-preview {
+    border: 1px solid var(--c-border-st); border-radius: var(--radius);
+    background: #fff; padding: 8px 10px; margin-bottom: 10px;
+    max-height: 14em; overflow: auto;
+    overflow-wrap: anywhere; word-break: break-word;
+  }
+  @media (max-width: 768px) {
+    .annbar-actions { width: 100%; }
+    .annbar-actions button { flex: 1 1 auto; }
+  }
 
   .empty {
     padding: 18px; text-align: center; color: var(--c-text-dim);
@@ -855,6 +903,26 @@
     <button id="resolveBtnTop" class="primary" type="button" disabled>一键消解</button>
   </div>
 
+  <!-- ---------- 组织公告（卡 rTVvb8） ----------
+       🔴 正文 #annBody 必须带 `md` 类，否则 mdToDom() 产出的 .md-* 节点一个样式都不命中；
+          标题与元信息一律 textContent（禁 innerHTML）。
+       🔴 无公告时：有 own 档的人看到「发布公告」入口（否则没人能创建第一条），
+          其他人整条 hidden。取不到 ≠ 没有公告，错误态另有红边与「重新加载」。 -->
+  <div id="annBar" class="annbar" role="region" aria-label="组织公告" aria-live="polite" hidden>
+    <div class="annbar-main">
+      <div class="annbar-head">
+        <span class="annbar-tag">公告</span>
+        <strong id="annTitle"></strong>
+      </div>
+      <div id="annBody" class="annbar-body md"></div>
+      <div id="annMeta" class="annbar-meta"></div>
+    </div>
+    <div class="annbar-actions">
+      <button id="annEditBtn" type="button" hidden>编辑公告</button>
+      <button id="annRetryBtn" type="button" hidden>重新加载</button>
+    </div>
+  </div>
+
   <!-- 上手三步：顺序性说明，静态文字，不参与任何交互 -->
   <div class="onboard" role="note" aria-label="上手三步">
     <b class="onboard-title">新手引导</b>
@@ -1164,7 +1232,7 @@
 <!-- 版本号唯一来源 = src/server/config.py 的 ASSET_VERSION；本文件三处 ?v= 必须与它一致。
      版本沿革写在 config.py 的注释里（服务端文件，不会随页面下发）。
      ⛔ 不要在这里记流水：这是 HTML 注释，闭合符写错一行就会整段漏到页面上（2026-11-13 已踩过）。 -->
-<script src="brand-icon.js?v=20261130"></script>
-<script src="app.js?v=20261130"></script>
+<script src="brand-icon.js?v=20261201"></script>
+<script src="app.js?v=20261201"></script>
 </body>
 </html>

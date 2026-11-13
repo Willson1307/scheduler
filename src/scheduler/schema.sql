@@ -443,3 +443,47 @@ CREATE TABLE IF NOT EXISTS resolve_snapshots (
     remaining_after  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_snap_org ON resolve_snapshots(org_id, created_at);
+
+-- ===========================================================================
+-- 例外 ⑨（队长 2026-11-13 批准，卡 rTVvb8）：组织公告
+--
+-- 业务口径：每个组织**恒一条**公告。
+--   发布 = upsert（有则 UPDATE 同一 id，无则 INSERT，并把 active 置 1）
+--   停用 = 软删（active=0，不删行）；GET 只返回 active=1 的那条。
+--
+-- 🔴 为什么 UNIQUE (org_id)
+--   1) 「每组织一条」是本卡的业务不变量，写进约束而不是靠每个 handler 自觉；
+--   2) 它是 `INSERT ... ON CONFLICT(org_id) DO UPDATE` 的冲突目标；
+--   3) 软删保留行 → 唯一键始终成立 → 停用后重新发布复用同一 id，
+--      不会出现「两条 active=1、GET 取哪条看运气」的歧义；
+--   4) UNIQUE 自带索引，不再额外建 idx_ann_org（每组织只有一行）。
+--
+-- 🔴 时间列用 UTC `datetime('now')`：与全库既有表同口径；服务器换时区 /
+--   夏令时不影响排序与审计。接口原样返回，前端标 UTC，⛔ 不在前端解析时区
+--   （`new Date('YYYY-MM-DD HH:MM:SS')` 各浏览器按本地时区解释，会显示偏移）。
+--
+-- 🔴 updated_by 存 users.id，不存 objects.id
+--   1) 写入口拿到的 context["user_id"] 就是 users.id，authz.group_roles.user_id
+--      也是 users.id —— 存同一主体，写路径不用再做 object → user 反查；
+--   2) 与 resolve_snapshots.created_by 的既有口径一致；
+--   3) schedules.created_by 存 objects.id 是「归属」语义；本列是「谁改的」
+--      审计语义，两类语义不混用。
+--   ⛔ 不加 REFERENCES users(id)：账号被删时公告不能跟着消失；
+--      JOIN 不到时接口回退显示原始 id。
+--
+-- 旧库兜底（第 11 处静默失效防线）：ensure_database 只在库文件缺失时 seed，
+-- 已存在的 data/demo.db、data/trial.db 不会自动补表 →
+-- b_announcement_kernels.ensure_announcements() 查 sqlite_master，缺则 init_db
+-- （与 b4_kernels.ensure_snapshot_table 同范式）。
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS announcements (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    title       TEXT NOT NULL CHECK (length(trim(title)) > 0),
+    body_md     TEXT NOT NULL DEFAULT '',
+    active      INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    updated_by  TEXT NOT NULL,                  -- users.id（不是 objects.id）
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (org_id)
+);

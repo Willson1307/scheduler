@@ -509,6 +509,79 @@ N = **3**（MVP）。少于 3 看不出选择，多于 3 决策瘫痪。
 
 ---
 
+## 13. GET | POST | DELETE /api/announcements（2026-11-13 新增，卡 rTVvb8）
+
+> 组织公告：管理员在网页上编辑一条公告，本组织所有已登录用户都能看到。
+> **纯新增接口，不改 §1–§12 的任何字段与行为。**
+> 🔴 路由**精确匹配、无 path 参数**（`http_api.py:129`），id 一律走 **query**：
+> `DELETE /api/announcements?id=ann_x`，⛔ 不是 `/api/announcements/<id>`。
+
+| 项 | 内容 |
+|---|---|
+| 权限 | **READ** = 登录即可（`view` 档）｜**WRITE/DELETE** = `own` 档（「修改组」），不足 **403** |
+| 作用域 | **组织级**：公告只在本组织可见；跨组织的 `group` → 403，跨组织的 `id` → 404 |
+| 数量 | 每组织**恒一条**（`UNIQUE(org_id)`）：`POST` 是 upsert（覆盖同一条，id 不变） |
+| 当前组 | `group` 缺省 = 用户默认组（同 §4 口径）。⚠️ 多组织管理员建议**显式传 group**——缺省值在跨组织并列时不保证固定组织 |
+| 未登录 | **401** `{"error":{"code":"unauthorized","message":"未登录或令牌无效"}}` |
+
+### 13.1 GET /api/announcements?group=
+
+| 项 | 内容 |
+|---|---|
+| 请求 | `group`（可选，query） |
+| 响应 200 | `{"ok":true,"announcement":{"id","title","body_md","updated_at","updated_by_name"}}` |
+| 响应 200（无公告/已停用） | `{"ok":true,"announcement":null}` |
+| 403 | `group` 越权（`B3.resolve_authorized_org`） |
+
+```json
+{"ok": true,
+ "announcement": {"id": "ann_3f2a1b4c5d6e7f80",
+                  "title": "本周三教研活动",
+                  "body_md": "## 安排\n- 14:00 开始\n- 地点：阶梯教室",
+                  "updated_at": "2026-11-13 12:34:56",
+                  "updated_by_name": "系统管理员"}}
+```
+
+**三条口径（写死，不得自改）**：
+
+| # | 口径 | 理由 |
+|---|---|---|
+| 1 | 无公告 → `announcement: null`（HTTP **200**），⛔ 不是 404、不是 `{}` | 前端必须能区分「没有公告」与「接口失败」；404 会被当成错误态 |
+| 2 | `body_md` 是 **Markdown 原文**，后端**不转义、不 strip** | 原样存原样还；防 XSS 在前端（`textContent` / `mdToDom()`，⛔ 禁 `innerHTML`） |
+| 3 | `updated_at` 是 **UTC**（`datetime('now')`），原样返回 | 与全库同口径；⛔ 前端不得用 `new Date('YYYY-MM-DD HH:MM:SS')` 猜时区 |
+
+⛔ 不返回 `org_id` / `active` / `updated_by` / `created_at`：作用域由请求的 `group` 决定，
+前端不该拿 `org_id` 去跨组；其余是内部审计列。
+
+### 13.2 POST /api/announcements
+
+| 项 | 内容 |
+|---|---|
+| 请求体 | `{"group": "obj_x"（可选）, "title": "标题", "body_md": "Markdown 原文"}` |
+| 响应 200 | `{"ok":true,"created":true,"announcement":{…}}`（`created:false` = 覆盖已有公告） |
+| 400 | `title` 缺失/空白/非字符串/超 200 字；`body_md` 非字符串；`group` 非字符串；JSON 不合法 |
+| 403 | 档位不足（教师天花板 = `propose`）或 `group` 越权 |
+
+- `group` 放在**请求体**里（与 §7 `POST /api/demands` 同风格）；`DELETE` 没有 body，只能走 query。
+- 覆盖时 `announcement.id` 不变；已停用的公告再次发布**自动复活**（`active` 置回 1）。
+- `title` 入库前 `strip()`；`body_md` **原样入库**。
+
+### 13.3 DELETE /api/announcements?group=&id=
+
+| 项 | 内容 |
+|---|---|
+| 请求 | `id`（必填，query）、`group`（可选，query） |
+| 响应 200 | `{"ok":true,"id":"ann_x","active":false,"already_inactive":false}` |
+| 响应 200（重复停用） | `{…,"already_inactive":true}` —— **幂等**，双击/重试不报错 |
+| 400 | 缺 `id` |
+| 403 | 档位不足或 `group` 越权 |
+| 404 | `id` 不存在**或属于别的组织**（不泄漏「这个 id 在别处存在」） |
+
+- 停用是**软删**：行保留、`active=0`，停用后 `GET` 返回 `announcement: null`。
+- 写路径的 SQL 带 `org_id`，所以拿别组织的 id 来停用影响行数必然是 0 → 404。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 | 谁改的 |
@@ -517,3 +590,4 @@ N = **3**（MVP）。少于 3 看不出选择，多于 3 决策瘫痪。
 | 2026-09-25 晚 | v4.7：补充 §6.1 多方案响应体（top-3 + 去重 + diff_text）、§6.2 warnings 定性、§6.3 终止态三态；§10 埋点改为三元组并改以 docs/08 为准；新增 §11 临时微调接口 | 队长（AI 辅助） |
 | **2026-10-01 晚** | **v1.0 冻结**：队长逐项拍板 8 处待填（§1 最高组／§2 要人数／§3 kind 按原定义／§4 竖线+本周／§5 字段给全／§7 传原话+后端解析+存原话／§8 intent 五值含 analyze）；**新增 §12 灵活性与向前兼容** | 队长拍板，AI 起草 |
 | 2026-10-27 | §5 新增 `activity_window`（一次性活动窗口哨兵，§12.3 非破坏性加字段，不动既有字段）；`deploy/trial_ready.py` ③ 同步把它当硬判据 | 审查方（待队长在群里说明） |
+| 2026-11-13 | **新增 §13 组织公告**（`GET\|POST\|DELETE /api/announcements`，卡 rTVvb8）：每组织恒一条（upsert）、`own` 档可写、组织隔离、`announcement: null` 语义、`already_inactive` 幂等、`body_md` 原样不转义。纯追加，§1–§12 未改 | 队长（AI 辅助） |
