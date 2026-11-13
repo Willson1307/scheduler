@@ -73,7 +73,10 @@ from scheduler.seeds import seed_demo  # noqa: E402
 #:    前端改用服务端给的掩码（删掉自算），四处一起递增到 20261122。
 #:    🔴 本次是合并收口：#29 当时 base 指向 feat/schedule-detail 而非 main，
 #:    合完只在分支上，main 缺整块临时微调功能。合并后重新取号，别沿用 20261121。
-ASSET_VERSION = "20261122"
+#: 2026-11-13（卡 r4kJEe）：登录态改 localStorage（12h 滑动 / 24h 上限）+ 退出登录按钮，
+#:    改了 app.js 与 index.html，四处一起递增到 20261123。
+#:    🔴 20261114 在 11-12 已被 secSlots 用掉 —— 复用旧号等于没改，浏览器不会重拉。
+ASSET_VERSION = "20261123"
 
 #: 默认数据库：与队长 L8 沙盒演示库同路径，现场「删 data/ → 一条命令 →
 #: 30 秒可演示」的闭环由本模块的自动初始化兜底（CP-G）。

@@ -14,7 +14,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261122">
+<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261123">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -270,6 +270,8 @@
   .login-row { display: flex; flex-direction: column; gap: 8px; }
   .login-row[hidden] { display: none; }
   .login-who { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+  /* r4kJEe 退出登录：与登录表单同一列宽，独立一行（768px 下也不挤） */
+  .login-out { margin-top: 8px; }
 
   select, button, input {
     font: inherit;
@@ -809,6 +811,12 @@
           <span id="loginBadge" class="status-badge is-warn">未登录</span>
           <span id="loginWho">登录后可查看课表</span>
         </div>
+        <!-- r4kJEe 退出登录：⛔ 不写「安全退出」—— 后端令牌无 TTL、无吊销接口，
+             这里只是丢弃本机保存的凭证，服务端那份在到期前仍然有效。
+             放在 #loginForm **之外**：hideLogin() 只藏表单，放里面会被一起藏掉。
+             显隐由 app.js 控制（未登录 / 恢复中隐藏）。 -->
+        <button id="logoutBtn" class="block login-out" type="button" hidden
+                title="仅丢弃本机保存的登录凭证；服务端令牌没有吊销接口，退出后该凭证在到期前仍然有效">退出登录</button>
         <div id="loginForm" class="login-row">
           <input id="loginName" type="text" autocomplete="username" placeholder="登录名">
           <input id="loginPwd" type="password" autocomplete="current-password" placeholder="密码">
@@ -1075,7 +1083,8 @@
      2026-11-12 页头改用图标本体（新增 brand-icon.js，app.js 加挂载）：四处同改为 20261120。
      2026-11-13 卡 rrr4vM：周视图格子加「⋯ / 双击」临时微调面板：四处同改为 20261121。
      2026-11-13 卡 rrr4vM 追加：改点掩码改用服务端 periods[].new_mask（前端不再自算）：四处同改为 20261122。
-<script src="brand-icon.js?v=20261122"></script>
-<script src="app.js?v=20261122"></script>
+     2026-11-13 卡 r4kJEe：登录态改 localStorage（12h 滑动 / 24h 上限）+ 退出登录按钮：四处同改为 20261123。
+<script src="brand-icon.js?v=20261123"></script>
+<script src="app.js?v=20261123"></script>
 </body>
 </html>
