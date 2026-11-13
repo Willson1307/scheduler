@@ -158,6 +158,38 @@ class TestKernelBasics(_EnvMixin, unittest.TestCase):
             # 不是现场某位老师，也不是项目负责人这种模糊说法。
             self.assertIn("请找开发者确认", result["answer"], msg=q)
 
+    def test_guide_questions_answerable_offline(self):
+        """导览类问题必须离线可答（2026-11-13 实测「怎么使用此系统」被判「没有这条」）。
+
+        这类问题**不该靠模型**：它问的是系统本身怎么用，答案在代码里就有。
+        所以落成意图表条目，且不配 LLM 时也要能答（离线基线）。
+        """
+        cases = (
+            ("怎么使用此系统", "how_to_use"),
+            ("如何使用这个系统", "how_to_use"),
+            ("第一次用从哪开始", "how_to_use"),
+            ("这是什么", "what_is"),
+            ("这套系统能做什么", "what_is"),
+        )
+        for q, want in cases:
+            intent = K.match_intent(q)
+            self.assertIsNotNone(intent, f"「{q}」必须命中意图表")
+            self.assertEqual(intent["id"], want, f"「{q}」应命中 {want}")
+            result = K.answer(q)
+            self.assertEqual(result["mode"], "retrieval", q)
+            self.assertEqual(result["degraded"], False, q)
+            self.assertNotIn("手册里没有这条", result["answer"], q)
+            self.assertTrue(result["sources"], q)
+
+    def test_no_answer_hint_examples_are_answerable(self):
+        """兜底文案里举的例子必须真的能命中。
+
+        否则等于教用户「照我说的再撞一次墙」—— 2026-11-13 初版就把
+        「周三第 1 节撞了没」写进了示例，而它当时同样答不出。
+        """
+        for q in ("怎么调课", "临时取消一节课", "看不到冲突"):
+            self.assertIsNotNone(K.match_intent(q), f"兜底示例「{q}」必须可答")
+
     def test_empty_question(self):
         result = K.answer("   ")
         self.assertEqual(result["mode"], "template")
