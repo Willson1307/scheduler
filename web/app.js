@@ -3450,7 +3450,9 @@ function chatModeTag(mode, degraded) {
       ? { text: '手册原文（AI 这次没响应）', cls: 'mode-ref' }
       : { text: '手册速查', cls: 'mode-ref' };
   }
-  if (mode === 'template') return { text: '手册里没有这条', cls: 'mode-ref' };
+  // 🔴 2026-11-13 第二次改：`template` 原标签是「手册里没有这条」——
+  //    和正文一样像报错。改成中性说法，且不再出现「手册」二字。
+  if (mode === 'template') return { text: '暂时答不上来', cls: 'mode-ref' };
   return { text: '来源未知（mode=' + (mode || '缺失') + '）', cls: 'mode-ref' };
 }
 
