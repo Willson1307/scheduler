@@ -282,6 +282,25 @@ class TestScrub(unittest.TestCase):
         self.assertEqual(K.scrub("各位老师好"), "各位老师好")
         self.assertEqual(K.scrub("本班情况"), "本班情况")
 
+    def test_cn_numeral_class_is_replaced(self):
+        """🔴 2026-11-13 外部审查：原实现只认阿拉伯数字，`高一一班` 会漏给模型。"""
+        out = K.scrub("高一一班周三下午有冲突吗")
+        self.assertIn(K.PH_CLASS, out)
+        self.assertNotIn("高一一班", out)
+
+    def test_vocab_replaces_bare_name_and_cn_class(self):
+        """裸姓名没有「老师」后缀，正则猜不到 —— 靠库里真实名单精确替换。"""
+        vocab = {"王思勋": K.PH_PERSON, "高一一班": K.PH_CLASS}
+        out = K.scrub("王思勋负责的高一一班为什么有冲突", vocab=vocab)
+        self.assertNotIn("王思勋", out)
+        self.assertNotIn("高一一班", out)
+        self.assertIn(K.PH_PERSON, out)
+        self.assertIn(K.PH_CLASS, out)
+
+    def test_vocab_does_not_touch_ordinary_words(self):
+        vocab = {"示例1班": K.PH_CLASS}
+        self.assertEqual(K.scrub("怎么调课", vocab=vocab), "怎么调课")
+
     def test_scrub_applied_before_llm(self):
         """🔴 验收 4：开 LLM 前脱敏 —— 抓真实调用参数，断言不含姓名/班级/id。"""
         saved = {k: os.environ.get(k) for k in _ENV_KEYS}
@@ -402,6 +421,42 @@ class TestChatAPI(_EnvMixin, unittest.TestCase):
         status, body = self._call({"question": "怎么调课"}, headers={})
         self.assertEqual(status, 401)
         self.assertEqual(body["error"]["code"], "unauthorized")
+
+    # -- 账号停用：旧令牌必须失效（2026-11-13 外部审查）--------------------
+    def test_disabled_account_invalidates_old_token(self):
+        """停用只挡新登录、旧令牌仍能调接口 —— 这是审查实测到的缺陷，此处锁死。"""
+        conn = connect(self.db_path)
+        try:
+            conn.execute("UPDATE users SET status='disabled' WHERE login='t01'")
+            conn.commit()
+        finally:
+            conn.close()
+        try:
+            status, _body = self._call(
+                {"question": "怎么调课"}, {"authorization": self.teacher_token}
+            )
+            self.assertEqual(status, 401, "账号停用后，停用前签发的令牌必须立刻失效")
+        finally:
+            conn = connect(self.db_path)
+            try:
+                conn.execute("UPDATE users SET status='active' WHERE login='t01'")
+                conn.commit()
+            finally:
+                conn.close()
+        ok = self._call({"question": "怎么调课"}, {"authorization": self.teacher_token})
+        self.assertIsInstance(ok, dict, "账号恢复正常后，令牌应重新可用")
+
+    # -- 脱敏词表来自库里的真实对象名 ---------------------------------------
+    def test_name_vocab_comes_from_org_objects(self):
+        conn = connect(self.db_path)
+        try:
+            uid = conn.execute("SELECT id FROM users WHERE login='t01'").fetchone()["id"]
+        finally:
+            conn.close()
+        vocab = api_chat._name_vocab(uid)
+        self.assertTrue(vocab, "同组织内应能取到对象名，供问答层精确脱敏")
+        self.assertEqual(vocab.get("高一(1)班"), K.PH_CLASS)
+        self.assertIn(K.PH_PERSON, set(vocab.values()), "人员姓名应映射到 [人员]")
 
     # -- 400 --------------------------------------------------------------
     def test_missing_question_400(self):

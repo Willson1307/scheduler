@@ -124,17 +124,51 @@ def verify_token(token: str) -> dict | None:
     return payload
 
 
+def _account_disabled(user_id: str) -> bool:
+    """账号是否已被停用（`users.status='disabled'`）。
+
+    🔴 2026-11-13 补（外部审查发现）：令牌是**无状态**的，签发后不再回看数据库，
+    于是「管理员停用账号」只挡住了新登录，**旧令牌仍能调接口、甚至写入数据**
+    （实测：停用后新登录 401，旧令牌 `POST /api/import/csv` 返回 200 并新增 1 行）。
+
+    判定刻意保守：**只有明确查到 status='disabled' 才拒绝**。
+    用户行不存在（测试里直接签发的老令牌）或库暂时不可用 → 维持旧行为，
+    不因为「查不到」把所有人踢下线（那会造成比原缺陷更大的可用性事故）。
+    """
+    if not user_id:
+        return False
+    try:
+        from . import config  # 延迟导入：避免 server 包初始化期的循环依赖
+
+        conn = config.open_db()
+    except Exception:
+        return False
+    try:
+        row = conn.execute("SELECT status FROM users WHERE id = ?", (user_id,)).fetchone()
+    except Exception:
+        return False
+    finally:
+        conn.close()
+    return row is not None and row[0] == "disabled"
+
+
 def resolve_context(headers: dict) -> dict | None:
     """从请求头解析登录上下文。
 
     约定（docs/07 通用约定）：Authorization: Bearer <token>。
-    无/格式错/签名无效 → None（由 require_auth 转 401）。
+    无/格式错/签名无效/**账号已停用** → None（由 require_auth 转 401）。
     """
     auth_header = headers.get("authorization", "") or ""
     if not auth_header.startswith("Bearer "):
         return None
     token = auth_header[len("Bearer "):].strip()
-    return verify_token(token)
+    payload = verify_token(token)
+    if payload is None:
+        return None
+    # 🔴 令牌有效不等于账号有效：停用后旧令牌必须立刻失效（见 _account_disabled）
+    if _account_disabled(payload.get("user_id")):
+        return None
+    return payload
 
 
 def require_auth(fn: Callable[..., Any]) -> Callable[..., Any]:

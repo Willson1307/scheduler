@@ -14,7 +14,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261119">
+<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261120">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -81,7 +81,7 @@
      🔴 用 minmax(0, 1fr) 而不是 1fr：网格子项默认 min-width:auto，会被宽表格顶出横向滚动。 */
   .layout {
     display: grid;
-    grid-template-columns: 268px minmax(0, 1fr) 392px;
+    grid-template-columns: 268px minmax(0, 1fr);
     gap: var(--sp);
     align-items: start;
   }
@@ -102,13 +102,59 @@
     font-size: 1rem; font-weight: 700; color: var(--c-text);
     margin-bottom: 10px;
   }
+  /* 身份卡与筛选卡视觉解耦（队评/投影）：身份用浅主色底，筛选保持白底 ——
+     两块挨着时一眼能分出「这是筛选」和「这是登录」。底色复用 --c-primary-l，不新造色。 */
+  .rail-card.is-identity { background: var(--c-primary-l); }
+  .rail-card.is-identity .rail-title { color: var(--c-primary); }
   .rail-card .field { margin-bottom: 10px; }
   .rail-card .field:last-child { margin-bottom: 0; }
   .rail-card select, .rail-card input[type="date"], .rail-card input[type="text"] { width: 100%; }
   button.block { width: 100%; }
 
+  /* 左栏短（两张卡）→ 跟着滚，避免下半屏空一大片 */
+  @media (min-width: 1181px) {
+    .col-rail { position: sticky; top: var(--sp); align-self: start; }
+  }
+
+  /* ---------- 二级区 2×2（查空位 / 问一下 / 消解结果 / 变更请求） ----------
+     这四块「偶尔用一次」，不跟顶部同频；单独成带宽版排，顶部三栏就不会留半屏空白。 */
+  .layout-bottom {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+    gap: 0;
+    margin-top: var(--sp);
+    padding: var(--sp);
+    background: var(--c-surface);
+    border: 1px solid var(--c-border);
+    border-radius: var(--radius);
+    box-shadow: 0 1px 3px rgba(31, 39, 51, .07);
+  }
+  .layout-bottom > .belt-title {
+    grid-column: 1 / -1;
+    font-family: var(--font-serif);
+    font-size: 1.05rem; font-weight: 700; color: var(--c-text);
+    padding-bottom: 8px; margin-bottom: 4px;
+    border-bottom: 1px solid var(--c-border-st);
+  }
+  /* 四块不再各自成卡（原来看起来像四块碎豆腐），改成一张卡内的四个格子，只用细线分隔 */
+  .layout-bottom > section {
+    margin: 0; padding: var(--sp) var(--sp) var(--sp);
+    border: 0; border-radius: 0; box-shadow: none;
+    background: transparent;
+  }
+  .layout-bottom > section:nth-of-type(odd) { padding-right: var(--sp); border-right: 1px solid var(--c-border-st); }
+  .layout-bottom > section:nth-of-type(even) { padding-left: var(--sp); }
+  .layout-bottom > section:nth-of-type(n+3) { border-top: 1px solid var(--c-border-st); margin-top: var(--sp); padding-top: var(--sp); }
+
   @media (max-width: 1180px) {
     .layout { grid-template-columns: minmax(0, 1fr); }
+    .layout-bottom { grid-template-columns: minmax(0, 1fr); }
+    .layout-bottom > section:nth-of-type(odd) { border-right: 0; }
+    .layout-bottom > section:nth-of-type(n+2) {
+      border-top: 1px solid var(--c-border-st);
+      margin-top: var(--sp); padding-top: var(--sp);
+      padding-left: 0; padding-right: 0;
+    }
   }
 
   /* ---------- 页头 ---------- */
@@ -174,6 +220,37 @@
   .status-badge.is-ok   { background: var(--c-ok-l);      color: var(--c-ok);      border-color: #a8d5bd; }
   .status-badge.is-err  { background: var(--c-danger-l);  color: #7d2019;          border-color: var(--c-danger-b); }
 
+  /* ---------- 上手三步（新手引导） ----------
+     页面已经回答了「几处冲突、按哪个键」，缺的只是「顺序」——所以这里只放一条静态文字条：
+     无 JS、无动画、不遮挡任何错误横幅与空态提示。
+     ⛔ 不做遮罩高亮 tour：要算元素坐标、适配 768 断点与 sticky 左栏，
+        出错时引导框会浮在空白处，比没有引导更难解释。 */
+  .onboard {
+    display: flex; flex-wrap: wrap; gap: 8px 22px;
+    align-items: center;
+    background: var(--c-primary-l);
+    border: 1px solid var(--c-border);
+    border-left: 4px solid var(--c-primary);   /* 左侧主色边条：一眼认出这是「提示」不是数据 */
+    border-radius: var(--radius);
+    padding: 8px var(--sp);
+    margin-bottom: var(--sp);
+    font-size: var(--fs-sm);
+    color: var(--c-text);
+  }
+  .onboard-title {
+    font-weight: 700; color: var(--c-primary);
+    letter-spacing: .5px;
+  }
+  .onboard-step { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+  .onboard-n {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; flex: 0 0 20px;
+    border-radius: 50%;
+    background: var(--c-surface); color: var(--c-primary);
+    border: 1px solid var(--c-border);
+    font-size: var(--fs-xs); font-weight: 700;
+  }
+
   /* ---------- 工具条 ---------- */
   .toolbar {
     display: flex;
@@ -211,6 +288,10 @@
     outline: 2px solid var(--c-primary);
     outline-offset: 2px;
   }
+  /* 鼠标点进来时也有明确反馈：边框转主色。⛔ 不写 outline:none —— 键盘用户会失去焦点位置。 */
+  select:focus, input:focus, textarea:focus { border-color: var(--c-primary); }
+  /* 下拉/日期这类原生控件默认没有手型，老师会以为是只读文本 */
+  select, input[type="date"] { cursor: pointer; }
   header :focus-visible { outline-color: #fff; }
   button:hover:not(:disabled) { background: var(--c-primary-l); }
   button:disabled { cursor: not-allowed; opacity: .55; }
@@ -224,6 +305,18 @@
     font-size: 1rem;
   }
   button.primary:hover:not(:disabled) { background: #17405f; }
+  /* 次要按钮：白底 + 主色描边。用于「冲突列表」标题栏那个消解入口 ——
+     全页只允许顶部状态条那一个实心主按钮，两个同款蓝按钮会让人犹豫"点哪个"。 */
+  button.secondary {
+    background: var(--c-surface);
+    color: var(--c-primary);
+    /* 描边用中性灰而不是主色蓝：蓝框 + 蓝字会和顶部实心主按钮"同族"，
+       老师仍会犹豫两个是不是一回事。灰框 3.24:1 仍过非文本对比度，边界看得见。 */
+    border: 1px solid var(--c-border);
+    font-weight: 600;
+    padding: 8px 14px;
+  }
+  button.secondary:hover:not(:disabled) { background: var(--c-primary-l); }
   button.danger {
     background: var(--c-danger);
     border-color: var(--c-danger);
@@ -295,12 +388,14 @@
     border-collapse: collapse;
     font-size: var(--fs-xs);
   }
+  /* 2026-11-12（队评：像碎豆腐）：格内细线回到 --c-border-st。
+     「卡片边界 ≥3:1」这条判据管的是卡片与页面背景，格线只要看得出分隔，不必同重量。 */
   .grid th, .grid td {
-    border: 1px solid var(--c-border);
+    border: 1px solid var(--c-border-st);
     padding: 4px 5px;
     vertical-align: top;
     text-align: center;
-    height: 46px;
+    height: 30px;   /* 空行矮一些：10 节里通常只有前 3~4 节有安排，整表不再是一大片白 */
   }
   .grid thead th { background: var(--c-primary-l); color: var(--c-primary); font-weight: 700; }
   .grid tbody th {
@@ -310,6 +405,7 @@
   .grid td.occ {
     background: var(--c-primary-l);
     color: var(--c-primary);
+    height: 44px;   /* 有课的格子恢复高度：里面要放对象名 */
   }
   .grid td.hit {
     background: var(--c-danger-l);
@@ -333,11 +429,9 @@
   .chip code { font-family: Consolas, "Courier New", monospace; }
 
   /* ---------- 冲突列表 ---------- */
-  /* 右栏（窄）里 a / b 两栏放不下并排 → 竖排，中间「撞」居中对齐，层级更清楚 */
-  .col-side .it-vs { flex-direction: column; align-items: stretch; }
-  .col-side .it-vs .vs-mark { align-self: center; }
-  /* .side 原本 flex:1 1 260px，竖排时 260px 变成"高度"→ 两张卡各撑 260px 高，中间空一大片 */
-  .col-side .it-vs .side { flex: 0 0 auto; }
+  /* 冲突列表现在是整行宽版（.layout-wide 内），a / b 恢复并排：一行一条，最省高度 */
+  .layout-wide { margin-top: var(--sp); }
+  .layout-wide > section { margin-bottom: 0; }
   .cl-head {
     display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
     justify-content: space-between; margin-bottom: 8px;
@@ -362,8 +456,8 @@
 
   ul.items { list-style: none; margin: 0; padding: 0; }
   ul.items > li {
-    border: 1px solid var(--c-danger-b);
-    border-left: 5px solid var(--c-danger);
+    border: 1px solid var(--c-border-st);
+    border-left: 4px solid var(--c-danger);
     border-radius: var(--radius);
     padding: 10px var(--sp);
     margin-bottom: 8px;
@@ -375,9 +469,11 @@
   }
   .it-when { font-weight: 700; color: var(--c-danger); }
   .it-vs { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+  /* 每条冲突的动作为一组、右对齐（与标题行右侧的「一键消解」形成同一条竖线） */
+  .it-acts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-left: auto; }
   .side {
     flex: 1 1 260px; min-width: 0;
-    border: 1px solid var(--c-border); border-radius: var(--radius);
+    border: 1px solid var(--c-border-st); border-radius: var(--radius);
     padding: 6px 10px; background: #fff;
   }
   .side .nm { font-weight: 700; }
@@ -626,6 +722,14 @@
     <button id="resolveBtnTop" class="primary" type="button" disabled>一键消解</button>
   </div>
 
+  <!-- 上手三步：顺序性说明，静态文字，不参与任何交互 -->
+  <div class="onboard" role="note" aria-label="上手三步">
+    <b class="onboard-title">新手引导</b>
+    <span class="onboard-step"><b class="onboard-n">1</b>先选组，再选「查看对象」</span>
+    <span class="onboard-step"><b class="onboard-n">2</b>红格＝冲突，完整列表在下方</span>
+    <span class="onboard-step"><b class="onboard-n">3</b>点「一键消解」，不满意可撤销</span>
+  </div>
+
   <!-- 全局错误区：🔴 零容忍空白页——任何环节失败都在这里显式说出来，
        绝不让用户误以为「没有冲突」 -->
   <div id="fatal" class="banner error" role="alert" aria-live="assertive" hidden></div>
@@ -658,7 +762,7 @@
         </div>
       </div>
 
-      <div class="rail-card" id="loginSec" hidden>
+      <div class="rail-card is-identity" id="loginSec" hidden>
         <div class="rail-title">身份</div>
         <!-- Badge：未登录＝黄（--c-warn）、已登录＝绿（--c-ok）。原来是一行灰色小字，投影下读不出来 -->
         <div class="note login-who">
@@ -688,58 +792,23 @@
     <div id="weekBox"></div>
   </section>
 
-  <!-- ---------- 空位查询（F7 前端 / B 批 GET /api/slots） ----------
-       🔴 与周视图同页、紧随其后，不做前端路由（AGENTS §8：单页 idx）。
-       🔴 空结果必须说话：「这段时间没有连排 N 节的空位」是正常业务结论，
-          绝不能留白 —— 空白会被当成「没问题」，是本项目最痛的静默失效形态。
-       🔴 节次/可排位置全部由后端按当天生效作息（含冬季作息、调休 as_of）判定，
-          前端不做位运算、不自己算节次（两套位序混用会整页错一位且不报错）。 -->
-  <section id="secSlots">
-    <div class="sec-head">
-      <h2>查空位 <span class="hint">给某个班 / 某位老师找「连排 N 节全空」的位置（只读，不改课表）</span></h2>
-      <div class="field">
-        <label for="slotObjSel">查询对象</label>
-        <select id="slotObjSel"></select>
-      </div>
-    </div>
-    <div class="slot-form">
-      <div class="field">
-        <label for="slotFrom">开始日期</label>
-        <input id="slotFrom" type="date">
-      </div>
-      <div class="field">
-        <label for="slotTo">结束日期</label>
-        <input id="slotTo" type="date">
-      </div>
-      <div class="field">
-        <label for="slotDur">连排节数</label>
-        <select id="slotDur">
-          <option value="1">1 节</option>
-          <option value="2" selected>2 节</option>
-          <option value="3">3 节</option>
-        </select>
-      </div>
-      <div class="field">
-        <label>&nbsp;</label>
-        <button id="slotBtn" class="primary" type="button">查空位</button>
-      </div>
-    </div>
-    <!-- 失败态：401 走 handle401（清 token + 弹登录栏）；403 / 400 原文展示后端 message -->
-    <div id="slotErr" class="banner error" role="alert" aria-live="assertive" hidden></div>
-    <div id="slotBox"><div class="empty">尚未查询。选好对象与日期范围后点「查空位」。</div></div>
-    <p class="note">点「按此提议」不会立刻改课表，要走审批。</p>
-  </section>
-
   </div><!-- /col-main -->
 
-  <aside class="col col-side">
+  </div><!-- /layout -->
 
+
+  <!-- ==========================================================================
+       冲突列表（整行宽版）
+       为什么单开一行：a / b 两侧在宽版里能并排（一行一条），比塞进 392px 的窄栏
+       竖排短一半；而且它是「必须处理」的主内容，值得占整行。
+       ========================================================================== -->
+  <div class="layout-wide">
   <!-- ---------- 冲突列表 ---------- -->
   <section id="secConflict">
     <div class="cl-head">
       <h2>冲突列表 <span class="hint">硬冲突必须消解</span></h2>
       <div class="resolve-ctl">
-        <button id="resolveBtn" class="primary" type="button">一键消解（当前组）</button>
+        <button id="resolveBtn" class="secondary" type="button">一键消解（当前组）</button>
         <!-- 求解中：loader.svg 内联（双线融合/分离无限循环，纯 SMIL，无 JS/无网络）。
              平时 hidden，doResolve() 请求期间显示，finally 里隐藏——最慢/最坏路径也会收起，
              不会出现「转圈转到天荒地老」这种没人敢碰的状态。
@@ -775,36 +844,61 @@
     <div id="confBox"></div>
     <p class="note" id="resolveHint"></p>
   </section>
+  </div><!-- /layout-wide -->
 
-  <!-- ---------- 消解前后对比（卡 runQn7：默认收起） ----------
-       结果/撤销/固化的输出都写进 #resBox，全部落在 <details> 内 →
-       app.js 在写结果或写错误后一律 details.open = true，绝不让「消解完了但看不见」。 -->
-  <section id="secResult">
-    <h2>消解结果 <span class="hint">消解前后对比</span>
-      <span id="resSum" class="fold-state">尚未执行消解</span></h2>
-    <details id="resDetails" class="fold">
-      <summary>展开查看消解前后对比</summary>
-      <div id="resBox"><div class="empty">尚未执行消解。</div></div>
-    </details>
-  </section>
-
-  <!-- ---------- 变更请求（F7 / B8 审批流，卡 runQn7：默认收起） ----------
-       🔴 刷新按钮与两条横幅（#reqMsg / #reqErr）都留在 <details> 外：
-          放进 summary 会「刷新 + 开合」双触发；折进去则会「失败无声」。 -->
-  <section id="secRequests">
-    <div class="cl-head">
-      <h2>变更请求 <span class="hint">永久改期走审批：批准后才生效</span></h2>
-      <div class="req-tools">
-        <span id="reqSum" class="fold-state">登录后显示</span>
-        <button id="reqReloadBtn" type="button">刷新请求</button>
-      </div>
+  <!-- ==========================================================================
+       二级区（2026-11-12）：查空位 / 问一下 / 消解结果 / 变更请求
+       为什么挪到这里：这四个是「偶尔用一次」的功能，和顶部的「看课表 + 处理冲突」
+       不同频。放在三栏下面做 2×2，顶部三栏高度就接近（不会出现左中两栏半屏空白）。
+       DOM 顺序 = 阅读顺序；<1180px 时仍是单列，顺序为 查空位 → 问一下 → 结果 → 请求。
+       ========================================================================== -->
+  <div class="layout-bottom">
+    <div class="belt-title">工具与记录 <span class="hint">查空位 / 问一下 / 消解结果 / 变更请求</span></div>
+  <!-- ---------- 空位查询（F7 前端 / B 批 GET /api/slots） ----------
+       🔴 与周视图同页、紧随其后，不做前端路由（AGENTS §8：单页 idx）。
+       🔴 空结果必须说话：「这段时间没有连排 N 节的空位」是正常业务结论，
+          绝不能留白 —— 空白会被当成「没问题」，是本项目最痛的静默失效形态。
+       🔴 节次/可排位置全部由后端按当天生效作息（含冬季作息、调休 as_of）判定，
+          前端不做位运算、不自己算节次（两套位序混用会整页错一位且不报错）。 -->
+  <section id="secSlots">
+    <div class="sec-head">
+      <h2>查空位 <span class="hint">连排 N 节全空的位置（只读）</span></h2>
+      <!-- 收起时的状态字：空态 / 失败也必须能看见（折叠不等于"看不出查过没"） -->
+      <span id="slotSum" class="fold-state">尚未查询</span>
     </div>
-    <div id="reqMsg" class="banner ok" role="status" aria-live="polite" hidden></div>
-    <div id="reqErr" class="banner error" role="alert" hidden></div>
-    <details id="reqDetails" class="fold">
-      <summary>展开查看变更请求</summary>
-      <div id="reqBox"></div>
-      <p class="note">已处理的只读；批准时会再查一遍冲突。</p>
+    <!-- 失败横幅留在 details 之外：折起来也看得见失败 -->
+    <div id="slotErr" class="banner error" role="alert" aria-live="assertive" hidden></div>
+    <details id="slotDetails" class="fold">
+      <summary>展开查询表单与结果</summary>
+      <div class="slot-form">
+        <div class="field">
+          <label for="slotObjSel">查询对象</label>
+          <select id="slotObjSel"></select>
+        </div>
+        <div class="field">
+          <label for="slotFrom">开始日期</label>
+          <input id="slotFrom" type="date">
+        </div>
+        <div class="field">
+          <label for="slotTo">结束日期</label>
+          <input id="slotTo" type="date">
+        </div>
+        <div class="field">
+          <label for="slotDur">连排节数</label>
+          <select id="slotDur">
+            <option value="1">1 节</option>
+            <option value="2" selected>2 节</option>
+            <option value="3">3 节</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button id="slotBtn" class="primary" type="button">查空位</button>
+        </div>
+      </div>
+      <!-- 失败态：401 走 handle401（清 token + 弹登录栏）；403 / 400 原文展示后端 message -->
+      <div id="slotBox"><div class="empty">尚未查询。选好对象与日期范围后点「查空位」。</div></div>
+      <p class="note">点「按此提议」不会立刻改课表，要走审批。</p>
     </details>
   </section>
 
@@ -817,6 +911,18 @@
        🔴 「手册里没有这条」不是故障：后端返 200 + mode=template，照样按原文渲染。
        🔴 卡 runQn7：本块默认收起（<details>）。h2 / 状态字 / 芯片 / 错误横幅都留在
           details 外 —— 收起时也必须能看见「有没有答过、有没有失败」，也要能直接点问。 -->
+  <section id="secResult">
+    <h2>消解结果 <span class="hint">消解前后对比</span>
+      <span id="resSum" class="fold-state">尚未执行消解</span></h2>
+    <details id="resDetails" class="fold">
+      <summary>展开查看消解前后对比</summary>
+      <div id="resBox"><div class="empty">尚未执行消解。</div></div>
+    </details>
+  </section>
+
+  <!-- ---------- 变更请求（F7 / B8 审批流，卡 runQn7：默认收起） ----------
+       🔴 刷新按钮与两条横幅（#reqMsg / #reqErr）都留在 <details> 外：
+          放进 summary 会「刷新 + 开合」双触发；折进去则会「失败无声」。 -->
   <section id="secChat">
     <div class="sec-head">
       <h2>问一下 <span class="hint">问「这件事该怎么操作」，答案来自用户手册</span></h2>
@@ -860,8 +966,27 @@
   </section>
 
 
-  </aside>
-  </div><!-- /layout -->
+  <!-- ---------- 消解前后对比（卡 runQn7：默认收起） ----------
+       结果/撤销/固化的输出都写进 #resBox，全部落在 <details> 内 →
+       app.js 在写结果或写错误后一律 details.open = true，绝不让「消解完了但看不见」。 -->
+  <section id="secRequests">
+    <div class="cl-head">
+      <h2>变更请求 <span class="hint">永久改期走审批：批准后才生效</span></h2>
+      <div class="req-tools">
+        <span id="reqSum" class="fold-state">登录后显示</span>
+        <button id="reqReloadBtn" type="button">刷新请求</button>
+      </div>
+    </div>
+    <div id="reqMsg" class="banner ok" role="status" aria-live="polite" hidden></div>
+    <div id="reqErr" class="banner error" role="alert" hidden></div>
+    <details id="reqDetails" class="fold">
+      <summary>展开查看变更请求</summary>
+      <div id="reqBox"></div>
+      <p class="note">已处理的只读；批准时会再查一遍冲突。</p>
+    </details>
+  </section>
+
+  </div><!-- /layout-bottom -->
 
   <!-- ---------- 技术说明（默认收起，答辩用） ----------
        🔴 不加 open 属性＝默认不展开，不要改成 open。
@@ -901,10 +1026,8 @@
      2026-11-12 界面文案清理（开发期话术收进底部折叠区）改了 app.js + index.html：两处同改为 20261116。
      2026-11-12 卡 runQn7：改名 + 首屏状态条 + 卡片对比 + 折叠 + 芯片，改了 app.js + index.html：三处同改为 20261117
               2026-11-12 队评反馈：三栏布局 + 字体分层（衬线标题/黑体正文/等宽数字）+ 焦点样式，改了 index.html：三处同改为 20261118
-               （三处 = 本行 app.js?v= / 上方 favicon?v= / config.py 的 ASSET_VERSION）。
-     2026-11-12 页头改用图标本体（新增 brand-icon.js，app.js 加挂载）：四处同改为 20261119
                （四处 = 新增的 brand-icon.js?v= / app.js?v= / 上方 favicon?v= / config.py 的 ASSET_VERSION）。 -->
-<script src="brand-icon.js?v=20261119"></script>
-<script src="app.js?v=20261119"></script>
+<script src="brand-icon.js?v=20261120"></script>
+<script src="app.js?v=20261120"></script>
 </body>
 </html>

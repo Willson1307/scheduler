@@ -49,6 +49,43 @@ def _bad_request(message: str) -> tuple[int, dict]:
     return 400, {"error": {"code": "bad_request", "message": message}}
 
 
+def _name_vocab(user_id: str) -> dict[str, str] | None:
+    """当前用户所在组织里的**对象名 → 占位符**，交给问答层做精确脱敏。
+
+    🔴 为什么需要它（2026-11-13 外部审查发现）：问答层的正则只能猜
+    「姓氏+老师」「数字班名」这类**格式**；裸姓名（「王思勋负责的…」）和
+    中文数字班名（「高一一班」）会原样送给外部模型。名单本来就在库里，
+    取出来精确替换即可，不需要猜、也不会误伤普通词。
+
+    ⛔ 只取名字，不取课表、不取名单明细；不落日志、不缓存、用完即丢。
+    库不可用 / 用户无组织 → 返回 None（退回正则兜底，**不阻断问答**）。
+    """
+    try:
+        conn = config.open_db()
+    except Exception:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT o.org_id FROM objects o JOIN users u ON u.object_id = o.id"
+            " WHERE u.id = ?",
+            (user_id,),
+        ).fetchone()
+        if row is None or not row[0]:
+            return None
+        vocab: dict[str, str] = {}
+        for name, kind in conn.execute(
+            "SELECT name, kind FROM objects WHERE org_id = ?", (row[0],)
+        ):
+            placeholder = K.VOCAB_PLACEHOLDER.get(kind)
+            if placeholder and name and len(name) >= 2:
+                vocab[name] = placeholder
+        return vocab or None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
 @auth.require_auth
 def chat(method, path, query, body, headers, context=None):
     """POST /api/chat。
@@ -81,7 +118,7 @@ def chat(method, path, query, body, headers, context=None):
         finally:
             conn.close()
 
-    return K.answer(question)
+    return K.answer(question, vocab=_name_vocab(context["user_id"]))
 
 
 ROUTES = {
