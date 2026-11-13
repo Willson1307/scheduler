@@ -120,10 +120,14 @@ def create_exception(method, path, query, body, headers, context=None):
         # 重复例外 → 409（不拦的后果见 find_active docstring）
         existing = K.find_active(conn, org_id, target["id"], iso)
         if existing is not None:
+            # message 一字不改（前端已按它显示），另把 id / code **结构化**地
+            # 平铺进响应体：原先只有文案里那句 exception_id=exc_xxx，
+            # 前端只能正则抠字符串，message 一改就静默失配。
             raise ApiError(
                 409,
                 f"{iso} 已存在对该日程的 {existing['mode']} 例外"
                 f"（exception_id={existing['id']}）——请先撤销它再新建",
+                extra={"code": "conflict", "exception_id": existing["id"]},
             )
 
         effective = K.exception_effective(

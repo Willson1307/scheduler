@@ -14,7 +14,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261120">
+<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261122">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -406,6 +406,7 @@
     background: var(--c-primary-l);
     color: var(--c-primary);
     height: 44px;   /* 有课的格子恢复高度：里面要放对象名 */
+    position: relative;   /* rrr4vM：「⋯」按钮绝对定位在本格右上角，不挤占对象名 */
   }
   .grid td.hit {
     background: var(--c-danger-l);
@@ -664,6 +665,45 @@
   }
   .modal .actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
 
+  /* ---------- 临时微调（rrr4vM）----------
+     入口做在格子里，字体一律走令牌（最小 var(--fs-xs)=12px），
+     与现有评审口径一致：不再往下压字号。 */
+  .grid td .cellmore {
+    position: absolute; top: 1px; right: 2px;
+    font: inherit; font-size: var(--fs-xs); line-height: 1;
+    padding: 2px 4px; border: 1px solid var(--c-border-st); border-radius: 4px;
+    background: var(--c-surface); color: var(--c-primary);
+    cursor: pointer;
+  }
+  /* 常显：双击不可发现，入口必须一眼看得见（卡面「两个入口缺一不可」）。
+     hover 时加边框强调，而不是靠「平时隐藏、hover 才出现」——展台上评委不会去 hover。 */
+  .grid td .cellmore:hover, .grid td .cellmore:focus { border-color: var(--c-primary); }
+
+  .modal.exc { max-width: 560px; }
+  .exc-list { list-style: none; margin: 0 0 4px; padding: 0; }
+  .exc-row {
+    border: 1px solid var(--c-border-st); border-radius: var(--radius);
+    padding: 8px 10px; margin-bottom: 8px;
+  }
+  .exc-title {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    font-size: var(--fs-sm); font-weight: 700; color: var(--c-text);
+  }
+  .exc-kind {
+    font-size: var(--fs-xs); font-weight: 400; padding: 1px 6px;
+    border-radius: 999px; border: 1px solid #a8d5bd;
+    background: var(--c-ok-l); color: #14512f;
+  }
+  .exc-kind.off { border-color: #e3c887; background: var(--c-warn-l); color: #6d4c00; }
+  .exc-state { margin: 6px 0 0; font-size: var(--fs-xs); color: var(--c-text-dim); }
+  .exc-state.bad { color: #7d2019; font-weight: 700; }
+  .exc-acts {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    margin-top: 8px; font-size: var(--fs-xs);
+  }
+  .exc-acts select { font: inherit; font-size: var(--fs-xs); max-width: 100%; }
+  .exc-hint { font-size: var(--fs-xs); color: var(--c-warn); }
+
   footer { color: var(--c-text-dim); font-size: var(--fs-xs); text-align: center; margin-top: 16px; }
 
   /* ---------- 技术说明（页面底部，默认收起） ----------
@@ -789,6 +829,11 @@
       </div>
     </div>
     <div id="weekErr" class="banner error" role="alert" hidden></div>
+    <!-- rrr4vM：临时微调的一句话结果。成功用 status（读屏温和播报），
+         失败必须是独立节点 role=alert —— showBanner 不改 class，
+         同一个节点既报成功又报失败就会把红色错误显示成绿色。 -->
+    <div id="excMsg" class="banner ok" role="status" aria-live="polite" hidden></div>
+    <div id="excErr" class="banner error" role="alert" hidden></div>
     <div id="weekBox"></div>
   </section>
 
@@ -1026,8 +1071,11 @@
      2026-11-12 界面文案清理（开发期话术收进底部折叠区）改了 app.js + index.html：两处同改为 20261116。
      2026-11-12 卡 runQn7：改名 + 首屏状态条 + 卡片对比 + 折叠 + 芯片，改了 app.js + index.html：三处同改为 20261117
               2026-11-12 队评反馈：三栏布局 + 字体分层（衬线标题/黑体正文/等宽数字）+ 焦点样式，改了 index.html：三处同改为 20261118
-               （四处 = 新增的 brand-icon.js?v= / app.js?v= / 上方 favicon?v= / config.py 的 ASSET_VERSION）。 -->
-<script src="brand-icon.js?v=20261120"></script>
-<script src="app.js?v=20261120"></script>
+               （四处 = brand-icon.js?v= / 本行 app.js?v= / 上方 favicon?v= / config.py 的 ASSET_VERSION）。 -->
+     2026-11-12 页头改用图标本体（新增 brand-icon.js，app.js 加挂载）：四处同改为 20261120。
+     2026-11-13 卡 rrr4vM：周视图格子加「⋯ / 双击」临时微调面板：四处同改为 20261121。
+     2026-11-13 卡 rrr4vM 追加：改点掩码改用服务端 periods[].new_mask（前端不再自算）：四处同改为 20261122。
+<script src="brand-icon.js?v=20261122"></script>
+<script src="app.js?v=20261122"></script>
 </body>
 </html>

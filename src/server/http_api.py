@@ -32,12 +32,23 @@ MAX_BODY_BYTES = 1 * 1024 * 1024
 
 
 class ApiError(Exception):
-    """业务层主动抛出的带状态码错误（B2/B3 沿用，如 401/403/409）。"""
+    """业务层主动抛出的带状态码错误（B2/B3 沿用，如 401/403/409）。
 
-    def __init__(self, status: int, message: str):
+    `extra`（2026-11-13 新增，可选）：要**平铺进响应体**的结构化字段。
+    存在理由：有些错误光有一句人话不够——例如 409「这一天已有例外」，
+    前端要能一键撤销就得拿到 `exception_id`。原先把 id 塞在 message 字符串里，
+    前端只能用正则抠，字符串一改就断且不报错。
+
+    ⚠️ 兼容性硬约束：`error` 字段**永远是 message 原文字符串**。
+    全站前端 `httpErrText()` / `extractMessage()` 都按扁平 `{"error": "..."}` 取文案，
+    改成嵌套或让 extra 覆盖 `error` 会让所有错误提示一起变空。
+    """
+
+    def __init__(self, status: int, message: str, extra: dict | None = None):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.extra = extra
 
 
 def json_body(body: bytes) -> dict:
@@ -97,7 +108,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             else:
                 static.serve(self, self.server.cfg, path)  # type: ignore[attr-defined]
         except ApiError as exc:
-            self._send_json(exc.status, {"error": exc.message})
+            # 🔴 键顺序是刻意的：先铺 extra，最后写 error。
+            #    写成 {"error": ..., **extra} 的话，extra 里只要有个 "error" 键
+            #    就会把后端原文**静默覆盖**，全站错误提示一起变成 undefined。
+            #    error 必须是 message 原文，且永远只有一个。
+            payload = dict(exc.extra or {})
+            payload["error"] = exc.message
+            self._send_json(exc.status, payload)
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True  # 客户端提前断开，无需响应
         except Exception:

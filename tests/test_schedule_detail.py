@@ -221,6 +221,38 @@ class TestScheduleDetail(unittest.TestCase):
         for cell in result["cells"]:
             self.assertIn(cell["idx"], allowed)
 
+    def test_periods_carry_server_side_new_mask(self):
+        """🔴 破坏法落点：每个节次必须自带 `new_mask`，且等于 1<<idx 的单日掩码。
+
+        为什么必须有这个字段：`POST /api/exceptions` 的 `new_mask` 要求「第 N 节 → 位 N」，
+        而**空白节次不在 cells 里**，前端没有别的办法拿到目标掩码 —— 没有这个字段，
+        前端只能自己 `1 << idx` 算，违反 AGENTS §3.4「前端不做位运算，mask 由服务端给」。
+
+        断言两件事（少一件都测不出错）：
+          ① 格式与 cells[].mask 完全一致（`0x%06x`，可直接当 new_mask 传）；
+          ② 数值恒等于 `1 << idx` —— 若有人误用周位序
+             `(dow-1)*16+(idx-1)`，值会变成 0x100000000 那一路，本用例当场红。
+
+        破坏法：把 `api_schedules._periods()` 里的 `"new_mask"` 一行删掉 → 本用例必红。
+        """
+        result = self._call(self._q(self.class_id), {"authorization": self.admin_token})
+        periods = result["periods"]
+        self.assertTrue(periods, "periods 不应为空")
+        for p in periods:
+            self.assertIn("new_mask", p, f"第 {p['idx']} 节缺 new_mask")
+            mask = p["new_mask"]
+            self.assertRegex(mask, r"^0x[0-9a-f]{6}$", f"格式必须与 cells[].mask 一致：{mask}")
+            self.assertEqual(
+                int(mask, 16),
+                1 << p["idx"],
+                f"第 {p['idx']} 节的 new_mask 必须是单日掩码 1<<{p['idx']}（不是周位序）",
+            )
+
+        # 与 cells[].mask 同一套口径：同一节的 mask 文本必须与 periods 里的一致。
+        by_idx = {p["idx"]: p["new_mask"] for p in periods}
+        for cell in result["cells"]:
+            self.assertEqual(cell["mask"], by_idx[cell["idx"]])
+
     def test_periods_and_cells_agree_on_special_day(self):
         """🔴 破坏法落点：换作息那天，periods 与 cells 必须同时不出现第 7 节。
 

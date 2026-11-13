@@ -330,6 +330,12 @@ def _periods(day_cfg, dow: int) -> list[dict]:
     若把停用节次也列出来，前端「改到第 N 节」会让用户选到一条排不进去的
     节次——正是本项目最痛的静默失效。`enabled` 字段仍保留（契约字段名写死），
     当前恒为 true，将来若开放「停用但仍要展示」可直接改这一处。
+
+    `new_mask`（2026-11-13 新增，纯追加字段）：这一节作为 move 目标时应传的
+    单日掩码，格式与 `cells[].mask` 完全一致（`"0x%06x"`，第 1 节 = `0x000002`）。
+    存在的唯一理由：`POST /api/exceptions` 的 `new_mask` 必须是「第 N 节 → 位 N」
+    的单日掩码，而空白节次在 `cells` 里没有对应值——没有这个字段，前端只能自己
+    `1 << idx` 算，违反「前端不做位运算，mask 由服务端给」。
     """
     out: list[dict] = []
     for _dow, idx in day_cfg.enabled_slots(dow):
@@ -342,6 +348,9 @@ def _periods(day_cfg, dow: int) -> list[dict]:
                 "start": slot.get("start_time"),
                 "end": slot.get("end_time"),
                 "enabled": True,
+                # 单日掩码（1-based，第 N 节 → 位 N），与 cells[].mask 同格式。
+                # ⛔ 不是周位序（(dow-1)*16+(idx-1)）——混用会让课整节挪到别的日子。
+                "new_mask": "0x%06x" % (1 << idx),
             }
         )
     return out

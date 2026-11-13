@@ -362,6 +362,11 @@ function clearPrivateView() {
     node.appendChild(el('div', { cls: 'empty', text: pair[1] }));
   });
   if ($('slotSum')) setFoldState('slotSum', '尚未查询', '');
+  // rrr4vM：临时微调面板持有的是「上一个身份」的日程，401 后必须一起拆掉。
+  // 它挂在 body 上，不在 placeholders 里，不显式关闭会留在屏幕上。
+  closeExceptionPanel();
+  showBanner($('excMsg'), null);
+  showBanner($('excErr'), null);
 }
 
 /**
@@ -408,6 +413,9 @@ async function apiGet(pathname, params) {
     if (res.status === 401) handle401(body);   // handle401 内部必 throw
     const err = new Error(extractMessage(body) || ('HTTP ' + res.status + ' ' + res.statusText));
     err.status = res.status;   // F7：审批动作要能区分 403/404/409，如实提示
+    // rrr4vM：把原始响应体挂上——409 的结构化 exception_id 在里面，
+    // 前端不必再从 message 字符串里正则抠（抠法留作兜底）。
+    err.body = body;
     throw err;
   }
   return body;
@@ -433,6 +441,42 @@ async function apiPost(pathname, params, payload) {
     if (res.status === 401) handle401(body);   // handle401 内部必 throw
     const err = new Error(extractMessage(body) || ('HTTP ' + res.status + ' ' + res.statusText));
     err.status = res.status;   // F7：审批动作要能区分 403/404/409，如实提示
+    // rrr4vM：把原始响应体挂上——409 的结构化 exception_id 在里面，
+    // 前端不必再从 message 字符串里正则抠（抠法留作兜底）。
+    err.body = body;
+    throw err;
+  }
+  return body;
+}
+
+/**
+ * DELETE 请求（rrr4vM：撤销临时例外用）。
+ *
+ * 🔴 与 apiGet/apiPost 完全同构，只有两点不同：无 body、方法为 DELETE。
+ *    错误处理必须一致（尤其 401 要走进 handle401），否则「登录过期」会变成
+ *    一条没人处理的异常，页面上既不清数据也不提示。
+ *
+ * ⛔ mock 分支不支持 DELETE（mockRoute 只认 GET/POST）：调用方已按 USE_MOCK
+ *    不渲染入口，这里再兜一层，避免静默发到一个不存在的 mock 路由。
+ */
+async function apiDelete(pathname, params) {
+  if (USE_MOCK) {
+    throw new Error('离线演示（USE_MOCK）不支持 DELETE：本功能需连真实服务');
+  }
+  const url = new URL(pathname, window.location.origin);
+  Object.keys(params || {}).forEach(function (k) {
+    if (params[k] !== '' && params[k] != null) url.searchParams.set(k, params[k]);
+  });
+  const res = await fetch(url.toString(), {
+    method: 'DELETE',
+    headers: authHeaders({ Accept: 'application/json' }),
+  });
+  const body = await readBody(res);
+  if (!res.ok) {
+    if (res.status === 401) handle401(body);   // handle401 内部必 throw
+    const err = new Error(extractMessage(body) || ('HTTP ' + res.status + ' ' + res.statusText));
+    err.status = res.status;
+    err.body = body;           // 同上：DELETE 的错误也可能是结构化的
     throw err;
   }
   return body;
@@ -679,6 +723,15 @@ function dayMaskPeriods(hex, limit) {
   return out;
 }
 
+/**
+ * 🔴 掩码一律由服务端给（AGENTS §3.4「前端不做位运算」）。
+ *    - 周视图 grid 的掩码 → dayMaskPeriods() 只做**反解**（读位，不造值）；
+ *    - 「改到第 N 节」的目标掩码 → 直接取 detail.periods[].new_mask（服务端算好的
+ *      单日掩码，与 cells[].mask 同格式）。
+ *    2026-11-13 前这里有个 apiMaskForPeriod(idx) 用 Math.pow 自己造掩码，
+ *    在 periods 补了 new_mask 之后已删除 —— 前端不再有任何「造掩码」的代码。
+ */
+
 function renderWeek(schedules, conflicts) {
   const box = $('weekBox');
   const errBox = $('weekErr');
@@ -772,6 +825,34 @@ function renderWeek(schedules, conflicts) {
             text: '另 ' + (seen.length - 2) + ' 处（见下方冲突列表）',
           }));
         }
+      }
+      // ---- rrr4vM：临时微调入口 ----
+      // 🔴 两个入口都要：常显的「⋯」按钮 + 双击快捷方式。
+      //    只做双击＝功能不可发现（老师不知道能双击），卡面明令两个缺一不可。
+      // ⛔ USE_MOCK 下不挂：mockRoute 不支持 /api/schedules/detail 与 DELETE，
+      //    点出去必然 404，等于给离线演示埋一个假按钮。
+      const cellDate = days[di];
+      if (!USE_MOCK && objId && typeof cellDate === 'string' && cellDate) {
+        const more = el('button', {
+          cls: 'cellmore',
+          text: '⋯',
+          attrs: {
+            type: 'button',
+            title: '临时微调：取消 / 改到别的节次',
+            'aria-label': cellDate + ' 第' + p + '节 临时微调',
+          },
+        });
+        more.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          openExceptionPanel({ objectId: objId, date: cellDate, idx: p });
+        });
+        td.appendChild(more);
+        // 双击整格 = 同一个面板（快捷方式）。stopPropagation 挡不住 dblclick，
+        // 所以这里要显式排除按钮本身，否则双击「⋯」会开两次面板。
+        td.addEventListener('dblclick', function (ev) {
+          if (ev.target && ev.target.closest && ev.target.closest('.cellmore')) return;
+          openExceptionPanel({ objectId: objId, date: cellDate, idx: p });
+        });
       }
       tr.appendChild(td);
     }
@@ -952,6 +1033,23 @@ function renderConflictItem(item, idx) {
   const proposeBtn = el('button', { text: '提议改期', attrs: { type: 'button' } });
   proposeBtn.addEventListener('click', function () { openProposeModal(conflictTargets(item)); });
   acts.appendChild(proposeBtn);
+
+  // rrr4vM：第二个入口——冲突条目也能直接唤起「临时微调」面板。
+  // 为什么必须要有它：周视图格子的入口只能覆盖「当前查看对象」的占用格，
+  // 而冲突列表覆盖全部冲突点；且 renderWeek 有早退路径（本周无占用）时一个格子都没有。
+  if (!USE_MOCK) {
+    const excBtn = el('button', { text: '临时微调', attrs: { type: 'button' } });
+    excBtn.addEventListener('click', function () {
+      const anchor = conflictAnchor(item);
+      if (!anchor) {
+        // 不猜、不静默：定位不到就明说，绝不用一个假 id 去发请求
+        showBanner($('confErr'), '这条冲突没有可定位的对象/日期，无法打开临时微调。');
+        return;
+      }
+      openExceptionPanel(anchor);
+    });
+    acts.appendChild(excBtn);
+  }
 
   // 🔴 2026-11-12：删掉条目内的「一键消解」。
   //    它和标题栏那个按钮发的是**同一条** POST /api/resolve（data-idx 从未被读取，
@@ -1208,6 +1306,10 @@ const state = {
   status: 'unauth',  // runQn7：首屏状态条四态 unauth / loading / ok / error
   statusSeq: 0,      // runQn7：状态写入序号（旧请求后返回时不覆盖新状态）
   resolving: false,  // runQn7：消解进行中（两个「一键消解」入口共用一把锁）
+  // rrr4vM：临时微调面板句柄（null = 未打开）。挂 body，不随周视图重画销毁，
+  // 所以关闭必须显式：切组/切周/重载(loadAll) / 401(clearPrivateView) / 用户点关闭。
+  excPanel: null,
+  excBusy: false,    // 面板内的动作锁：连点两次会得到 409，也浪费一次写入
 };
 
 const $ = function (id) { return document.getElementById(id); };
@@ -1453,6 +1555,10 @@ function syncSlotForm() {
 async function loadAll() {
   const fatal = $('fatal');
   showBanner(fatal, null);
+  // rrr4vM：loadAll 是「切组 / 切周 / 重新加载 / 登录 / 消解后」的共同入口，
+  // 它会重建整张周视图与冲突列表 → 面板里的上下文（对象、日期、日程）当场作废，
+  // 必须在这里统一关闭，而不是让 renderWeek 去关（成功路径用的是轻量刷新，不关面板）。
+  closeExceptionPanel();
 
   // ---- runQn7：状态条进入「加载中」；seq 用来挡住「旧请求后返回覆盖新状态」----
   const seq = ++state.statusSeq;
@@ -2396,6 +2502,778 @@ async function askChat() {
     btn.disabled = false;
     btn.textContent = '问一下';
   }
+}
+
+/* =============================================================================
+ * 12. 临时微调（B9 · 卡 rrr4vM）
+ * -----------------------------------------------------------------------------
+ * 老师的一句话需求：「这节课今天不上了 / 挪到第 N 节」。
+ * 后端 `POST/DELETE/GET /api/exceptions` 早已全实现（B9），本段只补**界面入口**。
+ *
+ * 数据从哪来（🔴 三条都不能猜）：
+ *   · 这一格到底有哪几节日程 → `GET /api/schedules/detail`（docs/07 §4.1）
+ *     ⛔ 不能用 /api/schedules 的 grid：它是**按位或合并**后的掩码，
+ *        拿不到 schedule_id，也不知道一格里有几条日程。
+ *   · 「改到第 N 节」有哪些节次可选 → 同一个接口的 `periods[]`（已过
+ *     effective_slot_config，只含当天真正启用的节次）。
+ *     ⛔ 不查 period_slots / set_slots，⛔ 不硬编码 1..10。
+ *   · 当天有没有已经建好的例外 → `GET /api/exceptions?schedule_id=`（逐条查）。
+ *
+ * 掩码口径（错一位就整体错位且不报错）：
+ *   第 N 节 → 位 N，`0x000002` = 第 1 节。目标掩码**直接取** `periods[].new_mask`
+ *   （服务端算好的单日掩码，与 cells[].mask 同格式），前端一个字都不自己算。
+ *
+ * 错误文案一律用后端 message 原文（apiGet/apiPost/apiDelete 已把它塞进 e.message），
+ * 前端不改写、不兜底成别的操作。唯一的例外是 `effective=false`：后端不返回 message，
+ * 那条必须由前端说清楚「写了但没生效」，见 _resultToast()。
+ * 409 的结构化 `exception_id` 从 `e.body` 读（正则抠字符串只作兜底，见 _excIdFromError）。
+ * ========================================================================== */
+
+/** 冲突条目 → 面板定位参数 {objectId, date, idx}。定位不到返回 null（不猜一个假 id）。 */
+function conflictAnchor(item) {
+  if (!item || typeof item !== 'object') return null;
+  const date = str(item, 'date', '');
+  if (!date) return null;
+  // 顶层 object_id 恒有（b3_kernels 的 rep.object_id）；对象行被删过时才可能为空，
+  // 那时退回 a/b 两侧。两侧在 `_enrich` 里用的是同一个 obj，所以正常情况下相等。
+  let oid = str(item, 'object_id', '');
+  if (!oid && item.a) oid = str(item.a, 'object_id', '');
+  if (!oid && item.b) oid = str(item.b, 'object_id', '');
+  if (!oid) return null;
+  return { objectId: oid, date: date, idx: _firstReadablePeriod(item) };
+}
+
+/**
+ * 冲突点落在第几节。取 `readable` 里第一个合法节次；取不到返回 null。
+ * ⚠️ 一条冲突可能横跨两节（连堂），这里只取第一节用于**定位面板**，
+ *    面板内部一律以 detail 的 cells 为准，不依赖这个值。
+ */
+function _firstReadablePeriod(item) {
+  let rs = arr(item, 'readable');
+  if (!rs.length && item.a) rs = arr(item.a, 'readable');
+  for (let i = 0; i < rs.length; i++) {
+    const p = readablePeriod(rs[i]);
+    if (p !== null && p >= 1) return p;
+  }
+  return null;
+}
+
+/** ISO 日期 → 周几(1-7)。用本地日历算，不查后端（后端给的是「生效周几」，调休日会不同）。 */
+function _dowOfDate(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+  if (!m) return null;
+  const dt = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const w = dt.getDay();                 // 0 = 周日
+  return w === 0 ? 7 : w;
+}
+
+function _shortDate(iso) { return String(iso || '').slice(5); }
+
+function _dowName(iso) {
+  const d = _dowOfDate(iso);
+  return d ? dowLabel(d) : '';
+}
+
+/** 对象 id → 显示名（来自 /api/schedules 的 objects，不另打接口）。 */
+function _objectName(id) {
+  const list = Array.isArray(state.objects) ? state.objects : [];
+  for (let i = 0; i < list.length; i++) {
+    if (str(list[i], 'id', '') === id) return str(list[i], 'name', '');
+  }
+  return '';
+}
+
+/** 节次下拉里的一行文案。start/end 可能缺失 → 只拼存在的部分，绝不出现 null-null。 */
+function _periodLabel(p) {
+  const name = str(p, 'name', '') || ('第' + str(p, 'idx', '') + '节');
+  const st = str(p, 'start', '');
+  const en = str(p, 'end', '');
+  return (st && en) ? (name + '（' + st + '-' + en + '）') : name;
+}
+
+/** 冲突数 → 「23 处」/「3 组」。取不到返回 null（⛔ 不返回 0，0 会被读成「没有冲突」）。 */
+function _countText(body) {
+  const c = conflictCounts(body);
+  if (!c) return null;
+  return c.n + (c.unit.indexOf('处') >= 0 ? ' 处' : ' 组');
+}
+
+/**
+ * 取 409 的 exception_id。
+ *
+ * 🔴 优先读响应体的**结构化字段** `exception_id`（后端 `ApiError(..., extra=...)`
+ *    平铺进 JSON，docs/07 §11）。正则从 message 里抠只是兜底——留给「后端还没升级」
+ *    或将来别的接口仍在文案里带 id 的情形；字符串一改正则就静默失配，不能当主路径。
+ */
+function _excIdFromError(err) {
+  const body = err && err.body;
+  if (body && typeof body.exception_id === 'string' && body.exception_id) {
+    return body.exception_id;
+  }
+  const m = /exception_id=([A-Za-z0-9_\-]+)/.exec(String((err && err.message) || ''));
+  return m ? m[1] : null;
+}
+
+/* ---------------------------------------------------------------------------
+ * 面板生命周期
+ * ------------------------------------------------------------------------- */
+
+function closeExceptionPanel() {
+  const p = state.excPanel;
+  if (!p) return;
+  p.closed = true;
+  state.excPanel = null;
+  state.excBusy = false;
+  if (p.keyHandler) {
+    document.removeEventListener('keydown', p.keyHandler);
+    p.keyHandler = null;
+  }
+  closeModal(p.ov);
+}
+
+/**
+ * 打开临时微调面板。
+ * @param ctx {objectId, date, idx}  idx 可为 null（冲突条目定位不到节次时按「日期级」打开）
+ */
+async function openExceptionPanel(ctx) {
+  if (USE_MOCK) return;                       // mockRoute 不支持 detail / DELETE
+  if (!ctx || !ctx.objectId || !ctx.date) return;
+  closeExceptionPanel();
+
+  const md = modalOverlay();
+  md.box.className = 'modal exc';
+  const panel = {
+    ov: md.ov,
+    box: md.box,
+    objectId: String(ctx.objectId),
+    date: String(ctx.date),
+    idx: (ctx.idx === null || ctx.idx === undefined) ? null : Number(ctx.idx),
+    gid: state.groupId,          // 打开时的组：提交前比对，防止「开着面板切了组」
+    closed: false,
+    detail: null,
+    pairs: [],                   // [{schedule, periods[], exceptions[], excErr}]
+    err: null,                   // 加载/操作失败的原文
+    conflictExcId: null,         // 409 里抠出来的 exception_id（给「一键撤销」）
+    toast: null,                 // {kind:'ok'|'warn', text}
+    errBox: null,
+    keyHandler: null,
+  };
+  state.excPanel = panel;
+
+  // 点遮罩关闭（与 openProposeModal 同款：只在点到遮罩本身时关，点内容不关）
+  panel.ov.addEventListener('click', function (ev) {
+    if (ev.target === panel.ov) closeExceptionPanel();
+  });
+  // Esc 关闭。监听挂 document，所以关闭时必须显式移除，否则切组后仍会触发旧闭包。
+  panel.keyHandler = function (ev) {
+    if (ev.key === 'Escape') closeExceptionPanel();
+  };
+  document.addEventListener('keydown', panel.keyHandler);
+
+  _paintPanel(panel);          // 先出骨架（「正在读取…」）
+  await _loadPanelData(panel);
+  if (panel.closed) return;    // 加载途中被关掉：不要再往已 detach 的节点里画
+  _paintPanel(panel);
+}
+
+/** 面板骨架：标题 / 提示条 / 日程行 / 底部按钮。可反复重画。 */
+function _paintPanel(panel) {
+  if (panel.closed) return;
+  const box = panel.box;
+  clear(box);
+
+  box.appendChild(el('h3', { text: _panelTitle(panel) }));
+
+  // 结果提示（成功 / 写入未生效）
+  const toast = el('div', {
+    cls: 'banner ' + ((panel.toast && panel.toast.kind === 'warn') ? 'warn' : 'ok'),
+    attrs: { role: 'status', 'aria-live': 'polite' },
+  });
+  if (panel.toast && panel.toast.text) {
+    toast.appendChild(el('span', { text: panel.toast.text }));
+    toast.hidden = false;
+  } else {
+    toast.hidden = true;
+  }
+  box.appendChild(toast);
+
+  // 错误提示：后端 message 原文，一个字都不改
+  const errBox = el('div', { cls: 'banner error', attrs: { role: 'alert' } });
+  errBox.hidden = true;
+  if (panel.err) {
+    showBanner(errBox, panel.err);
+    if (panel.conflictExcId) {
+      const undo = el('button', { text: '撤销这条例外', attrs: { type: 'button' } });
+      undo.addEventListener('click', function () {
+        _doRevokeException(panel, null, panel.conflictExcId, undo);
+      });
+      errBox.appendChild(undo);
+    }
+  }
+  box.appendChild(errBox);
+  panel.errBox = errBox;
+
+  // 正文
+  if (!panel.detail) {
+    if (!panel.err) box.appendChild(el('p', { cls: 'note', text: '正在读取这一格的日程…' }));
+  } else {
+    _paintPanelBody(panel, box);
+  }
+
+  // 底部
+  const actions = el('div', { cls: 'actions' });
+  const refresh = el('button', { text: '刷新', attrs: { type: 'button' } });
+  refresh.addEventListener('click', function () { _reloadPanel(panel); });
+  actions.appendChild(refresh);
+  const closeBtn = el('button', { cls: 'primary', text: '关闭', attrs: { type: 'button' } });
+  closeBtn.addEventListener('click', closeExceptionPanel);
+  actions.appendChild(closeBtn);
+  box.appendChild(actions);
+}
+
+function _panelTitle(panel) {
+  const d = panel.detail;
+  const iso = str(d, 'date', '') || panel.date;
+  const realDow = _dowOfDate(iso);
+  const parts = [];
+  parts.push((_dowName(iso) ? _dowName(iso) + ' ' : '') + iso);
+  if (panel.idx !== null && isFinite(panel.idx)) parts.push('第' + panel.idx + '节');
+  const name = _objectName(panel.objectId);
+  if (name) parts.push(name);
+  let title = parts.join(' · ');
+  // 调休日：detail.day_of_week 是「生效周几」（as_of_dow），与日期本身的周几不同。
+  // 不标出来，老师会以为面板搞错了日子。
+  const effDow = d ? Number(d.day_of_week) : 0;
+  if (d && effDow && realDow && effDow !== realDow) {
+    title += '（按' + dowLabel(effDow) + '课表·调休）';
+  }
+  return title;
+}
+
+function _paintPanelBody(panel, box) {
+  // 显示规则：本次格子里有这个节次的日程 + 打开时就在这一格、现在却消失了的日程
+  // （后者正是「刚被取消 / 刚被改走」的那条，必须留着才撤得回去）。
+  const pairs = (panel.pairs || []).filter(function (p) {
+    if (p.wasShown) return true;
+    if (panel.idx === null) return (p.periods || []).length > 0;
+    return (p.periods || []).indexOf(panel.idx) >= 0;
+  });
+  if (!pairs.length) {
+    box.appendChild(el('div', {
+      cls: 'empty',
+      text: panel.idx === null
+        ? '这一天没有任何日程占用（没有可调整的课）。'
+        : '这一节现在没有日程（可能已被取消或撤销）。点「刷新」重新读取。',
+    }));
+    return;
+  }
+  box.appendChild(el('p', {
+    cls: 'note',
+    text: pairs.length > 1
+      ? '这一格有 ' + pairs.length + ' 条日程同时占用 —— 这就是冲突本身。请在下面选定要动的那一条。'
+      : '这一格有 1 条日程。',
+  }));
+
+  const ul = el('ul', { cls: 'exc-list' });
+  pairs.forEach(function (pair) { ul.appendChild(_paintExcRow(panel, pair)); });
+  box.appendChild(ul);
+}
+
+function _paintExcRow(panel, pair) {
+  const s = pair.schedule || {};
+  const sid = str(s, 'id', '');
+  const kind = str(s, 'kind', '');
+  const li = el('li', { cls: 'exc-row' });
+
+  const head = el('div', { cls: 'exc-title' });
+  head.appendChild(el('span', { text: str(s, 'title', '') || '（无标题）' }));
+  head.appendChild(el('span', {
+    cls: 'exc-kind' + (kind === 'periodic' ? '' : ' off'),
+    text: kind === 'periodic' ? '周期课' : (kind === 'once' ? '一次性活动' : '类型未知'),
+  }));
+  li.appendChild(head);
+
+  // ---- 这一天的占用状态 ----
+  if (pair.missing) {
+    // 取消之后这条日程当天不再产生占用，cells 里就没有它了。
+    // 但用户此刻最需要「撤销」，所以行要留着并说明原因。
+    li.appendChild(el('p', {
+      cls: 'note',
+      text: '这一天已无占用（整条已取消，或已改到别的节次）。下面是它当前的临时例外。',
+    }));
+  } else if (pair.periods && pair.periods.length) {
+    let line = '这一天占 ' + pair.periods.map(function (p) { return '第' + p + '节'; }).join('、');
+    // 连堂提示只对周期课有意义：一次性活动本来就不能取消/改点。
+    if (pair.periods.length > 1 && kind === 'periodic') {
+      line += '（连堂：取消会把这几节一起取消）';
+    }
+    if (panel.idx !== null && pair.periods.indexOf(panel.idx) < 0) {
+      line += '——已不在第' + panel.idx + '节（改点已生效）';
+    }
+    li.appendChild(el('p', { cls: 'note', text: line }));
+  }
+
+  // ---- 当天已有例外 ----
+  if (pair.excErr) {
+    // 🔴 查询失败绝不能当成「没有例外」：那样撤销按钮会静默消失，
+    //    用户只能靠再点一次取消拿到 409，而 409 里的 id 只在一句话里。
+    li.appendChild(el('p', { cls: 'exc-state bad', text: '当天例外没查到：' + pair.excErr }));
+  } else if (pair.exceptions && pair.exceptions.length) {
+    const ex = pair.exceptions[0];
+    let txt = '当天已有例外：';
+    if (str(ex, 'mode', '') === 'cancel') {
+      txt += '已取消';
+    } else {
+      const rs = arr(ex, 'readable');
+      txt += '已改到' + (rs.length
+        ? rs.map(function (r) {
+          const p = readablePeriod(r);
+          return p === null ? '（节次未知）' : ('第' + p + '节');
+        }).join('、')
+        : '其他节次');
+    }
+    li.appendChild(el('p', { cls: 'exc-state', text: txt }));
+  }
+
+  // ---- 操作按钮 ----
+  const acts = el('div', { cls: 'exc-acts' });
+  if (!sid) {
+    acts.appendChild(el('span', { cls: 'exc-hint', text: '这条日程没有 id，无法操作。' }));
+  } else if (kind !== 'periodic') {
+    // 后端对 kind != 'periodic' 直接 400（b9_kernels.py:234-239）：
+    // 前端不把「点了必炸」的按钮摆出来。
+    acts.appendChild(el('span', {
+      cls: 'exc-hint',
+      text: kind === 'once'
+        ? '一次性活动不支持临时取消/改点，请直接修改活动本身。'
+        : '日程类型未知（kind 为空），未提供临时微调。',
+    }));
+  } else if (pair.excErr) {
+    acts.appendChild(el('span', {
+      cls: 'exc-hint',
+      text: '当天例外没查到，先不提供操作（否则可能撤不回去）。',
+    }));
+  } else {
+    const cancelBtn = el('button', { text: '取消今天这节课', attrs: { type: 'button' } });
+    cancelBtn.addEventListener('click', function () {
+      _doCancelException(panel, pair, cancelBtn);
+    });
+    acts.appendChild(cancelBtn);
+
+    // 改到第 N 节：只列 detail.periods 里当天真正启用的节次，
+    // 并排除这条日程当天已经占着的节次（选它等于「原地不动」，后端会返回 effective=false）。
+    // 🔴 option 的 value 直接用服务端给的 new_mask（不是 idx）——
+    //    前端不再自己算掩码；服务端没给就不列这一项，绝无「前端兜底造 mask」的后路。
+    const sel = el('select', { attrs: { 'aria-label': '改到第几节' } });
+    sel.appendChild(el('option', { text: '选择节次…', attrs: { value: '' } }));
+    const per = arr(panel.detail, 'periods');
+    let usable = 0;
+    per.forEach(function (p) {
+      const idx = Number(p.idx);
+      const mask = str(p, 'new_mask', '');
+      if (!isFinite(idx) || idx < 1 || !mask) return;   // 没有 new_mask = 服务端不支持改点
+      if (pair.periods && pair.periods.indexOf(idx) >= 0) return;
+      usable += 1;
+      sel.appendChild(el('option', {
+        text: _periodLabel(p),
+        attrs: { value: mask, 'data-idx': String(idx) },
+      }));
+    });
+    const moveBtn = el('button', { text: '改到', attrs: { type: 'button' } });
+    const syncMove = function () { moveBtn.disabled = (sel.value === ''); };
+    sel.addEventListener('change', syncMove);
+    moveBtn.addEventListener('click', function () {
+      const opt = sel.options[sel.selectedIndex];
+      const mask = sel.value;
+      const idx = opt ? Number(opt.getAttribute('data-idx')) : NaN;
+      if (!mask || !isFinite(idx)) return;
+      _doMoveException(panel, pair, idx, mask, moveBtn);
+    });
+    syncMove();
+    if (!usable) {
+      moveBtn.disabled = true;
+      sel.disabled = true;
+      acts.appendChild(el('span', {
+        cls: 'exc-hint',
+        text: per.length ? '这一天的其它启用节次都已被这条日程占着，无法改点。' : '当天没有启用节次，无法改点。',
+      }));
+    }
+    acts.appendChild(sel);
+    acts.appendChild(moveBtn);
+
+    if (pair.exceptions && pair.exceptions.length) {
+      const exId = str(pair.exceptions[0], 'id', '');
+      const undoBtn = el('button', { cls: 'primary', text: '撤销', attrs: { type: 'button' } });
+      undoBtn.addEventListener('click', function () {
+        _doRevokeException(panel, pair, exId, undoBtn);
+      });
+      acts.appendChild(undoBtn);
+    }
+  }
+  li.appendChild(acts);
+  return li;
+}
+
+/** 面板数据：detail + 每条日程当天的例外。 */
+async function _loadPanelData(panel) {
+  panel.err = null;
+  panel.detail = null;
+  try {
+    panel.detail = await apiGet('/api/schedules/detail',
+      withGroup({ object_id: panel.objectId, date: panel.date }));
+  } catch (e) {
+    if (e && e.status === 401) return;      // handle401 已拆掉面板
+    panel.err = httpErrText(e);
+    return;
+  }
+  if (panel.closed) return;
+
+  const pairs = _mergePairs(panel, _panelPairs(panel));
+
+  await Promise.all(pairs.map(function (p) {
+    p.exceptions = p.exceptions || [];
+    const sid = str(p.schedule, 'id', '');
+    const kind = str(p.schedule, 'kind', '');
+    // 🔴 非周期日程**不查**例外：GET /api/exceptions 的 load_target 对
+    //    kind!='periodic' 直接 400（b9_kernels.load_target），那不是「查询失败」，
+    //    是这类日程本来就不能挂例外。照查会把一条必然的 400 显示成红字故障。
+    if (kind !== 'periodic') { p.excErr = null; p.exceptions = []; return null; }
+    if (!sid) { p.excErr = '日程 id 缺失'; return null; }
+    return apiGet('/api/exceptions', { schedule_id: sid }).then(function (body) {
+      p.exceptions = arr(body, 'items').filter(function (it) {
+        return str(it, 'date', '') === panel.date;
+      });
+      p.excErr = null;
+    }).catch(function (e) {
+      if (e && e.status === 401) return;    // 面板已被 401 拆掉
+      p.excErr = httpErrText(e);
+    });
+  }));
+  if (panel.closed) return;
+  panel.pairs = pairs;
+}
+
+/**
+ * detail.cells → 按日程去重的列表（连堂会出现在多格里，合并成一条并记录全部节次）。
+ * 这里**不按 panel.idx 过滤**：取消/改点之后，那条日程会从原格消失或挪到别的格，
+ * 若按格过滤，它连同「撤销」按钮一起从面板上消失 —— 用户再也撤不回去。
+ */
+function _panelPairs(panel) {
+  const cells = arr(panel.detail, 'cells');
+  const map = {};
+  const order = [];
+  cells.forEach(function (c) {
+    const idx = Number(c.idx);
+    if (!isFinite(idx)) return;
+    arr(c, 'schedules').forEach(function (s) {
+      const sid = str(s, 'id', '');
+      const key = sid || ('__noid_' + order.length);
+      if (!map[key]) {
+        map[key] = { schedule: s, periods: [] };
+        order.push(key);
+      }
+      if (map[key].periods.indexOf(idx) < 0) map[key].periods.push(idx);
+    });
+  });
+  return order.map(function (k) {
+    const p = map[k];
+    p.periods.sort(function (a, b) { return a - b; });
+    return p;
+  });
+}
+
+/**
+ * 把「本次读到的占用」并进面板的**稳定快照** `panel.seen`。
+ *
+ * 🔴 为什么不能直接用这一次的 cells：cells 只反映**当前占用**。
+ *    取消一节课之后，那条日程当天不再产生占用 → 从 cells 消失 →
+ *    面板上它的行（以及撤销按钮）一起没了。而那一刻恰恰是用户最需要「撤销」的时候。
+ *    所以：第一次见到的行一直留在面板上，只更新它的状态（missing / 已改到第N节）。
+ */
+function _mergePairs(panel, present) {
+  if (!panel.seen) panel.seen = {};
+  if (!panel.seenOrder) panel.seenOrder = [];
+  const presentKeys = {};
+  present.forEach(function (p) {
+    const sid = str(p.schedule, 'id', '');
+    const key = sid || ('__noid_' + panel.seenOrder.length);
+    presentKeys[key] = true;
+    let rec = panel.seen[key];
+    if (!rec) {
+      rec = { schedule: p.schedule, periods: [], wasShown: false };
+      panel.seen[key] = rec;
+      panel.seenOrder.push(key);
+    }
+    rec.schedule = p.schedule;               // 标题/kind 以最新为准
+    rec.periods = p.periods.slice();
+    rec.missing = false;
+    if (!rec.wasShown) {
+      rec.wasShown = (panel.idx === null) || (p.periods.indexOf(panel.idx) >= 0);
+    }
+  });
+  panel.seenOrder.forEach(function (key) {
+    if (presentKeys[key]) return;
+    panel.seen[key].missing = true;
+    panel.seen[key].periods = [];
+  });
+  return panel.seenOrder.map(function (k) {
+    const rec = panel.seen[k];
+    rec.exceptions = rec.exceptions || [];
+    rec.excErr = rec.excErr || null;
+    return rec;
+  });
+}
+
+/** 用户点「刷新」：先重画（清掉旧错误），再重读。 */
+async function _reloadPanel(panel) {
+  if (panel.closed || state.excBusy) return;
+  panel.toast = null;
+  panel.err = null;
+  panel.conflictExcId = null;
+  _paintPanel(panel);
+  await _loadPanelData(panel);
+  if (panel.closed) return;
+  _paintPanel(panel);
+}
+
+/* ---------------------------------------------------------------------------
+ * 三个动作
+ * ------------------------------------------------------------------------- */
+
+async function _doCancelException(panel, pair, btn) {
+  if (state.excBusy) return;
+  const payload = {
+    schedule_id: str(pair.schedule, 'id', ''),
+    date: panel.date,
+    mode: 'cancel',
+  };
+  // 🔴 group 放 **body**：api_exceptions 从 data.get("group") 取（api_exceptions.py:106）。
+  //    放 query 会被静默忽略 → 多组织账号落到默认组，写进别的组织。
+  if (state.groupId) payload.group = state.groupId;
+
+  const title = str(pair.schedule, 'title', '');
+  await _runPanelAction(panel, btn, {
+    headline: '已取消 ' + _shortDate(panel.date) + ' ' + _dowName(panel.date) + ' 第'
+      + (pair.periods && pair.periods.length ? pair.periods.join('、') + ' 节' : '') +
+      (title ? '：' + title : ''),
+    request: function () { return apiPost('/api/exceptions', {}, payload); },
+  });
+}
+
+async function _doMoveException(panel, pair, idx, mask, btn) {
+  if (state.excBusy) return;
+  if (!mask) {
+    // 服务端没给目标掩码就不发请求：绝不在这里自己造一个（那正是 2026-11-13 删掉的做法）。
+    panel.err = '服务端没有给出第 ' + idx + ' 节的目标掩码（periods[].new_mask 缺失），未发送请求。';
+    _paintPanel(panel);
+    return;
+  }
+  const payload = {
+    schedule_id: str(pair.schedule, 'id', ''),
+    date: panel.date,
+    mode: 'move',
+    new_mask: mask,          // 🔴 绝不能漏：漏了后端 400，前端也不许兜底成 cancel
+  };
+  if (state.groupId) payload.group = state.groupId;
+
+  const title = str(pair.schedule, 'title', '');
+  await _runPanelAction(panel, btn, {
+    headline: '已把 ' + _shortDate(panel.date) + ' ' + _dowName(panel.date) + ' 的'
+      + (title ? '「' + title + '」' : '这节课') + '改到第' + idx + '节',
+    request: function () { return apiPost('/api/exceptions', {}, payload); },
+  });
+}
+
+async function _doRevokeException(panel, pair, excId, btn) {
+  if (state.excBusy) return;
+  if (!excId) {
+    panel.err = '这条例外没有 id，无法撤销（请点「刷新」重新读取）。';
+    _paintPanel(panel);
+    return;
+  }
+  const title = pair ? str(pair.schedule, 'title', '') : '';
+  await _runPanelAction(panel, btn, {
+    headline: '已撤销 ' + _shortDate(panel.date) + ' ' + _dowName(panel.date) + ' 的临时例外'
+      + (title ? '（' + title + '）' : '') + '，课表已恢复',
+    exemptEffective: true,      // DELETE 不返回 effective，不能因此说「没生效」
+    request: function () { return apiDelete('/api/exceptions', { id: excId }); },
+  });
+}
+
+/**
+ * 三个动作共用的执行壳：加锁 → 发请求 → **重拉接口** → 重读面板 → 写结果。
+ *
+ * 🔴 顺序不能省：先 `refreshWeekAndConflicts()` 再写数字。
+ *    只改前端状态、不重拉接口，是最坏的一种假成功 —— 页面说「已取消」，
+ *    而冲突列表还是旧的，老师会以为系统没反应。
+ */
+async function _runPanelAction(panel, btn, opts) {
+  if (panel.closed) return;
+  if (panel.gid !== state.groupId) {
+    panel.err = '打开面板后切换了组，请关闭后重新打开（避免在 A 组发的请求落到 B 组）。';
+    _paintPanel(panel);
+    return;
+  }
+
+  // 动作前先记数（只在确实取到数时才算）
+  const before = _countText(state.conflicts);
+
+  state.excBusy = true;
+  _setPanelBusy(panel, true);
+  panel.err = null;
+  panel.toast = null;
+  panel.conflictExcId = null;
+
+  let body = null;
+  try {
+    body = await opts.request();
+  } catch (e) {
+    state.excBusy = false;
+    if (e && e.status === 401) return;        // handle401 已清场并拆面板
+    if (panel.closed) return;
+    _setPanelBusy(panel, false);
+    panel.err = httpErrText(e);               // 后端 message 原文
+    panel.conflictExcId = _excIdFromError(e);
+    _paintPanel(panel);
+    return;
+  }
+  state.excBusy = false;
+  if (panel.closed) return;
+  _setPanelBusy(panel, false);
+
+  // 1) 重拉接口（数字与周视图都必须来自接口）
+  const r = await refreshWeekAndConflicts();
+  if (panel.closed) return;
+
+  // 2) 重读面板（撤销按钮立即可用 —— 取消后该日程当天不再出现在 cells 里，
+  //    只有重读例外列表才拿得到撤销入口）
+  await _loadPanelData(panel);
+  if (panel.closed) return;
+
+  // 3) 文案
+  const after = r.ok ? _countText(state.conflicts) : null;
+  panel.toast = _resultToast(opts, body, before, after, r.ok);
+  panel.err = null;
+  panel.conflictExcId = null;
+  _paintPanel(panel);
+
+  // 4) 页面级一句话（面板可能在视口外，用户从冲突列表点进来的）
+  _showExcMsg(panel.toast.kind, panel.toast.text);
+}
+
+function _setPanelBusy(panel, on) {
+  if (!panel || !panel.box) return;
+  const nodes = panel.box.querySelectorAll('button, select');
+  for (let i = 0; i < nodes.length; i++) nodes[i].disabled = !!on;
+}
+
+/**
+ * 结果文案。
+ *
+ * 🔴 `effective=false` 是本功能唯一必须由前端自己措辞的地方 —— 后端这时
+ *    返回 200 且**没有** message，只说「写进去了但当天占用没变」
+ *    （周末 / 假期 / term 外 / 单双周不匹配 / 与原掩码相同）。
+ *    这里如果写「已取消」，就是彻底的假成功：页面说取消了，课表一点没动。
+ */
+function _resultToast(opts, body, before, after, ok) {
+  const eff = opts.exemptEffective
+    ? true
+    : ((body && typeof body.effective === 'boolean') ? body.effective : null);
+
+  if (eff === false) {
+    return {
+      kind: 'warn',
+      text: '例外已记录，但系统回报这一天课表没有变化（effective=false）：'
+        + '可能这一天不在这条日程的有效期内、单双周不匹配，或当天本来就没有这节课。'
+        + '可在这条日程上点「撤销」取消这次操作。',
+    };
+  }
+
+  let text = opts.headline + '。';
+  if (eff === null) {
+    text += '（接口没有回报是否生效，请核对课表。）';
+  }
+  if (ok && before && after) {
+    text += '本组冲突 ' + before + ' → ' + after + '。';
+  } else if (!ok) {
+    text += '冲突列表没刷新出来（原因见周视图上方的提示），上面的数字仍是旧的。';
+  } else {
+    text += '冲突数取不到，请看下方冲突列表。';
+  }
+  return { kind: eff === null ? 'warn' : 'ok', text: text };
+}
+
+/** 页面级一句话。节点自带 class，但 kind 会变，所以这里按 kind 改 className 再显示。 */
+function _showExcMsg(kind, text) {
+  const okNode = $('excMsg');
+  const errNode = $('excErr');
+  if (!okNode || !errNode) {
+    // 典型原因：浏览器还在用旧 index.html（版本号没改会这样）。至少不静默。
+    console.warn('[rrr4vM] 缺少 #excMsg/#excErr 节点，提示无法显示：', text);
+    return;
+  }
+  if (kind === 'error') {
+    errNode.className = 'banner error';
+    showBanner(errNode, text);
+    showBanner(okNode, null);
+    return;
+  }
+  okNode.className = 'banner ' + (kind === 'warn' ? 'warn' : 'ok');
+  showBanner(okNode, text);
+  showBanner(errNode, null);
+}
+
+/**
+ * 轻量刷新：只重拉 /api/schedules + /api/conflicts 并重画周视图与冲突列表。
+ *
+ * 🔴 为什么不用现有的 loadAll()：
+ *    1) loadAll 会调 renderObjectOptions，把 state.objectId **重置成当前组**
+ *       （app.js 的 renderObjectOptions 没有 keep 逻辑）→ 用户正看着某个班的格子，
+ *       操作完页面自己跳回组视图。
+ *    2) loadAll 内部把每个接口的失败都吞掉、恒返回 undefined，
+ *       调用方无法区分「刷新成功」和「刷新失败」→ 会拿旧 state 拼出假数字。
+ *    3) loadAll 还会多拉一次 /api/approvals，对一次「取消一节课」是多余的。
+ *
+ * @returns {Promise<{ok:boolean, schedules:object|null, conflicts:object|null}>}
+ */
+async function refreshWeekAndConflicts() {
+  const out = { ok: false, schedules: null, conflicts: null };
+  const seq = ++state.statusSeq;
+  const params = withGroup({});
+  const weekInput = $('weekSel');
+  const w = weekInput ? weekInput.value.trim() : '';
+  if (w) params.week = w;
+
+  try {
+    const both = await Promise.all([
+      apiGet('/api/schedules', params),
+      apiGet('/api/conflicts', withGroup({})),
+    ]);
+    out.schedules = both[0];
+    out.conflicts = both[1];
+  } catch (e) {
+    if (e && e.status === 401) return out;     // handle401 已清场
+    showBanner($('weekErr'),
+      '刷新失败：' + ((e && e.message) ? e.message : String(e))
+      + '（下面的冲突数与周视图可能还是操作前的，请点「重新加载」）');
+    return out;
+  }
+
+  state.schedules = out.schedules;
+  state.conflicts = out.conflicts;
+  state.days = arr(out.schedules, 'days');
+
+  if (seq === state.statusSeq) {
+    const cnt = conflictCounts(out.conflicts);
+    if (cnt) setStatus('ok', '本周 ', cnt.n, cnt.unit);
+    else setStatus('error', '冲突数没取到（接口未返回 count / raw_count）');
+  }
+  // 顺序有讲究：renderConflicts 填 state.hitDates，周视图的撞车标红依赖它。
+  renderConflicts(readCounts(out.conflicts));
+  renderWeek(out.schedules, out.conflicts);
+  syncResolveDisabled();
+  out.ok = true;
+  return out;
 }
 
 document.addEventListener('DOMContentLoaded', boot);
