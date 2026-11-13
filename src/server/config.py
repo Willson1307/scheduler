@@ -63,7 +63,10 @@ from scheduler.seeds import seed_demo  # noqa: E402
 #:    一起递增到 20261117。
 #: 2026-11-12（队评反馈）：页面改三栏布局 + 字体分层（衬线标题 / 黑体正文 / 等宽数字），
 #:    又改了 index.html，三处一起递增到 20261118。
-ASSET_VERSION = "20261119"
+#: 2026-11-13（卡 rrr4vM）：周视图格子加「⋯ / 双击」临时微调面板（消费
+#:    GET /api/schedules/detail + POST/DELETE /api/exceptions），改了 app.js 与 index.html，
+#:    三处一起递增到 20261120。
+ASSET_VERSION = "20261120"
 
 #: 默认数据库：与队长 L8 沙盒演示库同路径，现场「删 data/ → 一条命令 →
 #: 30 秒可演示」的闭环由本模块的自动初始化兜底（CP-G）。
