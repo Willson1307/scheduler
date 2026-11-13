@@ -413,6 +413,9 @@ async function apiGet(pathname, params) {
     if (res.status === 401) handle401(body);   // handle401 内部必 throw
     const err = new Error(extractMessage(body) || ('HTTP ' + res.status + ' ' + res.statusText));
     err.status = res.status;   // F7：审批动作要能区分 403/404/409，如实提示
+    // rrr4vM：把原始响应体挂上——409 的结构化 exception_id 在里面，
+    // 前端不必再从 message 字符串里正则抠（抠法留作兜底）。
+    err.body = body;
     throw err;
   }
   return body;
@@ -438,6 +441,9 @@ async function apiPost(pathname, params, payload) {
     if (res.status === 401) handle401(body);   // handle401 内部必 throw
     const err = new Error(extractMessage(body) || ('HTTP ' + res.status + ' ' + res.statusText));
     err.status = res.status;   // F7：审批动作要能区分 403/404/409，如实提示
+    // rrr4vM：把原始响应体挂上——409 的结构化 exception_id 在里面，
+    // 前端不必再从 message 字符串里正则抠（抠法留作兜底）。
+    err.body = body;
     throw err;
   }
   return body;
@@ -470,6 +476,7 @@ async function apiDelete(pathname, params) {
     if (res.status === 401) handle401(body);   // handle401 内部必 throw
     const err = new Error(extractMessage(body) || ('HTTP ' + res.status + ' ' + res.statusText));
     err.status = res.status;
+    err.body = body;           // 同上：DELETE 的错误也可能是结构化的
     throw err;
   }
   return body;
@@ -717,27 +724,13 @@ function dayMaskPeriods(hex, limit) {
 }
 
 /**
- * 「第 N 节」→ **单日掩码**十六进制串（rrr4vM，供 POST /api/exceptions 的 new_mask）。
- *
- * 🔴 口径只有一条（docs/07 §4.1 口径 4 / §11）：单日掩码是 **1-based**，
- *    第 N 节 → 位 N。0x000002 = 第 1 节、0x8 = 第 3 节、0x6 = 第 1+2 节。
- *    ⛔ **不是**周位序（(dow-1)*16+(N-1)，周三第 1 节 = 0x100000000）——
- *    按周位序算出来的值页面不报错、但整节课挪到别的日子去了。
- *
- * 🔴 为什么前端要自己算：服务端只在 cells[] 里给「有占用的节次」的 mask，
- *    空白节次（改点的目标）没有对应值可取，没有第二条路。
- *    这是本文件**第二个**受控掩码点（第一个是 dayMaskPeriods 反解）。
- *    用 Math.pow 而不是 << ，与 AGENTS §3.4「前端不做位运算」保持一致的意思：
- *    这里做的是「按位权取一个数」，不是掩码运算。
- *
- * 位 0 与超过 16 节一律拒绝：后端 b9_kernels.parse_api_mask 对这两种直接 400，
- * 前端不把必炸的值发出去（但也不替后端做业务校验，只挡明显不可能的值）。
+ * 🔴 掩码一律由服务端给（AGENTS §3.4「前端不做位运算」）。
+ *    - 周视图 grid 的掩码 → dayMaskPeriods() 只做**反解**（读位，不造值）；
+ *    - 「改到第 N 节」的目标掩码 → 直接取 detail.periods[].new_mask（服务端算好的
+ *      单日掩码，与 cells[].mask 同格式）。
+ *    2026-11-13 前这里有个 apiMaskForPeriod(idx) 用 Math.pow 自己造掩码，
+ *    在 periods 补了 new_mask 之后已删除 —— 前端不再有任何「造掩码」的代码。
  */
-function apiMaskForPeriod(idx) {
-  const n = Number(idx);
-  if (!isFinite(n) || n < 1 || n > 15) return null;   // 位 0 无意义；16 节/天是后端上限
-  return '0x' + Math.pow(2, n).toString(16);
-}
 
 function renderWeek(schedules, conflicts) {
   const box = $('weekBox');
@@ -2504,11 +2497,13 @@ async function askChat() {
  *   · 当天有没有已经建好的例外 → `GET /api/exceptions?schedule_id=`（逐条查）。
  *
  * 掩码口径（错一位就整体错位且不报错）：
- *   第 N 节 → 位 N，`0x000002` = 第 1 节。构造只有一处：apiMaskForPeriod()。
+ *   第 N 节 → 位 N，`0x000002` = 第 1 节。目标掩码**直接取** `periods[].new_mask`
+ *   （服务端算好的单日掩码，与 cells[].mask 同格式），前端一个字都不自己算。
  *
  * 错误文案一律用后端 message 原文（apiGet/apiPost/apiDelete 已把它塞进 e.message），
  * 前端不改写、不兜底成别的操作。唯一的例外是 `effective=false`：后端不返回 message，
  * 那条必须由前端说清楚「写了但没生效」，见 _resultToast()。
+ * 409 的结构化 `exception_id` 从 `e.body` 读（正则抠字符串只作兜底，见 _excIdFromError）。
  * ========================================================================== */
 
 /** 冲突条目 → 面板定位参数 {objectId, date, idx}。定位不到返回 null（不猜一个假 id）。 */
@@ -2580,9 +2575,19 @@ function _countText(body) {
   return c.n + (c.unit.indexOf('处') >= 0 ? ' 处' : ' 组');
 }
 
-/** 从 409 的 message 里抠 exception_id（后端只把它嵌在字符串里，没有结构化字段）。 */
-function _excIdFromMessage(msg) {
-  const m = /exception_id=([A-Za-z0-9_\-]+)/.exec(String(msg || ''));
+/**
+ * 取 409 的 exception_id。
+ *
+ * 🔴 优先读响应体的**结构化字段** `exception_id`（后端 `ApiError(..., extra=...)`
+ *    平铺进 JSON，docs/07 §11）。正则从 message 里抠只是兜底——留给「后端还没升级」
+ *    或将来别的接口仍在文案里带 id 的情形；字符串一改正则就静默失配，不能当主路径。
+ */
+function _excIdFromError(err) {
+  const body = err && err.body;
+  if (body && typeof body.exception_id === 'string' && body.exception_id) {
+    return body.exception_id;
+  }
+  const m = /exception_id=([A-Za-z0-9_\-]+)/.exec(String((err && err.message) || ''));
   return m ? m[1] : null;
 }
 
@@ -2834,28 +2839,41 @@ function _paintExcRow(panel, pair) {
 
     // 改到第 N 节：只列 detail.periods 里当天真正启用的节次，
     // 并排除这条日程当天已经占着的节次（选它等于「原地不动」，后端会返回 effective=false）。
+    // 🔴 option 的 value 直接用服务端给的 new_mask（不是 idx）——
+    //    前端不再自己算掩码；服务端没给就不列这一项，绝无「前端兜底造 mask」的后路。
     const sel = el('select', { attrs: { 'aria-label': '改到第几节' } });
     sel.appendChild(el('option', { text: '选择节次…', attrs: { value: '' } }));
     const per = arr(panel.detail, 'periods');
+    let usable = 0;
     per.forEach(function (p) {
       const idx = Number(p.idx);
-      if (!isFinite(idx) || idx < 1) return;
+      const mask = str(p, 'new_mask', '');
+      if (!isFinite(idx) || idx < 1 || !mask) return;   // 没有 new_mask = 服务端不支持改点
       if (pair.periods && pair.periods.indexOf(idx) >= 0) return;
-      sel.appendChild(el('option', { text: _periodLabel(p), attrs: { value: String(idx) } }));
+      usable += 1;
+      sel.appendChild(el('option', {
+        text: _periodLabel(p),
+        attrs: { value: mask, 'data-idx': String(idx) },
+      }));
     });
     const moveBtn = el('button', { text: '改到', attrs: { type: 'button' } });
     const syncMove = function () { moveBtn.disabled = (sel.value === ''); };
     sel.addEventListener('change', syncMove);
     moveBtn.addEventListener('click', function () {
-      const idx = Number(sel.value);
-      if (!sel.value || !isFinite(idx)) return;
-      _doMoveException(panel, pair, idx, moveBtn);
+      const opt = sel.options[sel.selectedIndex];
+      const mask = sel.value;
+      const idx = opt ? Number(opt.getAttribute('data-idx')) : NaN;
+      if (!mask || !isFinite(idx)) return;
+      _doMoveException(panel, pair, idx, mask, moveBtn);
     });
     syncMove();
-    if (!per.length) {
+    if (!usable) {
       moveBtn.disabled = true;
       sel.disabled = true;
-      acts.appendChild(el('span', { cls: 'exc-hint', text: '当天没有启用节次，无法改点。' }));
+      acts.appendChild(el('span', {
+        cls: 'exc-hint',
+        text: per.length ? '这一天的其它启用节次都已被这条日程占着，无法改点。' : '当天没有启用节次，无法改点。',
+      }));
     }
     acts.appendChild(sel);
     acts.appendChild(moveBtn);
@@ -3019,11 +3037,11 @@ async function _doCancelException(panel, pair, btn) {
   });
 }
 
-async function _doMoveException(panel, pair, idx, btn) {
+async function _doMoveException(panel, pair, idx, mask, btn) {
   if (state.excBusy) return;
-  const mask = apiMaskForPeriod(idx);
   if (!mask) {
-    panel.err = '第 ' + idx + ' 节超出可用范围（1..15），未发送请求。';
+    // 服务端没给目标掩码就不发请求：绝不在这里自己造一个（那正是 2026-11-13 删掉的做法）。
+    panel.err = '服务端没有给出第 ' + idx + ' 节的目标掩码（periods[].new_mask 缺失），未发送请求。';
     _paintPanel(panel);
     return;
   }
@@ -3092,7 +3110,7 @@ async function _runPanelAction(panel, btn, opts) {
     if (panel.closed) return;
     _setPanelBusy(panel, false);
     panel.err = httpErrText(e);               // 后端 message 原文
-    panel.conflictExcId = _excIdFromMessage(e && e.message);
+    panel.conflictExcId = _excIdFromError(e);
     _paintPanel(panel);
     return;
   }
