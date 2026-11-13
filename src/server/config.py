@@ -76,7 +76,18 @@ from scheduler.seeds import seed_demo  # noqa: E402
 #: 2026-11-13（卡 r4kJEe）：登录态改 localStorage（12h 滑动 / 24h 上限）+ 退出登录按钮，
 #:    改了 app.js 与 index.html，四处一起递增到 20261123。
 #:    🔴 20261114 在 11-12 已被 secSlots 用掉 —— 复用旧号等于没改，浏览器不会重拉。
-ASSET_VERSION = "20261201"
+ASSET_VERSION = "20261202"
+
+#: 产品版本（**给人看**：关于弹层 / 材料 / 答辩口径）。
+#:
+#: 🔴 与 `ASSET_VERSION` 是两件事，别再混：
+#:    · `ASSET_VERSION` 是**缓存键**，只用于 `app.js?v=`；它单调递增即可，
+#:      **不是发布日期**（实测 20261201 对应真实日期 2026-11-13，已经超前 ——
+#:      把它当日期显示会当场说错话）。
+#:    · `APP_VERSION` 是语义版本，回答「这是第几版」；`RELEASE_DATE` 是真日期。
+#: 发版时两处一起手改（本文件内相邻，避免漂移）；界面只显示这两个。
+APP_VERSION = "1.0.0"
+RELEASE_DATE = "2026-11-13"
 
 #: 默认数据库：与队长 L8 沙盒演示库同路径，现场「删 data/ → 一条命令 →
 #: 30 秒可演示」的闭环由本模块的自动初始化兜底（CP-G）。
@@ -115,6 +126,10 @@ class ServerConfig:
     today: date = field(default_factory=date.today)
     web_root: str = field(default_factory=lambda: os.path.join(repo_root(), "web"))
     asset_version: str = ASSET_VERSION
+    #: 展示用版本与发布日期（关于弹层读它）。⛔ 与 asset_version 不互换：
+    #: 前者是缓存键（不是日期），后者才是给人看的东西。
+    version: str = APP_VERSION
+    release_date: str = RELEASE_DATE
     seed_if_missing: bool = True  # 库文件不存在时自动初始化演示数据
     #: 演示模式（docs/17 §1 事故一加固）：True 时 run_server 把 today 固定到
     #: 学期第 1 周（读库 terms.start_date），避免消解窗口随系统日期漂移、
