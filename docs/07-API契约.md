@@ -104,6 +104,74 @@
 
 ---
 
+### 4.1 GET /api/schedules/detail?group=&object_id=&date=（2026-11-13 新增，卡 rYoMa7）
+
+> 只读接口。**不改 §4 的任何字段与行为**——§4 已冻结，契约测试裸调它。
+
+| 项 | 内容 |
+|---|---|
+| 请求 | `group`（可选，同 §4 口径）、`object_id`（必填）、`date`（必填，ISO `YYYY-MM-DD`） |
+| 响应 200 | `{"object_id":"obj_x","date":"2026-09-09","day_of_week":3,"periods":[...],"cells":[...]}` |
+| 401 | 未登录（`@require_auth`，嵌套错误体） |
+| 403 | `group` 越权（`resolve_authorized_org`，与 §4 同源） |
+| 404 | `object_id` 不存在 **或** 不属于该组织 |
+| 400 | `object_id` / `date` 缺失，`date` 格式非法（含 `20260909` 无连字符、`2026-02-30` 不存在） |
+
+**为什么要有它**：§4 的 `grid` 值是**按位或后**的掩码，拿不到 `schedule_id`。
+前端双击一格要挂「取消 / 改点」例外时，不知道该取消哪条日程；「改到第 N 节」
+也拿不到**当天实际生效**的节次清单（换作息那天节次会变）。
+
+响应体：
+
+```json
+{"object_id": "obj_772ed3e4d9bd4e05",
+ "date": "2026-09-09",
+ "day_of_week": 3,
+ "periods": [{"idx": 1, "name": "第1节", "start": "08:00", "end": "08:45", "enabled": true}],
+ "cells": [{"idx": 1, "mask": "0x000002",
+            "schedules": [{"id": "sch_a761a1b784be4d23", "title": "（冲突演示）高一(1)班 物理",
+                           "kind": "periodic", "role": "target"},
+                          {"id": "sch_ce36b60ceea44a97", "title": "全年级大会",
+                           "kind": "once", "role": "participant"}]}]}
+```
+
+**五条口径（写死，不得自改）**：
+
+| # | 口径 | 理由 |
+|---|---|---|
+| 1 | `cells[].schedules` 恒为**数组** | 一格被多条日程同时占用**就是冲突本身**。给单对象等于替前端静默挑一条，取消掉一条后另一条还在撞，老师以为调好了 |
+| 2 | 每条 schedule 必带 `kind` | §11 的 `POST /api/exceptions` 对 `kind != 'periodic'` 直接 400。once 活动（如「全年级大会」）挂双击必炸，前端靠这个字段决定能不能点 |
+| 3 | `object_id` 不属于该组织 → **404** | 返回 200 + 空 `cells` 等于告诉前端「这天没课」，是静默失效。404 也不泄漏别组织是否有该 id |
+| 4 | `mask` = **单日掩码**（1-based，第 N 节 → 位 N，`0x000002` = 第 1 节） | 与 §4 的 `grid`、§11 的 `new_mask` 同一口径。`OccupancyEntry.mask` 是**周位序**（周三第 1 节 = `0x100000000`），直接透出会与 grid 对不上、页面整体错位且不报错 |
+| 5 | `cells` **只给有占用的节次**；空白节次不出现在 `cells` 里，但仍出现在 `periods` 里 | 「有这一节、只是空着」与「这天没这一节」是两件事，不能混 |
+
+**数据来源（同源，不另写一套展开）**：
+
+| 字段 | 来源 |
+|---|---|
+| `cells` | `occupancy.build_occupancy(conn, org_id, date, date)` → 按 `object_id + date` 过滤 → `decode_mask` 拆位聚合 |
+| `periods` | `load_exceptions` → `effective_slot_config(exc, cfg, iso)` → `enabled_slots(dow)` |
+| `day_of_week` | **生效**周几：调休日取 `as_of_dow`，否则取 `date.isoweekday()` |
+| 403 | `b3_kernels.resolve_authorized_org`，与 §4 完全同源 |
+
+🔴 两条容易走偏的地方：
+
+1. **`periods` 不许直接查 `period_slots` 或 `set_slots`**。真相链是
+   `period_slots`（默认作息）→ `period_sets/set_slots`（special 日换作息）
+   → `effective_slot_config` 决定当天用哪套。硬编码 1..10 或查单表，
+   会在换作息那天给出**不存在的节次**（排不进去、接口 200、零报错）。
+   只给 `enabled = 1` 的节次，与 `SlotConfig.day_mask()` 同一份过滤，
+   所以 `periods` 的 idx 集合恒等于「占用掩码可能命中的位」。
+2. **`day_of_week` 与 `periods` 必须同源**。调休日（周六按周一上课）若用
+   `isoweekday()` 取节次，就会拿周六的槽位去配周一的占用 → periods 与 cells
+   对不上、页面错位且不报错。`expand_periodic` 用的是 `as_of_dow`，本接口照抄。
+
+**只读保证**：不写任何表、不新增 POST。`cells` 排序为 `idx` 升序、
+`schedules` 按 `(id, role)` 全序 ⇒ 同一请求两次调用逐字一致
+（日程 id 是 uuid，不定序会让同格两条日程顺序随机）。
+
+---
+
 ## 5. GET /api/conflicts?group=
 
 | 项 | 内容 |
