@@ -963,6 +963,19 @@ function dayMaskPeriods(hex, limit) {
  *    在 periods 补了 new_mask 之后已删除 —— 前端不再有任何「造掩码」的代码。
  */
 
+/**
+ * 格子里的课程名：去掉「高一(1)班 」这类对象名前缀。
+ * 周视图整列都是同一个对象，标题里再带一遍班名纯属冗余，还会把课程名挤没。
+ */
+function shortTitle(title, objName) {
+  const t = String(title || '');
+  if (objName && t.indexOf(objName + ' ') === 0) {
+    const rest = t.slice(objName.length + 1).trim();
+    return rest || t;
+  }
+  return t;
+}
+
 function renderWeek(schedules, conflicts) {
   const box = $('weekBox');
   const errBox = $('weekErr');
@@ -997,6 +1010,9 @@ function renderWeek(schedules, conflicts) {
   // ---- 主线：以 schedules.grid 为准，反解出「查看对象」每天的占用节次 ----
   // 🔴 格子是否存在只由 grid 决定；conflicts 只做叠加，不得决定格子是否存在。
   const grid = (schedules && typeof schedules.grid === 'object' && schedules.grid) ? schedules.grid : {};
+  // 🔴 2026-11-13：每格的**课程名**。<对象>|<日期> → ["语文","数学"]（后端纯追加字段）。
+  //    没有它，格子只能写对象名（整列都一样），老师会以为课表没加载。
+  const titles = (schedules && typeof schedules.titles === 'object' && schedules.titles) || {};
   const objId = state.objectId;
   const objName = objectName(objId);
   const occ = new Map();   // key = "dayIndex|period" → true（该格有课/活动）
@@ -1043,7 +1059,25 @@ function renderWeek(schedules, conflicts) {
       if (!occ.has(k)) { tr.appendChild(td); continue; }
       const hit = hits.get(k);
       td.className = hit ? 'occ hit' : 'occ';
-      td.appendChild(el('span', { cls: 'who', text: objName || '（占用）' }));
+      // 🔴 2026-11-13 两条修正（实测截图发现）：
+      //   1) 普通格：原来固定写 `objName`，而周视图是「单个对象的课表」，整列对象名
+      //      都一样 → 每格只显示「高一(1)班」四个字，看不到上的是什么课。改显示课程名。
+      //   2) 冲突格：**不再写课程名**。冲突对的文字里已经含日程名，再叠一层课程名
+      //      会让同一门课在格子里出现两三次，把行高撑到下一行去（截图实测）。
+      const cellTitles = hit ? [] : (titles[objId + '|' + days[di] + '|' + p] || []);
+      if (cellTitles.length) {
+        // 一格最多列 2 门：再多的挤不下，用「另 N 门」显式指路（不静默丢）
+        cellTitles.slice(0, 2).forEach(function (t) {
+          td.appendChild(el('span', { cls: 'who', text: shortTitle(t, objName) }));
+        });
+        if (cellTitles.length > 2) {
+          td.appendChild(el('span', { cls: 'who', text: '另 ' + (cellTitles.length - 2) + ' 门' }));
+        }
+      } else if (!hit) {
+        // 空白兜底：没有课程名又没有冲突定位（旧后端 / 定不到位）时才写对象名。
+        // 冲突格不写 —— 它的信息由下面的 vs 承担，再写对象名就是第三种重复。
+        td.appendChild(el('span', { cls: 'who', text: objName || '（占用）' }));
+      }
       if (hit) {
         // 同一格可能撞多条，去重后逐条列出（.length 驱动，不写死条数）
         const seen = [];
@@ -2151,6 +2185,11 @@ function bindEvents() {
       endSession({ clearStorage: true, msg: '已退出登录（仅本机丢弃凭证，服务端令牌未吊销）。' });
     });
   }
+  // 「关于」：页脚文字链 → 弹层。同样做 null 守卫，理由同上（旧 HTML + 新 JS）。
+  const aboutBtn = $('aboutBtn');
+  if (aboutBtn) {
+    aboutBtn.addEventListener('click', function () { openAbout(); });
+  }
   // r4kJEe：跨标签同步退出 —— 别的标签清了 sk_auth_v1 → 本标签同步回未登录。
   // 🔴 处理器内**只读不写**：写入会触发对方 storage 事件，形成 A→B→A 风暴。
   window.addEventListener('storage', function (e) {
@@ -2278,6 +2317,69 @@ function modalOverlay() {
 
 function closeModal(ov) {
   if (ov && ov.parentNode) ov.parentNode.removeChild(ov);
+}
+
+/**
+ * 「关于」弹层（2026-11-13）。
+ *
+ * 为什么要有：试用老师打开页面，不知道这是谁的、出了问题找谁；页面上原本
+ * 一条联系方式都没有，全靠队长在微信里逐个说。
+ *
+ * 🔴 版本号从 `/api/health` **动态取**，⛔ 前端不再写第二份 —— 四处同源已经
+ *    够容易错了（2026-11-13 就因为版本号撞号丢过一次缓存）。
+ * 🔴 反馈方式刻意不写手机号 / 邮箱明文：页面在公网上，写死等于给爬虫送名单。
+ * 🔴 内容一律 textContent，⛔ 不拼 HTML 字符串。
+ */
+function openAbout() {
+  const m = modalOverlay();
+  const box = m.box;
+  box.appendChild(el('h3', { text: '关于「时之交响」' }));
+
+  const list = el('div', { cls: 'about-list' });
+  const addRow = function (k, v) {
+    const r = el('div', { cls: 'about-row' });
+    r.appendChild(el('span', { cls: 'k', text: k }));
+    const val = el('span', { cls: 'v', text: v });
+    r.appendChild(val);
+    list.appendChild(r);
+    return val;
+  };
+
+  addRow('项目', '时之交响 TimeSymphony');
+  addRow('定位', '课表与活动统一冲突检测 · 一键消解');
+  const verVal = addRow('版本', '读取中…');
+  addRow('团队', '王思勋（队长 · 后端）· 张晋嘉（后端）· 汤涵洋溢（前端）');
+  addRow('反馈', '请通过发放本链接的老师转达');
+  addRow('数据', '页面为脱敏的试用数据，不含任何真实学生信息');
+  box.appendChild(list);
+
+  box.appendChild(el('p', {
+    cls: 'note',
+    text: '「脑洞上线」参赛作品 · 本地运行、断网可用。',
+  }));
+
+  const btnRow = el('div', { cls: 'field' });
+  const closeBtn = el('button', { cls: 'primary block', text: '关闭', attrs: { type: 'button' } });
+  btnRow.appendChild(closeBtn);
+  box.appendChild(btnRow);
+
+  function shutdown() {
+    document.removeEventListener('keydown', onKey);
+    m.ov.removeEventListener('click', onOverlay);
+    closeModal(m.ov);
+  }
+  function onKey(e) { if (e.key === 'Escape') shutdown(); }
+  function onOverlay(e) { if (e.target === m.ov) shutdown(); }
+  closeBtn.addEventListener('click', shutdown);
+  document.addEventListener('keydown', onKey);
+  m.ov.addEventListener('click', onOverlay);
+  closeBtn.focus();
+
+  // 版本号：拿不到就显示「—」，⛔ 绝不编一个数字
+  fetch('/api/health', { headers: { Accept: 'application/json' } })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) { verVal.textContent = (d && d.asset_version) ? d.asset_version : '—'; })
+    .catch(function () { verVal.textContent = '—'; });
 }
 
 /* ---- 提议改期 ---- */
@@ -2809,12 +2911,22 @@ async function querySlots() {
 /**
  * mode → 界面标识。未知枚举原样显示（§12.2 第 2 条：不内置白名单、不拦截渲染）。
  * 返回 {text, cls}：cls 只决定颜色（mode-llm 蓝 / mode-ref 橙），文案才是判据。
+ *
+ * 🔴 2026-11-13 改：原来的「手册原文（未启用 AI）」把两件事混成一句 ——
+ *    · 常见问题命中速查表（本来就不该调模型）
+ *    · AI 配了但这回没调成
+ *    老师看到前者会以为「AI 坏了」。现在按 degraded 分开说：
+ *    · 没配 / 不需要模型 → 「手册速查」
+ *    · 配了但没调成       → 「手册原文（AI 这次没响应）」
  */
-function chatModeTag(mode) {
+function chatModeTag(mode, degraded) {
   if (mode === 'llm') return { text: 'AI 回答', cls: 'mode-llm' };
-  if (mode === 'retrieval' || mode === 'template') {
-    return { text: '手册原文（未启用 AI）', cls: 'mode-ref' };
+  if (mode === 'retrieval') {
+    return degraded
+      ? { text: '手册原文（AI 这次没响应）', cls: 'mode-ref' }
+      : { text: '手册速查', cls: 'mode-ref' };
   }
+  if (mode === 'template') return { text: '手册里没有这条', cls: 'mode-ref' };
   return { text: '来源未知（mode=' + (mode || '缺失') + '）', cls: 'mode-ref' };
 }
 
@@ -2827,7 +2939,7 @@ function renderChat(body) {
 
   // ---- ① 来源标识：必须与答案同一屏可见，不折叠不隐藏 ----
   const head = el('div', { cls: 'chat-head' });
-  const tag = chatModeTag(str(body, 'mode', ''));
+  const tag = chatModeTag(str(body, 'mode', ''), body && body.degraded === true);
   head.appendChild(el('span', { cls: 'chat-mode ' + tag.cls, text: tag.text }));
   if (body && body.degraded === true) {
     // 后端「本可以调 AI 但没调成」→ 已降级为手册原文；如实说，别让人误以为是 AI 答的
@@ -2844,14 +2956,19 @@ function renderChat(body) {
 
   // ---- ③ 出处：哪份文档哪一节，供回查；缺失就说缺失，不编文档号 ----
   const sources = arr(body, 'sources');
-  // 一处出处都没有就整块不显示（不写「没给出」这种开发期旁白）
-  if (sources.length) {
+  // 🔴 2026-11-13 改：只显示给老师看的出处。`docs/07` 是接口契约（开发文档），
+  //    在老师面前出现「docs/07 §11」只会让人困惑，改为不显示；
+  //    `docs/30` 换成可读名「教师手册」。全部被过滤时整块不渲染，不留空壳。
+  const DOC_NAME = { 'docs/30': '教师手册' };
+  const shown = sources.filter(function (s) { return str(s, 'doc', '') !== 'docs/07'; });
+  if (shown.length) {
     const src = el('div', { cls: 'chat-src' });
     src.appendChild(el('span', { text: '出处：' }));
-    sources.forEach(function (s) {
-      const label = [str(s, 'doc', ''), str(s, 'section', '')]
+    shown.forEach(function (s) {
+      const doc = str(s, 'doc', '');
+      const label = [DOC_NAME[doc] || doc, str(s, 'section', '')]
         .filter(function (x) { return !!x; }).join(' ');
-      src.appendChild(el('span', { cls: 'chip', text: label || '（未标注文档/章节）' }));
+      src.appendChild(el('span', { cls: 'chip', text: label }));
     });
     card.appendChild(src);
   }
@@ -3260,7 +3377,7 @@ function _paintExcRow(panel, pair) {
     // 🔴 option 的 value 直接用服务端给的 new_mask（不是 idx）——
     //    前端不再自己算掩码；服务端没给就不列这一项，绝无「前端兜底造 mask」的后路。
     const sel = el('select', { attrs: { 'aria-label': '改到第几节' } });
-    sel.appendChild(el('option', { text: '选择节次…', attrs: { value: '' } }));
+    sel.appendChild(el('option', { text: '改到哪一节…', attrs: { value: '' } }));
     const per = arr(panel.detail, 'periods');
     let usable = 0;
     per.forEach(function (p) {
@@ -3275,7 +3392,15 @@ function _paintExcRow(panel, pair) {
       }));
     });
     const moveBtn = el('button', { text: '改到', attrs: { type: 'button' } });
-    const syncMove = function () { moveBtn.disabled = (sel.value === ''); };
+    // 🔴 2026-11-13：原来只在未选节次时 disabled，视觉上是个灰白按钮，和「取消」
+    //    并排看不出它能用 —— 老师因此以为「只能取消、不能改点」。现在选中节次后
+    //    按钮变主色（primary），形成「先选节次 → 按钮亮起 → 点它」的明确路径。
+    const syncMove = function () {
+      const on = sel.value !== '';
+      moveBtn.disabled = !on;
+      moveBtn.className = on ? 'primary' : '';
+      moveBtn.setAttribute('title', on ? '把这节课改到选中的节次' : '先在上面的下拉里选一节');
+    };
     sel.addEventListener('change', syncMove);
     moveBtn.addEventListener('click', function () {
       const opt = sel.options[sel.selectedIndex];

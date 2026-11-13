@@ -423,12 +423,19 @@ class TestScheduleDetail(unittest.TestCase):
 
     # -- 8. 不改 /api/schedules（契约 §4 已冻结）----------------------------
     def test_existing_schedules_contract_untouched(self):
-        """旧接口字段集合与 grid 值必须一位不变。"""
+        """旧接口字段与 grid 值必须一位不变（允许**追加**新字段，不许改旧字段）。
+
+        🔴 2026-11-13 改：原断言是 `set(old) == {"objects","days","grid"}`（严格相等）——
+        等于「永久禁止给这个接口加任何字段」。周视图要显示课程名必须追加 `titles`，
+        严格相等会把它判成破坏契约。改为「旧三字段必须存在 + 值逐字不变」，
+        既守住旧契约，又不把「追加」误判成「修改」。
+        """
         old = api_schedules.list_schedules(
             "GET", "/api/schedules", {"week": [WED]}, b"",
             {"authorization": self.admin_token}, None,
         )
-        self.assertEqual(set(old), {"objects", "days", "grid"})
+        for key in ("objects", "days", "grid"):
+            self.assertIn(key, old, f"旧字段缺失：{key}")
         self.assertEqual(old["days"][0], "2026-09-07")
         self.assertEqual(old["grid"][f"{self.class_id}|{WED}"], "0x000006")
 

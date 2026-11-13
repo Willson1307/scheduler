@@ -125,7 +125,15 @@ class TestKernelBasics(_EnvMixin, unittest.TestCase):
                          "不配 env 时一次 socket 都不能开（smoke --offline 底线）")
         self.assertEqual(result["mode"], "retrieval")
         self.assertEqual(result["degraded"], False)
-        self.assertIn("propose", result["answer"])
+        # 🔴 2026-11-13 改：原断言要求答案里出现 `propose` —— 但答案面向老师，
+        #    英文档位名属技术描述，正是本轮整改要删的东西。断言改为中文「提议」，
+        #    并补一条反向断言：技术词一旦被塞回文案，这里立刻红。
+        self.assertIn("提议", result["answer"])
+        self.assertIn("管理员批准", result["answer"])
+        for bad in ("propose", "approve", "effective", "mode=", "scope=",
+                    "termination", "429", "group_roles"):
+            self.assertNotIn(bad, result["answer"],
+                             f"老师看的答案里不该出现技术词：{bad}")
         for src in result["sources"]:
             self.assertEqual(set(src), {"doc", "section"})
 
@@ -145,7 +153,8 @@ class TestKernelBasics(_EnvMixin, unittest.TestCase):
             self.assertEqual(result["mode"], "template", msg=q)
             self.assertEqual(result["sources"], [], msg=q)
             self.assertIn("手册里没有这条", result["answer"], msg=q)
-            self.assertIn("请找项目负责人确认", result["answer"], msg=q)
+            # 2026-11-13：称呼从「项目负责人」改为「现场老师」（答案面向老师）。
+            self.assertIn("请找现场老师确认", result["answer"], msg=q)
 
     def test_empty_question(self):
         result = K.answer("   ")

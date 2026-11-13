@@ -187,8 +187,13 @@ def _load_objects(conn: sqlite3.Connection, org_id: str, object_ids: set[str]) -
 _KEY_SEP = "|"
 
 
-def _grid(conn: sqlite3.Connection, org_id: str, monday: date) -> dict[str, str]:
-    """展开占用 → 按 (对象, 日期) 合并 → 输出 grid。
+def _grid(conn: sqlite3.Connection, org_id: str, monday: date) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """展开占用 → 按 (对象, 日期) 合并 → 输出 (grid, titles)。
+
+    🔴 `titles`（2026-11-13 新增，纯追加字段）不是可有可无的装饰：
+    周视图是「单个对象的课表」，所有格子的对象名都一样（都写着「高一(1)班」），
+    一格不写课程名就等于什么都没显示 —— 老师看到的是「满屏班名 + 大片空白」，
+    会以为课表没加载。这里把每个格子的日程标题一并带出去。
 
     🔴 口径分工（本文件最关键的三行）：
       1. `build_occupancy(..., expand_groups=True)` —— 领域层把「组」展开成
@@ -212,16 +217,43 @@ def _grid(conn: sqlite3.Connection, org_id: str, monday: date) -> dict[str, str]
     entries = build_occupancy(conn, org_id, date_from, date_to, cfg=slot_cfg)
     merged = occupancy_map(entries)
 
+    # 日程标题（本组织全部，量级 = 本周日程数，一次查完不 N+1）
+    meta: dict[str, str] = {
+        r["id"]: r["title"]
+        for r in conn.execute(
+            "SELECT id, title FROM schedules WHERE org_id = ?", (org_id,)
+        ).fetchall()
+    }
+
     # 排序保证逐字一致：先按日期、再按 object_id（uuid4，必须显式定序）。
     out: dict[str, str] = {}
+    titles: dict[str, list[str]] = {}
     for object_id, d in sorted(merged, key=lambda k: (k[1], k[0])):
         mask = merged[(object_id, d)]
         if not mask:
             continue  # 防御：0 掩码画出来就是空格，不占响应体（假设 D）
-        out[_KEY_SEP.join((object_id, d.isoformat()))] = K.day_mask_hex(
-            m2.day_slots_mask(decode_mask(mask))
-        )
-    return out
+        key = _KEY_SEP.join((object_id, d.isoformat()))
+        out[key] = K.day_mask_hex(m2.day_slots_mask(decode_mask(mask)))
+
+    # 🔴 key 必须带**节次**（`对象|日期|idx`）：周视图是逐节次渲染的表格，
+    #    只按「对象+日期」索引会让第 1 节和第 2 节显示同一批课程名。
+    #    同一格多门课按「先 title 再 id」定序，保证两次请求逐字一致
+    #    （uuid4 不定序会让格子里的课程名随机换位）。
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for e in entries:
+        title = meta.get(e.schedule_id)
+        if not title:
+            continue  # 孤儿行：日程主体已不存在，画出来只会误导
+        for _dow, idx in decode_mask(e.mask):
+            key = _KEY_SEP.join((e.object_id, e.date.isoformat(), str(idx)))
+            grouped.setdefault(key, []).append((title, e.schedule_id))
+    for key, pairs in grouped.items():
+        uniq: list[str] = []
+        for title, _sid in sorted(pairs, key=lambda x: (x[0], x[1])):
+            if title not in uniq:
+                uniq.append(title)
+        titles[key] = uniq
+    return out, titles
 
 
 # ---------------------------------------------------------------------------
@@ -257,12 +289,15 @@ def list_schedules(method, path, query, body, headers, context=None):
         # 而不是返回空 grid（空 grid 会被前端当成「这周没课」，比报错更难解释）。
         _group, org_id = K.resolve_authorized_org(conn, user_id, group)
 
-        grid = _grid(conn, org_id, monday)
+        grid, titles = _grid(conn, org_id, monday)
         object_ids = {key.split(_KEY_SEP)[0] for key in grid}
         return {
             "objects": _load_objects(conn, org_id, object_ids),
             "days": [d.isoformat() for d in _week_days(monday)],
             "grid": grid,
+            # 🔴 2026-11-13 新增（纯追加，不动 grid）：<对象>|<日期> → 课程名列表。
+            #    没有它，周视图每格只能写对象名（全班都一样），看起来像没课。
+            "titles": titles,
         }
     finally:
         conn.close()
