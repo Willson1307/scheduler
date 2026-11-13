@@ -14,7 +14,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261124">
+<link rel="icon" type="image/png" href="favicon.png?v=20261129">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -336,7 +336,13 @@
     padding: var(--sp);
     margin-bottom: var(--sp);
   }
-  section > h2 {
+  /* 🔴 2026-11-13 修：原选择器写的是 `section > h2`（直接子元素），但实际结构是
+     `section > .sec-head > h2` / `section > .cl-head > h2` —— 这两条样式**从未生效**，
+     h2 一直用浏览器默认字号（约 25px），导致「主标题」和「提示语」一样大、一样重，
+     看着像两行平级标题。现在把三种结构都覆盖到。 */
+  section > h2,
+  .sec-head h2,
+  .cl-head h2 {
     margin: 0 0 8px;
     font-size: 1.1rem;
     display: flex;
@@ -353,7 +359,16 @@
   .statusbar,
   .tech-notes { box-shadow: 0 1px 3px rgba(31, 39, 51, .07); }
 
-  section > h2 .hint { font-size: var(--fs-xs); font-weight: 400; color: var(--c-text-dim); }
+  /* 提示语：小字、常规字重、黑体（不用衬线）—— 与主标题拉开层级。
+     同样修掉「只匹配 section > h2」的问题。 */
+  section > h2 .hint,
+  .sec-head h2 .hint,
+  .cl-head h2 .hint {
+    font-size: var(--fs-xs);
+    font-weight: 400;
+    color: var(--c-text-dim);
+    font-family: var(--font-sans);
+  }
   /* 区块标题统一走衬线（学术感），提示语仍黑体小字（信息层级） */
   section > h2, .sec-head h2, .cl-head h2 { font-family: var(--font-serif); }
   .sec-head {
@@ -362,6 +377,9 @@
     margin-bottom: 8px;
   }
   .sec-head h2 { margin: 0; }
+  /* 「查看对象」下拉：不给最小宽度时宽度由内容撑，长名字被截成几十像素、
+     点开也看不全。168px 够放「高一(1)班 · 10 人」这类最长的组合。 */
+  .sec-head .field select { min-width: 168px; }
 
   /* ---------- 提示条 ---------- */
   .banner {
@@ -707,6 +725,26 @@
   .exc-hint { font-size: var(--fs-xs); color: var(--c-warn); }
 
   footer { color: var(--c-text-dim); font-size: var(--fs-xs); text-align: center; margin-top: 16px; }
+
+  /* 页脚「关于」：长得像链接、实际是按钮（打开弹层，不是跳转）。
+     ⛔ 不用 <a href="#">——会污染地址栏与浏览器历史。 */
+  footer .footer-link {
+    background: none; border: 0; padding: 0; margin: 0;
+    color: inherit; font: inherit; cursor: pointer;
+    text-decoration: underline; text-underline-offset: 2px;
+  }
+  footer .footer-link:hover { color: var(--c-text); }
+
+  /* 「关于」弹层内容：左标签右值，窄屏自动换行，不用表格。 */
+  .about-list { margin: 4px 0 12px; }
+  .about-row {
+    display: flex; gap: 10px; padding: 7px 0;
+    border-bottom: 1px dashed var(--c-border);
+    font-size: var(--fs-sm); line-height: 1.55;
+  }
+  .about-row:last-child { border-bottom: 0; }
+  .about-row .k { flex: 0 0 52px; color: var(--c-text-dim); }
+  .about-row .v { flex: 1 1 auto; word-break: break-word; }
 
   /* ---------- 技术说明（页面底部，默认收起） ----------
      开发期的接口/字段/契约口径从主界面挪到这里：主界面只说老师能操作的话，
@@ -1066,28 +1104,14 @@
   </details>
 
   <footer>
-    <div>时之交响 TimeSymphony</div>
-    <div>本地运行 · 断网可用</div>
+    <div>时之交响 TimeSymphony · <button type="button" id="aboutBtn" class="footer-link">关于</button></div>
   </footer>
 </div>
 
-<!-- 版本号与后端 config.ASSET_VERSION 对齐；相对路径，无外链。
-     F3b 改了 app.js → 递增此版本号强制浏览器拿新文件（配合 no-cache + ETag）。
-     2026-11-11 接 logo：ASSET_VERSION 与上方 favicon 的 ?v= 同改为 20261113。
-     2026-11-12 新增「查空位」面板（secSlots）改了 app.js：两处同改为 20261114。
-     2026-11-11 新增「问一下」面板（secChat，POST /api/chat）改了 app.js：两处同改为 20261115。
-     2026-11-12 界面文案清理（开发期话术收进底部折叠区）改了 app.js + index.html：两处同改为 20261116。
-     2026-11-12 卡 runQn7：改名 + 首屏状态条 + 卡片对比 + 折叠 + 芯片，改了 app.js + index.html：三处同改为 20261117
-              2026-11-12 队评反馈：三栏布局 + 字体分层（衬线标题/黑体正文/等宽数字）+ 焦点样式，改了 index.html：三处同改为 20261118
-               （四处 = brand-icon.js?v= / 本行 app.js?v= / 上方 favicon?v= / config.py 的 ASSET_VERSION）。
-     2026-11-12 页头改用图标本体（新增 brand-icon.js，app.js 加挂载）：四处同改为 20261120。
-     2026-11-13 卡 rrr4vM：周视图格子加「⋯ / 双击」临时微调面板：四处同改为 20261121。
-     2026-11-13 卡 rrr4vM 追加：改点掩码改用服务端 periods[].new_mask（前端不再自算）：四处同改为 20261122。
-     2026-11-13 卡 r4kJEe：登录态改 localStorage（12h 滑动 / 24h 上限）+ 退出登录按钮：四处同改为 20261123。
-     2026-11-13 修：20261123 那版把注释闭合符放错位置（放在「（四处 = …）」那行末尾），
-     后面三行版本说明掉出注释、被当正文渲染在页脚下面 —— 就是「页底多出一串四处同改为…」。
-     现在闭合符只在最后一条版本说明之后出现一次，四处版本推到 20261124。 -->
-<script src="brand-icon.js?v=20261124"></script>
-<script src="app.js?v=20261124"></script>
+<!-- 版本号唯一来源 = src/server/config.py 的 ASSET_VERSION；本文件三处 ?v= 必须与它一致。
+     版本沿革写在 config.py 的注释里（服务端文件，不会随页面下发）。
+     ⛔ 不要在这里记流水：这是 HTML 注释，闭合符写错一行就会整段漏到页面上（2026-11-13 已踩过）。 -->
+<script src="brand-icon.js?v=20261129"></script>
+<script src="app.js?v=20261129"></script>
 </body>
 </html>
