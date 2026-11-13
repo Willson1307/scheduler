@@ -147,16 +147,21 @@ class TestKernelBasics(_EnvMixin, unittest.TestCase):
         self.assertIn("手册原文", result["answer"])
 
     def test_out_of_manual_says_dont_know(self):
-        """🔴 验收 3：3 个手册外问题 → 明确说不知道，sources 为空。"""
+        """🔴 验收 3：3 个手册外问题 → 明确说不知道，sources 为空。
+
+        2026-11-13 第二次改（队长口径）：**「手册里没有这条，请找开发者确认」整句删除**。
+        对老师来说它像报错（「你问的东西不存在」+「去找一个你不知道是谁的人」）。
+        新文案不否定、给下一步，且不出现「手册」二字（老师不知道什么手册）。
+        下面两条反向断言就是防它被改回去。
+        """
         for q in _OUT_OF_MANUAL:
             result = K.answer(q)
             self.assertEqual(result["mode"], "template", msg=q)
             self.assertEqual(result["sources"], [], msg=q)
-            self.assertIn("手册里没有这条", result["answer"], msg=q)
-            # 2026-11-13（队长口径）：称呼从「项目负责人」→「现场老师」→ 统一为
-            # 「开发者」—— 这条问答的用户是老师，出事该找的是系统开发者，
-            # 不是现场某位老师，也不是项目负责人这种模糊说法。
-            self.assertIn("请找开发者确认", result["answer"], msg=q)
+            self.assertIn("暂时答不上来", result["answer"], msg=q)
+            self.assertIn("关于", result["answer"], msg=q)  # 指向页面底部的反馈入口
+            self.assertNotIn("手册里没有这条", result["answer"], msg=q)
+            self.assertNotIn("请找开发者确认", result["answer"], msg=q)
 
     def test_guide_questions_answerable_offline(self):
         """导览类问题必须离线可答（2026-11-13 实测「怎么使用此系统」被判「没有这条」）。
@@ -222,6 +227,26 @@ class TestLlmLayer(_EnvMixin, unittest.TestCase):
     def tearDown(self):
         self._restore_env()
         K.reset_corpus_cache()
+
+    def test_guide_intent_skips_polish(self):
+        """导览类（no_polish）即使配了 LLM 也不许调模型。
+
+        2026-11-13 实测：润色「怎么使用此系统」要 9.2 秒，且模型把操作步骤压成
+        一句、丢掉「双击格子」。导览是清单不是文案 —— 必须 0 延迟返回原文。
+        """
+        os.environ["SCHEDULER_LLM_BASE"] = "https://llm.example.invalid/v4"
+        os.environ["SCHEDULER_LLM_KEY"] = "sk-xxxx"
+        called = {"n": 0}
+
+        def fake_polish(question, passages, timeout_s=8.0):
+            called["n"] += 1
+            return "不该被调用"
+
+        result = K.answer("怎么使用此系统", polish=fake_polish)
+        self.assertEqual(called["n"], 0, "导览类意图不许调模型")
+        self.assertEqual(result["mode"], "retrieval")
+        self.assertEqual(result["degraded"], False)
+        self.assertIn("第一次用", result["answer"])
 
     def test_llm_success_sets_mode_llm(self):
         os.environ["SCHEDULER_LLM_BASE"] = "https://llm.example.invalid/v4"
@@ -446,12 +471,16 @@ class TestChatAPI(_EnvMixin, unittest.TestCase):
         self.assertTrue(result["answer"].strip())
 
     def test_out_of_manual_is_200_not_4xx(self):
-        """「手册没写」是正常业务态：200 + mode=template，⛔ 不是错误码。"""
+        """「答不上来」是正常业务态：200 + mode=template，⛔ 不是错误码。
+
+        2026-11-13 改：文案从「手册里没有这条」换成「暂时答不上来」，
+        断言跟着换；语义（200 + template）不变。
+        """
         result = self._call({"question": "学校食堂几点开门？"},
                             {"authorization": self.teacher_token})
         self.assertIsInstance(result, dict)
         self.assertEqual(result["mode"], "template")
-        self.assertIn("手册里没有这条", result["answer"])
+        self.assertIn("暂时答不上来", result["answer"])
 
     def test_group_in_scope_ok(self):
         result = self._call({"question": "怎么调课", "group": self.class_id},
