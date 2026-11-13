@@ -331,10 +331,46 @@ function authHeaders(base) {
 }
 
 /**
- * 401 统一处理：清 token、弹出登录栏、给出可读错误。
+ * 清空「必须登录才能看」的已渲染内容。
+ *
+ * 🔴 2026-11-13 补（外部复审发现）：401 原先只清 token 与状态条，**不清 DOM** ——
+ *    账号被停用/会话失效后，屏幕上仍留着上一个身份的课表、23 处冲突与变更请求。
+ *    状态条写着「未登录」、内容区却列着具体课表，这是最坏的一种错数据：
+ *    老师会以为「还能看」，评委看到的是已经失效的数据。
+ * 原则：**取不到就清空**，绝不留「看起来还能用」的旧数据。
+ */
+function clearPrivateView() {
+  state.objects = [];
+  state.days = [];
+  state.hitDates = [];
+  state.schedules = null;
+  state.conflicts = null;
+  state.lastResult = null;
+  state.slotTarget = '';
+  const placeholders = [
+    ['weekBox', '登录后查看课表。'],
+    ['confBox', '登录后查看冲突。'],
+    ['reqBox', '登录后查看变更请求。'],
+    ['resBox', '尚未执行消解。'],
+    ['chatBox', '尚未提问。'],
+    ['slotBox', '登录后可查询空位。'],
+  ];
+  placeholders.forEach(function (pair) {
+    const node = $(pair[0]);
+    if (!node) return;
+    clear(node);
+    node.appendChild(el('div', { cls: 'empty', text: pair[1] }));
+  });
+  if ($('slotSum')) setFoldState('slotSum', '尚未查询', '');
+}
+
+/**
+ * 401 统一处理：清 token、清已渲染的私有数据、弹出登录栏、给出可读错误。
  * 🔴 绝不静默当成「空数据」——那会把「没登录」伪装成「没有冲突」。
  */
 function handle401(body) {
+  // 先清内容再改状态：避免任何一帧里出现「未登录 + 旧课表」的组合
+  clearPrivateView();
   state.token = '';
   state.user = null;
   // runQn7：旧冲突数据当场作废，状态条退回「未登录」——
