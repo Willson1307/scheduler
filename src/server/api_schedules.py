@@ -70,6 +70,22 @@ entry 直接 `format(mask,'x')` 都与正确值不符：
 
 签名约定（写死，不得改）：handle(method, path, query, body, headers, context=None)。
 只用 Python 标准库。
+
+---------------------------------------------------------------------------
+追加（卡 rYoMa7）：同文件另挂一个**只读**接口
+`GET /api/schedules/detail?group=&object_id=&date=`（docs/07 §4.1）
+---------------------------------------------------------------------------
+`/api/schedules` 的 grid 值是**按位或后**的掩码，前端双击一格时不知道要
+取消哪一条日程（一格多条日程正是冲突本身），也拿不到「这天实际生效的节次」。
+detail 把这两件事一次给出：`cells[]`（按节次拆开、每格带 `schedules[]` 数组）
++ `periods[]`（当天生效作息）。
+
+🔴 三条不钉就会静默失效的点：
+  1. `cells[].schedules` 必须是**数组**——给单对象等于替前端静默挑一条；
+  2. 每条 schedule 必须带 `kind`——`POST /api/exceptions` 对
+     `kind != 'periodic'` 直接 400，前端要靠它决定双击能不能点；
+  3. `object_id` 不属于该组织必须 **404**——返回空 `cells` 等于
+     告诉前端「这天没课」（假阴性，本项目最痛形态）。
 """
 
 from __future__ import annotations
@@ -83,7 +99,12 @@ from . import b3_kernels as K
 from . import config
 from .http_api import ApiError
 
-from scheduler.occupancy import build_occupancy, occupancy_map
+from scheduler.occupancy import (
+    build_occupancy,
+    effective_slot_config,
+    load_exceptions,
+    occupancy_map,
+)
 from scheduler.slots import decode_mask, load_slot_config
 from scheduler.solver import m2
 
@@ -247,6 +268,218 @@ def list_schedules(method, path, query, body, headers, context=None):
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# detail：单格日程归属 + 当天生效作息（卡 rYoMa7 / docs/07 §4.1）
+# ---------------------------------------------------------------------------
+
+#: detail 的必填查询参数。缺一个就是 400，绝不用「空结果」兜底。
+_DETAIL_REQUIRED = ("object_id", "date")
+
+
+def _param(query: dict, name: str) -> str | None:
+    """单值参数；缺省/空串/全空白 → None（parse_qs 给的是 list）。"""
+    vals = query.get(name)
+    if not vals:
+        return None
+    return (vals[0] or "").strip() or None
+
+
+def _required(query: dict, name: str) -> str:
+    v = _param(query, name)
+    if v is None:
+        raise ApiError(400, f"缺少参数 {name}")
+    return v
+
+
+def _parse_day(query: dict) -> date:
+    """`date` → date；缺省/格式错/日期不存在 → 400。
+
+    🔴 与 `_parse_week` 同样用严格正则，不用 `date.fromisoformat` 的宽松解析：
+    Python 3.11+ 会接受 `20260909`（无连字符），契约写的是 ISO `YYYY-MM-DD`，
+    宽松解析会让前端拼错参数却查不出问题。
+    """
+    raw = _required(query, "date")
+    if _WEEK_RE.match(raw) is None:
+        raise ApiError(400, f"date 需要 YYYY-MM-DD 格式，收到 {raw!r}")
+    try:
+        return date.fromisoformat(raw)
+    except ValueError as exc:  # 正则过了但日期不存在（如 2026-02-30）
+        raise ApiError(400, f"date 不是合法日期：{raw!r}") from exc
+
+
+def _require_object_in_org(conn: sqlite3.Connection, org_id: str, object_id: str) -> None:
+    """object_id 必须属于 org_id，否则 **404**。
+
+    🔴 为什么不返回 200 + 空 cells：空 cells 的语义是「这天这个对象没课」，
+    前端双击空格会当成「可以排」。把「对象不存在/不属于本组织」也映射成
+    空 cells，就是把一次越权/拼错参数伪装成「没课」——静默失效。
+    对象不存在与不属于本组织都归 404：对调用方而言是同一件事
+    （「你问的这个 id 在我这儿查不到」），且 404 不会泄漏别组织是否有该 id。
+    """
+    row = conn.execute("SELECT org_id FROM objects WHERE id = ?", (object_id,)).fetchone()
+    if row is None or row["org_id"] != org_id:
+        raise ApiError(404, f"对象不属于该组织：{object_id}")
+
+
+def _periods(day_cfg, dow: int) -> list[dict]:
+    """当天**生效**的节次清单（已过 `effective_slot_config`）。
+
+    🔴 只给 `enabled = 1` 的节次：`SlotConfig.enabled_slots()` 与
+    `day_mask()` 是同一份过滤（`expand_periodic` 用的就是 `day_mask`），
+    所以 `periods` 的 idx 集合恒等于「占用掩码可能命中的位」。
+    若把停用节次也列出来，前端「改到第 N 节」会让用户选到一条排不进去的
+    节次——正是本项目最痛的静默失效。`enabled` 字段仍保留（契约字段名写死），
+    当前恒为 true，将来若开放「停用但仍要展示」可直接改这一处。
+    """
+    out: list[dict] = []
+    for _dow, idx in day_cfg.enabled_slots(dow):
+        slot = day_cfg.get(dow, idx) or {}
+        out.append(
+            {
+                "idx": idx,
+                # 换作息方案（period_sets/set_slots）时没有 name 列，回退成「第N节」
+                "name": slot.get("name") or f"第{idx}节",
+                "start": slot.get("start_time"),
+                "end": slot.get("end_time"),
+                "enabled": True,
+            }
+        )
+    return out
+
+
+def _cells(
+    conn: sqlite3.Connection,
+    entries,
+    object_id: str,
+    d: date,
+    dow: int,
+) -> list[dict]:
+    """占用条目 → 按节次拆开的 cells（每格带完整的 schedules 数组）。
+
+    🔴 聚合口径：
+      1. 只认真实占用（`build_occupancy` 的 entry），**不另写一套展开**——
+         否则「detail 说这格有课、grid 说没有」两套事实互相打架。
+      2. `decode_mask` 出来的 `(dow, idx)` 的 dow 必须等于当天生效 dow；
+         不等说明掩码里混进了别的车道（数据异常），跳过而不是算到别的节次上。
+      3. 同一节次可能被**多条日程**占用 —— 这正是冲突本身。
+         所以 `schedules` 是**数组**，绝不给单对象。
+      4. 排序：cells 按 idx 升序；schedules 按 (id, role) 全序 ⇒ 两次调用逐字一致
+         （schedule id 是 uuid，不定序会导致同格两条日程顺序随机）。
+    """
+    by_idx: dict[int, list[tuple[str, str]]] = {}
+    for e in entries:
+        if e.object_id != object_id or e.date != d:
+            continue
+        for bit_dow, idx in decode_mask(e.mask):
+            if bit_dow != dow:
+                continue  # 防御：掩码不该含别的 dow 的位
+            by_idx.setdefault(idx, []).append((e.schedule_id, e.role))
+
+    if not by_idx:
+        return []  # 空白日：cells 为空数组（前端据此判断「这天没课」）
+
+    ids = sorted({sid for pairs in by_idx.values() for sid, _role in pairs})
+    sql = "SELECT id, title, kind FROM schedules WHERE id IN ({})".format(
+        ",".join("?" * len(ids))
+    )
+    meta = {
+        r["id"]: {"title": r["title"], "kind": r["kind"]}
+        for r in conn.execute(sql, ids).fetchall()
+    }
+
+    cells: list[dict] = []
+    for idx in sorted(by_idx):
+        # 去重但保序：同一日程若对该对象挂了两个 role，两条都如实给出，
+        # 完全重复的 (id, role) 只留一条（否则前端会出现重复列）。
+        pairs = list(dict.fromkeys(by_idx[idx]))
+        schedules = [
+            {
+                "id": sid,
+                # 主表行缺失时给空串而不是丢条目：丢一条 = 少报一条冲突
+                "title": meta.get(sid, {}).get("title", ""),
+                "kind": meta.get(sid, {}).get("kind", ""),
+                "role": role,
+            }
+            for sid, role in sorted(pairs)
+        ]
+        cells.append(
+            {
+                "idx": idx,
+                # 单日掩码（1-based，period N → 位 N），与 /api/schedules 的 grid
+                # 同一口径：0x000002 = 第 1 节。⛔ 不是 entry.mask 的周位序。
+                "mask": K.day_mask_hex(m2.day_slots_mask([(dow, idx)])),
+                "schedules": schedules,
+            }
+        )
+    return cells
+
+
+def _detail(conn: sqlite3.Connection, org_id: str, object_id: str, d: date) -> dict:
+    """某对象某天的明细（只读）。
+
+    🔴 两条「同源」是硬要求，任何一条走偏都会产出与主路径不一致的事实：
+      1. 占用 = `build_occupancy(conn, org_id, d, d)`（与 /api/conflicts、
+         /api/schedules 同一个函数），本文件不重写展开逻辑。
+      2. 节次 = `load_exceptions` → `effective_slot_config`（与
+         `expand_periodic` 同一条真相链），⛔ 不直接查 `period_slots`/`set_slots`。
+
+    `dow` 取**生效**周几（调休日 = `as_of_dow`），与 `expand_periodic:319-321`
+    完全同一口径。若这里改用 `d.isoweekday()`，调休日（周六按周一上课）就会
+    拿周六的槽位去配周一的占用 —— periods 与 cells 对不上，页面错位且不报错。
+    """
+    iso = d.isoformat()
+    slot_cfg = load_slot_config(conn, org_id)
+    exc = load_exceptions(conn, org_id)
+
+    dow = exc.as_of.get(iso) or d.isoweekday()
+    day_cfg = effective_slot_config(exc, slot_cfg, iso)
+
+    entries = build_occupancy(conn, org_id, d, d, cfg=slot_cfg)
+    return {
+        "object_id": object_id,
+        "date": iso,
+        "day_of_week": dow,
+        "periods": _periods(day_cfg, dow),
+        "cells": _cells(conn, entries, object_id, d, dow),
+    }
+
+
+@auth.require_auth
+def schedule_detail(method, path, query, body, headers, context=None):
+    """GET /api/schedules/detail?group=&object_id=&date=（只读，docs/07 §4.1）。
+
+    成功 200：
+        {"object_id":"obj_x","date":"2026-09-09","day_of_week":3,
+         "periods":[{"idx":1,"name":"第1节","start":"08:00","end":"08:45",
+                     "enabled":true}, ...],
+         "cells":[{"idx":1,"mask":"0x000002",
+                   "schedules":[{"id":"sch_x","title":"高一(1)班 物理",
+                                 "kind":"periodic","role":"target"}]}]}
+    未登录 → 401（@require_auth，嵌套错误体）
+    group 越权 → 403（K.resolve_authorized_org，与 /api/schedules 同源）
+    object_id 不存在 / 不属于该组织 → 404
+    object_id 或 date 缺失、date 格式非法 → 400
+    空白日 → **200 + cells=[]**（「这天没课」是正常业务态，不是错误）
+
+    `group` 与 /api/schedules 一样用 `K.parse_group`（可缺省）：缺省时
+    经 `resolve_authorized_org` 走 `authz.default_group_id` 定位用户自己的组，
+    「没传 group」不会绕过授权。
+    """
+    user_id = context["user_id"]
+    group = K.parse_group(query)
+    object_id = _required(query, "object_id")
+    d = _parse_day(query)
+
+    conn = config.open_db()
+    try:
+        _group, org_id = K.resolve_authorized_org(conn, user_id, group)
+        _require_object_in_org(conn, org_id, object_id)
+        return _detail(conn, org_id, object_id, d)
+    finally:
+        conn.close()
+
+
 ROUTES = {
     ("GET", "/api/schedules"): list_schedules,
+    ("GET", "/api/schedules/detail"): schedule_detail,
 }
