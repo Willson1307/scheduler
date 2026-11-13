@@ -153,8 +153,10 @@ class TestKernelBasics(_EnvMixin, unittest.TestCase):
             self.assertEqual(result["mode"], "template", msg=q)
             self.assertEqual(result["sources"], [], msg=q)
             self.assertIn("手册里没有这条", result["answer"], msg=q)
-            # 2026-11-13：称呼从「项目负责人」改为「现场老师」（答案面向老师）。
-            self.assertIn("请找现场老师确认", result["answer"], msg=q)
+            # 2026-11-13（队长口径）：称呼从「项目负责人」→「现场老师」→ 统一为
+            # 「开发者」—— 这条问答的用户是老师，出事该找的是系统开发者，
+            # 不是现场某位老师，也不是项目负责人这种模糊说法。
+            self.assertIn("请找开发者确认", result["answer"], msg=q)
 
     def test_empty_question(self):
         result = K.answer("   ")
@@ -204,7 +206,12 @@ class TestLlmLayer(_EnvMixin, unittest.TestCase):
         self.assertEqual(result["mode"], "llm")
         self.assertEqual(result["degraded"], False)
         self.assertEqual(result["answer"], "模型润色后的回答")
-        self.assertEqual(captured["timeout_s"], 8.0, "跨人契约：timeout 缺省 8.0 秒")
+        # 🔴 2026-11-13 改：8.0 → 15.0。线上实测「3 段手册原文 + glm-4-flash」
+        #    整段耗时稳定超过 8 秒，8 秒超时会让老师每次都看到「AI 这次没响应」。
+        #    现在检索层显式传 15 秒（意图表层传 10 秒）；`b_llm_client.polish`
+        #    的**缺省值仍是 8.0**（跨人契约未动），由调用方按场景显式收紧/放宽。
+        self.assertEqual(captured["timeout_s"], 15.0,
+                         "检索层必须给够 15 秒，否则线上稳定超时降级")
 
     def test_llm_returns_none_degrades_with_flag(self):
         """🔴 验收 2：配了但调不通 → mode=retrieval + degraded=True，不抛。"""

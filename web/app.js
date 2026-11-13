@@ -2889,6 +2889,191 @@ async function querySlots() {
 }
 
 /* =============================================================================
+ * 10.9 Markdown 轻渲染（零依赖、纯 DOM 构建）
+ * -----------------------------------------------------------------------------
+ * 为什么要有这一层：后端的答案有两类来源 ——
+ *   ① 手册原文摘录（`_retrieval_answer` 拼出的段落，**本身就是 Markdown**；
+ *      实测会把「| 项 | 内容 |\n|---|---|」这种表格原样吐到屏幕上）；
+ *   ② 模型润色后的回答（模型天生爱回 Markdown 的列表与加粗）。
+ * 不渲染的话老师看到的就是一堆 `**` 和竖线。
+ *
+ * 🔴 三条硬约束：
+ *   1. **绝不用 innerHTML**（项目铁律）。这里全程 createElement + textContent，
+ *      Markdown 里的任何 HTML 都会被当纯文本，天然免疫注入。
+ *   2. **不联网、不引三方库**（零外链 / 断网可跑）。只支持够用的一小撮语法，
+ *      不做完整 CommonMark。
+ *   3. **解析失败不许把内容吞掉**：认不出的行一律落到段落，宁可排版丑，
+ *      不能出现「答案少了一段」。
+ *
+ * 支持：# 标题（1–4 级）· - / 1. 列表 · 表格 · > 引用 · ``` 代码块 · --- 分隔线
+ *       行内 `代码` · **加粗** · *斜体*
+ * ========================================================================== */
+
+const MD_HEADING = /^(#{1,4})\s+(.*)$/;
+const MD_UL = /^\s*[-*+]\s+(.*)$/;
+const MD_OL = /^\s*\d+[.)]\s+(.*)$/;
+const MD_HR = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
+const MD_QUOTE = /^\s*>\s?(.*)$/;
+const MD_FENCE = /^\s*```/;
+const MD_TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/;
+
+/** 行内标记 → 节点数组（`代码` / **加粗** / *斜体*）。 */
+function mdInline(text) {
+  const out = [];
+  const re = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*\n]+\*)/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) out.push(document.createTextNode(text.slice(last, m.index)));
+    const tok = m[0];
+    if (tok.slice(0, 2) === '**') out.push(el('strong', { text: tok.slice(2, -2) }));
+    else if (tok.charAt(0) === '`') out.push(el('code', { text: tok.slice(1, -1) }));
+    else out.push(el('em', { text: tok.slice(1, -1) }));
+    last = m.index + tok.length;
+  }
+  if (last < text.length) out.push(document.createTextNode(text.slice(last)));
+  return out;
+}
+
+/** 一行文本填进节点（行内标记照常解析）。 */
+function mdFill(node, text) {
+  mdInline(text).forEach(function (n) { node.appendChild(n); });
+  return node;
+}
+
+/** 拆表格行：`| a | b |` → ['a', 'b']（忽略首尾空列，保留中间空串）。 */
+function mdCells(line) {
+  let s = line.trim();
+  if (s.charAt(0) === '|') s = s.slice(1);
+  if (s.charAt(s.length - 1) === '|') s = s.slice(0, -1);
+  return s.split('|').map(function (c) { return c.trim(); });
+}
+
+/**
+ * Markdown 文本 → DocumentFragment。永不抛：任何意外都退化成段落。
+ * 调用方拿到 fragment 直接 appendChild 即可。
+ */
+function mdToDom(src) {
+  const frag = document.createDocumentFragment();
+  const lines = String(src === undefined || src === null ? '' : src)
+    .replace(/\r\n?/g, '\n')
+    .split('\n');
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (!line.trim()) { i += 1; continue; }
+
+    // ---- 代码块 ----
+    if (MD_FENCE.test(line)) {
+      const buf = [];
+      i += 1;
+      while (i < lines.length && !MD_FENCE.test(lines[i])) { buf.push(lines[i]); i += 1; }
+      i += 1; // 跳过收尾 ```
+      const pre = el('pre', { cls: 'md-pre' });
+      pre.appendChild(el('code', { text: buf.join('\n') }));
+      frag.appendChild(pre);
+      continue;
+    }
+
+    // ---- 分隔线 ----
+    if (MD_HR.test(line)) {
+      frag.appendChild(el('hr', { cls: 'md-hr' }));
+      i += 1;
+      continue;
+    }
+
+    // ---- 标题 ----
+    const h = MD_HEADING.exec(line);
+    if (h) {
+      const level = Math.min(h[1].length + 2, 6); // # → h3（区块里 h1/h2 留给页面骨架）
+      frag.appendChild(mdFill(el('h' + level, { cls: 'md-h' }), h[2]));
+      i += 1;
+      continue;
+    }
+
+    // ---- 表格：当前行以 | 开头且下一行是分隔行 ----
+    if (line.trim().charAt(0) === '|' && i + 1 < lines.length && MD_TABLE_SEP.test(lines[i + 1])) {
+      const head = mdCells(line);
+      const rows = [];
+      i += 2;
+      while (i < lines.length && lines[i].trim().charAt(0) === '|') {
+        rows.push(mdCells(lines[i]));
+        i += 1;
+      }
+      const table = el('table', { cls: 'md-table' });
+      const thead = el('thead');
+      const htr = el('tr');
+      head.forEach(function (c) { htr.appendChild(mdFill(el('th'), c)); });
+      thead.appendChild(htr);
+      table.appendChild(thead);
+      const tbody = el('tbody');
+      rows.forEach(function (r) {
+        const tr = el('tr');
+        head.forEach(function (_, ci) { tr.appendChild(mdFill(el('td'), r[ci] === undefined ? '' : r[ci])); });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      // 窄屏（768px 不横滚铁律）：表格自己横向滚，页面不滚
+      const wrap = el('div', { cls: 'md-tablewrap' });
+      wrap.appendChild(table);
+      frag.appendChild(wrap);
+      continue;
+    }
+
+    // ---- 引用 ----
+    if (MD_QUOTE.test(line)) {
+      const buf = [];
+      while (i < lines.length && MD_QUOTE.test(lines[i])) {
+        buf.push(MD_QUOTE.exec(lines[i])[1]);
+        i += 1;
+      }
+      frag.appendChild(mdFill(el('blockquote', { cls: 'md-quote' }), buf.join(' ')));
+      continue;
+    }
+
+    // ---- 无序 / 有序列表 ----
+    const isUl = MD_UL.test(line);
+    const isOl = !isUl && MD_OL.test(line);
+    if (isUl || isOl) {
+      const re = isUl ? MD_UL : MD_OL;
+      const list = el(isUl ? 'ul' : 'ol', { cls: 'md-list' });
+      while (i < lines.length) {
+        const m = re.exec(lines[i]);
+        if (!m) break;
+        list.appendChild(mdFill(el('li'), m[1]));
+        i += 1;
+      }
+      frag.appendChild(list);
+      continue;
+    }
+
+    // ---- 段落：吃到空行或下一个块起始行为止 ----
+    const para = [];
+    while (i < lines.length) {
+      const cur = lines[i];
+      if (!cur.trim()) break;
+      if (para.length && (
+        MD_HEADING.test(cur) || MD_UL.test(cur) || MD_OL.test(cur) ||
+        MD_QUOTE.test(cur) || MD_FENCE.test(cur) || MD_HR.test(cur) ||
+        cur.trim().charAt(0) === '|'
+      )) break;
+      para.push(cur);
+      i += 1;
+    }
+    const p = el('p', { cls: 'md-p' });
+    para.forEach(function (text, idx) {
+      if (idx) p.appendChild(el('br'));
+      mdInline(text).forEach(function (n) { p.appendChild(n); });
+    });
+    frag.appendChild(p);
+  }
+
+  return frag;
+}
+
+/* =============================================================================
  * 11. 问一下（rn6JxF / B-6 POST /api/chat）
  * -----------------------------------------------------------------------------
  * 契约（src/server/api_chat.py 写死）：
@@ -2947,12 +3132,11 @@ function renderChat(body) {
   }
   card.appendChild(head);
 
-  // ---- ② 正文：纯文本 + 保留后端换行（不走 innerHTML） ----
+  // ---- ② 正文：Markdown 轻渲染（表格/列表/加粗），全程 DOM 构建不走 innerHTML ----
   const answer = str(body, 'answer', '');
-  card.appendChild(el('div', {
-    cls: 'chat-text',
-    text: answer || '（没拿到答案，请重试）',
-  }));
+  const textBox = el('div', { cls: 'chat-text md' });
+  textBox.appendChild(mdToDom(answer || '（没拿到答案，请重试）'));
+  card.appendChild(textBox);
 
   // ---- ③ 出处：哪份文档哪一节，供回查；缺失就说缺失，不编文档号 ----
   const sources = arr(body, 'sources');
@@ -2997,7 +3181,13 @@ async function askChat() {
   btn.disabled = true;
   btn.textContent = '提问中…';
   clear(box);
-  box.appendChild(el('div', { cls: 'empty', text: '正在查手册…' }));
+  const wait = el('div', { cls: 'empty', text: '正在查手册…' });
+  box.appendChild(wait);
+  // 🔴 2026-11-13：模型侧最长可等 15 秒（线上实测 8 秒不够）。
+  //    4 秒还没回就把话说清楚，别让老师以为界面卡死了。
+  const slowTimer = setTimeout(function () {
+    wait.textContent = '正在查手册，AI 组织语言中（最多十几秒）…';
+  }, 4000);
   try {
     const payload = { question: q };
     // 与其它接口同口径：只传当前已授权的组（后端会校验越权 → 403）
@@ -3010,6 +3200,7 @@ async function askChat() {
     clear(box);
     box.appendChild(el('div', { cls: 'empty', text: '未取到回答（原因见上方提示条）。' }));
   } finally {
+    clearTimeout(slowTimer);
     // 最坏路径（抛错 / 断网）也必然走到这里，按钮不会永久卡在「提问中…」
     btn.disabled = false;
     btn.textContent = '问一下';
