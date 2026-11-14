@@ -226,5 +226,85 @@ class PolishRealRefusedTestCase(unittest.TestCase):
                         msg=f"必须在 timeout 内快速失败（实测 {elapsed:.2f}s）")
 
 
+class CompleteChannelTestCase(unittest.TestCase):
+    """v1.1（卡 rHrY9D）：`complete(system, user, timeout_s)` —— 纯底层通道。
+
+    入向（话→规则）与出向（事实→人话）都走它，所以它必须
+    「同样短的超时语义、同样零外联前提、同样失败返 None」。
+    🔴 `polish` 是它的薄封装 —— 上面那批用例全绿就是等价性的证据。
+    """
+
+    def setUp(self):
+        self._saved = {k: os.environ.get(k) for k in _ENV_KEYS + ("SCHEDULER_LLM",)}
+        for k in _ENV_KEYS + ("SCHEDULER_LLM",):
+            os.environ.pop(k, None)
+        os.environ["SCHEDULER_LLM_BASE"] = "https://llm.example.invalid/v4"
+        os.environ["SCHEDULER_LLM_KEY"] = _FAKE_KEY
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_unconfigured_opens_no_socket(self):
+        for label, env in (
+            ("缺 BASE", {"SCHEDULER_LLM_KEY": _FAKE_KEY}),
+            ("缺 KEY", {"SCHEDULER_LLM_BASE": "https://llm.example.invalid/v4"}),
+        ):
+            for k in _ENV_KEYS + ("SCHEDULER_LLM",):
+                os.environ.pop(k, None)
+            os.environ.update(env)
+            with mock.patch("urllib.request.urlopen") as urlopen:
+                self.assertIsNone(C.complete("sys", "user"), label)
+            self.assertEqual(urlopen.call_count, 0, f"{label} 时不许开 socket")
+
+    def test_switch_off_opens_no_socket(self):
+        """`SCHEDULER_LLM=off` 一处关掉整个 AI 层（key/url 还在也不行）。"""
+        for value in ("off", "OFF", "0", "false", "no"):
+            os.environ["SCHEDULER_LLM"] = value
+            with mock.patch("urllib.request.urlopen") as urlopen:
+                self.assertIsNone(C.complete("sys", "user"), value)
+            self.assertEqual(urlopen.call_count, 0, f"SCHEDULER_LLM={value} 时必须短路")
+            self.assertFalse(C.configured())
+
+    def test_body_uses_given_system_and_user(self):
+        with mock.patch("urllib.request.urlopen", return_value=_make_response(
+                body=_ok_body())) as urlopen:
+            C.complete("SYS-TEXT", "USER-TEXT", timeout_s=2.5)
+        body = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(body["messages"][0]["content"], "SYS-TEXT")
+        self.assertEqual(body["messages"][1]["content"], "USER-TEXT")
+        self.assertEqual(body["temperature"], 0.2)
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 2.5)
+
+    def test_failures_return_none(self):
+        cases = (
+            ("500", dict(return_value=_make_response(status=500))),
+            ("非 JSON", dict(return_value=_make_response(body=b"nope"))),
+            ("缺 choices", dict(return_value=_make_response(
+                body=json.dumps({"error": {"code": "x"}}).encode()))),
+            ("空串", dict(return_value=_make_response(
+                body=_ok_body(content="   ")))),
+            ("超时", dict(side_effect=socket.timeout("timed out"))),
+        )
+        for label, kw in cases:
+            with mock.patch("urllib.request.urlopen", **kw):
+                self.assertIsNone(C.complete("s", "u"), label)
+
+    def test_polish_is_thin_wrapper(self):
+        """polish 的请求体必须与「complete + 固定 system」逐字节一致。"""
+        with mock.patch("urllib.request.urlopen", return_value=_make_response(
+                body=_ok_body())) as urlopen:
+            C.polish("问题", ["资料一", "资料二"], timeout_s=4.0)
+        body = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(
+            body["messages"][1]["content"], "问题" + "\n\n【资料】\n" + "资料一\n资料二"
+        )
+        self.assertIn("只根据下面提供的资料回答", body["messages"][0]["content"])
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 4.0)
+
+
 if __name__ == "__main__":
     unittest.main()

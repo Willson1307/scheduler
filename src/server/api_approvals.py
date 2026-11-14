@@ -31,6 +31,7 @@ from . import auth, config
 from . import b3_kernels as B3
 from . import b8_kernels as K
 from . import b9_kernels as B9
+from . import b_explain_kernels as X
 from .http_api import ApiError, json_body
 
 
@@ -205,9 +206,18 @@ def approve_request(method, path, query, body, headers, context=None):
         slot_cfg = B9.load_slot_config(conn, req["org_id"])
         problems = K.validate_apply(conn, req["org_id"], target, new_valid_from, slot_cfg)
         if problems:
-            raise ApiError(
-                409, "批准后与现有课表冲突：" + "；".join(problems)
-            )
+            # v1.1（卡 rHrY9D）出向 D3：把硬约束串翻成老师能读懂的拒绝理由。
+            # 🔴 实测口径：`hard_violations()` 返回的**已经是中文、且已含对象名**
+            #    （「高一(1)班 在该时段已被占用（第1节）」），不是英文枚举
+            #    `teacher_overlap` —— 所以这里不是「英译中」，而是「术语 → 人话」。
+            # 🔴 外发前先令牌化（真名 → 对象N），回来再还原；数字必须落在事实内，
+            #    不接地就原样用模板句。任何失败都不影响 409 本身（拒绝照旧生效）。
+            try:
+                names = list(X.object_names(conn, context["user_id"]) or {})
+            except Exception:  # noqa: BLE001
+                names = []
+            reason = X.explain_violations(problems, names=names)["explanation"]
+            raise ApiError(409, "批准后与现有课表冲突：" + reason)
 
         user_id = context["user_id"]
         try:
