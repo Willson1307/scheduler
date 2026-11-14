@@ -954,12 +954,24 @@ def _model_rule(rule: dict) -> dict:
     }
 
 
+#: 模型容易把开场白写成「追问」，拼在答案前面看起来像没回答。
+#: 实测：「请告诉我具体要调整的日期和时间段。」＋正确步骤 —— 老师只看到前半句就以为不会用。
+#: 这类句子一律丢弃，只用事实块（事实块本身就是完整答案）。
+_INTERROGATIVE = (
+    "请告诉我", "请提供", "请补充", "请说明", "请问您", "需要您",
+    "你能提供", "您能提供", "请先告诉我",
+)
+
+
 def _reply_ok(reply: str, fact_text: str, names) -> bool:
-    """模型那句开场白能不能用：数字接地 + 不出现事实里没有的对象名。
+    """模型那句开场白能不能用：数字接地 + 不出现事实里没有的对象名 + 不是追问。
 
     ⛔ 编一个数字或一个班名，就是现场事故 —— 宁可只用事实块。
+    ⛔ 追问也不行：答案已经写好了，再问一句反而像没答。
     """
     if not reply:
+        return False
+    if any(w in reply for w in _INTERROGATIVE):
         return False
     if not X.grounded(reply, fact_text):
         return False
