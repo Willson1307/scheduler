@@ -6,6 +6,9 @@
   F1 前端骨架 · 单页（AGENTS §8：单页，不做多页跳转、不做前端路由）
   🔴 零外链：不引 CDN、不引 npm 包、无构建步骤。现场必须断网能跑（赛事章程硬要求），
      任何外链都会在断网时崩掉，所以本文件只用相对路径引用同目录的 app.js。
+     🔴 2026-11-14 更正口径：「断网能跑」只对「本机起服务 + 本机浏览器」成立，
+        ⛔ 不等于「离线可用」——系统部署在服务器上时，浏览器访问必须联网；
+        「问一下」配置模型后还会调用外部大模型（可关闭）。
   🔴 静态资源带版本号（AGENTS §8）：配合 static.py 的 no-cache + ETag，
      避免「改了 JS 但浏览器还在用旧版」——现场改样式时最易踩且极难排查。
      版本号由后端 config.ASSET_VERSION 统一导出，此处需与其保持一致。
@@ -14,7 +17,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/png" href="favicon.png?v=20261203">
+<link rel="icon" type="image/png" href="favicon.png?v=20261204">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -48,7 +51,7 @@
          · 衬线只用于 h1 / h2 / 折叠区摘要 / 首屏大数字 —— 字号都 ≥1.05rem，1 米外仍清楚；
          · 正文继续黑体，保证小字号可读性（宋体小字在投影上会发虚）；
          · 等宽只给掩码、机读字段（.mono / code），沿用原 Consolas 栈。
-       🔴 全部是本机系统字体，零外链、零下载 —— 断网可用这条不能破。 */
+       🔴 全部是本机系统字体，零外链、零下载 —— 字体不依赖网络（页面资源零外链这条不能破）。 */
     --font-sans:  "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans CJK SC", sans-serif;
     --font-serif: "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", "STSong", "SimSun", serif;
     --font-mono:  Consolas, "Courier New", monospace;
@@ -57,7 +60,7 @@
        中文走**楷体系**——有毛笔骨架、又不至于像行草那样认不出；
        英文走 **Palatino / Georgia**（人文主义衬线，笔画有书写味道），
        靠大写字距拉开做「乐谱标题」的呼吸感。
-       🔴 全是 Windows / macOS 预装字体，零下载、断网可用（AGENTS §9b 零外链）。
+       🔴 全是 Windows / macOS 预装字体，零下载、不联网（AGENTS §9b 零外链）。
        楷体在中文字号 < 20px 时笔画会糊，所以页头字号必须 ≥ 1.5rem。 */
     --font-brand:    "KaiTi", "STKaiti", "Kaiti SC", "楷体", "Source Han Serif SC", "Songti SC", "SimSun", serif;
     --font-brand-en: "Palatino Linotype", "Book Antiqua", Palatino, Georgia, "Times New Roman", serif;
@@ -237,7 +240,7 @@
   .status-badge.is-ok   { background: var(--c-ok-l);      color: var(--c-ok);      border-color: #a8d5bd; }
   .status-badge.is-err  { background: var(--c-danger-l);  color: #7d2019;          border-color: var(--c-danger-b); }
 
-  /* ---------- 上手三步（新手引导） ----------
+  /* ---------- 上手四步（新手引导） ----------
      页面已经回答了「几处冲突、按哪个键」，缺的只是「顺序」——所以这里只放一条静态文字条：
      无 JS、无动画、不遮挡任何错误横幅与空态提示。
      ⛔ 不做遮罩高亮 tour：要算元素坐标、适配 768 断点与 sticky 左栏，
@@ -923,12 +926,15 @@
     </div>
   </div>
 
-  <!-- 上手三步：顺序性说明，静态文字，不参与任何交互 -->
-  <div class="onboard" role="note" aria-label="上手三步">
+  <!-- 上手四步：顺序性说明，静态文字，不参与任何交互
+       🔴 2026-11-14 加第 4 步：临时微调（双击格子）此前在页面上无任何入口提示，
+          老师不可能自己发现「格子能双击」，等于这个功能对试用不可见。 -->
+  <div class="onboard" role="note" aria-label="上手四步">
     <b class="onboard-title">新手引导</b>
-    <span class="onboard-step"><b class="onboard-n">1</b>先选组，再选「查看对象」</span>
+    <span class="onboard-step"><b class="onboard-n">1</b>先选「当前组」，再选「查看对象」</span>
     <span class="onboard-step"><b class="onboard-n">2</b>红格＝冲突，完整列表在下方</span>
     <span class="onboard-step"><b class="onboard-n">3</b>点「一键消解」，不满意可撤销</span>
+    <span class="onboard-step"><b class="onboard-n">4</b>双击格子或点「⋯」＝临时微调某一天</span>
   </div>
 
   <!-- 全局错误区：🔴 零容忍空白页——任何环节失败都在这里显式说出来，
@@ -1205,15 +1211,16 @@
        🔴 这里刻意保留开发期原话（接口名 / 字段名 / 契约编号）：
           主界面不再出现这些词，但评委追问实现细节时要能当场展开。 -->
   <details id="techNotes" class="tech-notes">
-    <summary>技术说明（展开看实现细节，答辩用）</summary>
+    <summary>实现原理与技术说明（点击展开）</summary>
     <p>
       占用格来自 <code>/api/schedules</code> 的 <code>grid</code>：前端对后端已归一化的单日掩码
       （第 N 节 → bit N）做受控反解；红色冲突格由 <code>/api/conflicts</code> 的
       <code>readable</code> 定位、叠加在占用格上。下方「每日占用」按掩码原样透传显示。
     </p>
     <p>
-      口径说明：「3 组」是服务端聚合后的冲突组数（一条冲突涉及多个学生时只报 1 组，
-      否则同班 40 名学生会把一处冲突刷成 40 条）；「23 处」是聚合前的原始冲突条数。
+      口径说明：顶部「N 处冲突」是聚合前的原始冲突条数，「（M 组）」是服务端聚合后的冲突组数
+      （一条冲突涉及多个学生时只报 1 组，否则同班 40 名学生会把一处冲突刷成 40 条）。
+      两个数来自同一个响应（<code>raw_count</code> / <code>count</code>），随数据变化，界面不写死。
       消解按钮调 POST <code>/api/resolve</code>，由后端统一求解（契约 §5 要求服务端聚合、
       §6 要求前端不做位运算）。消解后结果条上可「撤销本次消解」——消解是原地改写课表，
       撤销按应用前的全量快照逐字段回写；管理员还可「固化此版本」，固化后不可撤销。
@@ -1221,6 +1228,13 @@
     <p>
       空位：数据读自 <code>/api/slots</code>；「按此提议」复用本页已有的审批弹窗，
       只把候选日期预填进 <code>valid_from</code> —— 提交后仍是 pending，课表数据零变化，批准才落库。
+    </p>
+    <p>
+      🔴 依赖边界（2026-11-14 更正）：仓库代码只用 Python 标准库 + SQLite，<b>没有第三方包</b>；
+      本页不引 CDN、不引 npm、无构建步骤。但<b>整套系统跑在服务器上，浏览器访问需要网络</b>——
+      「断网可跑」只对「本机启动 + 本机浏览器」成立，不是「离线使用」。
+      另外「问一下」在配置了模型时会调用外部大模型服务组织语言（可一键关闭，关闭后完全本地，
+      只返回手册检索结果）。
     </p>
   </details>
 
@@ -1232,7 +1246,7 @@
 <!-- 版本号唯一来源 = src/server/config.py 的 ASSET_VERSION；本文件三处 ?v= 必须与它一致。
      版本沿革写在 config.py 的注释里（服务端文件，不会随页面下发）。
      ⛔ 不要在这里记流水：这是 HTML 注释，闭合符写错一行就会整段漏到页面上（2026-11-13 已踩过）。 -->
-<script src="brand-icon.js?v=20261203"></script>
-<script src="app.js?v=20261203"></script>
+<script src="brand-icon.js?v=20261204"></script>
+<script src="app.js?v=20261204"></script>
 </body>
 </html>

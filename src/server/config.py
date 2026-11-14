@@ -76,7 +76,7 @@ from scheduler.seeds import seed_demo  # noqa: E402
 #: 2026-11-13（卡 r4kJEe）：登录态改 localStorage（12h 滑动 / 24h 上限）+ 退出登录按钮，
 #:    改了 app.js 与 index.html，四处一起递增到 20261123。
 #:    🔴 20261114 在 11-12 已被 secSlots 用掉 —— 复用旧号等于没改，浏览器不会重拉。
-ASSET_VERSION = "20261203"
+ASSET_VERSION = "20261204"
 
 #: 产品版本（**给人看**：关于弹层 / 材料 / 答辩口径）。
 #:
@@ -86,8 +86,8 @@ ASSET_VERSION = "20261203"
 #:      把它当日期显示会当场说错话）。
 #:    · `APP_VERSION` 是语义版本，回答「这是第几版」；`RELEASE_DATE` 是真日期。
 #: 发版时两处一起手改（本文件内相邻，避免漂移）；界面只显示这两个。
-APP_VERSION = "1.0.0"
-RELEASE_DATE = "2026-11-13"
+APP_VERSION = "1.0.1"
+RELEASE_DATE = "2026-11-14"
 
 #: 默认数据库：与队长 L8 沙盒演示库同路径，现场「删 data/ → 一条命令 →
 #: 30 秒可演示」的闭环由本模块的自动初始化兜底（CP-G）。
