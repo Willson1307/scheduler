@@ -17,7 +17,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/png" href="favicon.png?v=20261204">
+<link rel="icon" type="image/png" href="favicon.png?v=20261205">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -903,7 +903,7 @@
       <span id="statusBadge" class="status-badge is-warn">未登录</span>
       <span id="statusText" class="status-text" role="status" aria-live="polite">登录后显示本周冲突数</span>
     </div>
-    <button id="resolveBtnTop" class="primary" type="button" disabled>一键消解</button>
+    <button id="resolveBtnTop" class="primary" type="button" disabled title="会立即写入课表；结果区可「撤销本次消解」">一键消解</button>
   </div>
 
   <!-- ---------- 组织公告（卡 rTVvb8） ----------
@@ -1026,7 +1026,7 @@
     <div class="cl-head">
       <h2>冲突列表 <span class="hint">硬冲突必须消解</span></h2>
       <div class="resolve-ctl">
-        <button id="resolveBtn" class="secondary" type="button">一键消解（当前组）</button>
+        <button id="resolveBtn" class="secondary" type="button" title="会立即写入课表；结果区可「撤销本次消解」">一键消解（当前组）</button>
         <!-- 求解中：loader.svg 内联（双线融合/分离无限循环，纯 SMIL，无 JS/无网络）。
              平时 hidden，doResolve() 请求期间显示，finally 里隐藏——最慢/最坏路径也会收起，
              不会出现「转圈转到天荒地老」这种没人敢碰的状态。
@@ -1215,7 +1215,7 @@
     <p>
       占用格来自 <code>/api/schedules</code> 的 <code>grid</code>：前端对后端已归一化的单日掩码
       （第 N 节 → bit N）做受控反解；红色冲突格由 <code>/api/conflicts</code> 的
-      <code>readable</code> 定位、叠加在占用格上。下方「每日占用」按掩码原样透传显示。
+      <code>readable</code> 定位、叠加在占用格上。下方「每日占用」已反解成「第 N 节」，掩码原文在悬停提示里。
     </p>
     <p>
       口径说明：顶部「N 处冲突」是聚合前的原始冲突条数，「（M 组）」是服务端聚合后的冲突组数
@@ -1246,7 +1246,7 @@
 <!-- 版本号唯一来源 = src/server/config.py 的 ASSET_VERSION；本文件三处 ?v= 必须与它一致。
      版本沿革写在 config.py 的注释里（服务端文件，不会随页面下发）。
      ⛔ 不要在这里记流水：这是 HTML 注释，闭合符写错一行就会整段漏到页面上（2026-11-13 已踩过）。 -->
-<script src="brand-icon.js?v=20261204"></script>
-<script src="app.js?v=20261204"></script>
+<script src="brand-icon.js?v=20261205"></script>
+<script src="app.js?v=20261205"></script>
 </body>
 </html>
