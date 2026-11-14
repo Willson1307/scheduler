@@ -76,6 +76,7 @@ class TestFeatureTipsCoverage(unittest.TestCase):
         cls.html = _read(os.path.join("web", "index.html"))
         start = cls.app_js.index("const FEATURE_TIPS")
         cls.tips_block = cls.app_js[start:cls.app_js.index("\n];", start) + 3]
+        cls._mount_code = _strip_comments(_function_body(cls.app_js, "mountFeatureTips"))
 
     def test_all_sections_exist_in_html(self):
         for sid in SECTION_IDS:
@@ -105,6 +106,19 @@ class TestFeatureTipsCoverage(unittest.TestCase):
         self.assertIn(
             "mountFeatureTips()", boot,
             "boot() 没调用 mountFeatureTips() —— 定义了不等于挂到页面上（静默失效）",
+        )
+
+    def test_click_outside_closes_but_inside_does_not(self):
+        """点浮层自身（想读 / 选中正文）不许收起，只有点外面才收起。
+
+        2026-11-14 修：原先 document 上的 click 直接调 closeFeatureTips()，
+        点开浮层后想读第二段，一点正文就整块消失 —— 触屏上这个浮层等于没法读。
+        """
+        self.assertIn("closest('.tip-wrap')", self._mount_code,
+                      "收起逻辑没有排除「点在浮层内部」这种情况")
+        self.assertRegex(
+            self._mount_code, r"closest\('\.tip-wrap'\)\)\s*return;",
+            "点了浮层内部仍然会收起（缺提前 return）",
         )
 
 
@@ -166,6 +180,22 @@ class TestFeatureTipsVisible(unittest.TestCase):
     def test_css_width_capped_by_viewport(self):
         """🔴 768px 铁律：浮层宽度按视口收口，不许把页面撑出横向滚动。"""
         self.assertRegex(self.html, r"\.tip-box\s*\{[^}]*max-width:[^;}]*100vw")
+
+    def test_hover_bridge_covers_the_gap(self):
+        """按钮与浮层之间的 6px 间隙必须有透明接桥，否则鼠标一过 gap 浮层就消失。
+
+        2026-11-14 修：`top: calc(100% + 6px)` 让两者之间空出一条「谁的 hover 都不算」
+        的缝隙，指针横跨时 :hover 丢失 —— 正文读不全、也选不中。
+        """
+        self.assertIn(".tip-box::before", self.html, "缺 hover 接桥（.tip-box::before）")
+        self.assertRegex(
+            self.html, r"\.tip-box::before\s*\{[^}]*top:\s*-\d+px",
+            "接桥没有向上覆盖间隙，等于没接",
+        )
+        self.assertRegex(
+            self.html, r"\.tip-box::before\s*\{[^}]*height:\s*[1-9]\d*px",
+            "接桥高度为 0，盖不住间隙",
+        )
 
 
 if __name__ == "__main__":

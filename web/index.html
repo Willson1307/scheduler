@@ -913,6 +913,14 @@
   .tip-wrap:hover .tip-box,
   .tip-wrap:focus-within .tip-box,
   .tip-wrap.is-open .tip-box { display: block; }
+  /* 🔴 按钮底边与浮层顶边之间有 6px 间隙（top: 100% + 6px）。鼠标往下移到正文时会
+     横跨这段「谁的 hover 都不算」的空当 → :hover 瞬间丢失 → 浮层在指针到达前就消失，
+     正文永远读不全、也选不中。用一条透明的接桥盖住 gap 把 hover 续上。
+     ⛔ 接桥不接收点击（无事件、无 pointer-events 改动），只是几何上补上这段空白。 */
+  .tip-box::before {
+    content: '';
+    position: absolute; left: 0; right: 0; top: -7px; height: 7px;
+  }
   /* 浮层里的字比正文小一档（0.95rem ≈ 16px），仍按「1 米可读」给行高 */
   .tip-box .tip-title {
     display: block; font-size: 0.95rem; font-weight: 700;

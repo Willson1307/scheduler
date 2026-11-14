@@ -4530,9 +4530,10 @@ function tipTrigger(tip) {
   });
   btn.appendChild(el('span', { text: 'ⓘ', attrs: { 'aria-hidden': 'true' } }));
 
-  // 触屏没有 hover：点一下固定打开，再点收起；Esc 或点别处自动收起。
-  btn.addEventListener('click', function (ev) {
-    ev.stopPropagation();          // 别让同一次点击立刻被 document 的收起逻辑吃掉
+  // 触屏没有 hover：点一下固定打开，再点收起；Esc 或点浮层外面自动收起。
+  // 🔴 这里不 stopPropagation：收起逻辑统一由 mountFeatureTips 的 document 监听判定
+  //    「点在 .tip-wrap 内部就忽略」，一处判断即可，避免两个机制互相抵消。
+  btn.addEventListener('click', function () {
     const open = wrap.classList.toggle('is-open');
     btn.setAttribute('aria-expanded', open ? 'true' : 'false');
   });
@@ -4551,7 +4552,12 @@ function mountFeatureTips() {
     if (!h2) return;
     h2.appendChild(tipTrigger(tip));
   });
-  document.addEventListener('click', closeFeatureTips);
+  // 点空白处收起，但点在浮层自身（想读、想选中正文）时不收起 ——
+  // 否则「点开 → 想读 → 一点就没了」，触屏上等于这个浮层没法读第二段。
+  document.addEventListener('click', function (ev) {
+    if (ev.target && ev.target.closest && ev.target.closest('.tip-wrap')) return;
+    closeFeatureTips();
+  });
   document.addEventListener('keydown', function (ev) {
     if (ev.key === 'Escape') closeFeatureTips();
   });
