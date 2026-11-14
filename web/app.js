@@ -8,6 +8,8 @@
  * 1)「为什么不用框架、不用 CDN？」
  *    现场必须断网能跑（赛事章程硬要求）。任何外链在断网时都会崩，
  *    所以只用原生 HTML/CSS/JS + 相对路径，零构建、零第三方依赖。
+ *    🔴 2026-11-14 更正口径：这里说的是「本页资源不依赖外网」，
+ *       ⛔ 不等于「整个系统离线可用」——服务端在云上时访问仍需联网。
  *
  * 2)「前端会不会又踩掩码位序的坑？」（F7 起，见 dayMaskPeriods）
  *    不会。历史 bug 的根因是「周位序 vs 单日掩码」两套位序混用、整页错一位
@@ -4321,8 +4323,18 @@ async function refreshWeekAndConflicts() {
 
   if (seq === state.statusSeq) {
     const cnt = conflictCounts(out.conflicts);
-    if (cnt) setStatus('ok', '本周 ', cnt.n, cnt.unit);
-    else setStatus('error', '冲突数没取到（接口未返回 count / raw_count）');
+    if (cnt) {
+      // 🔴 2026-11-14：把「处」和「组」并进同一条。
+      //    原先顶部只写「28 处冲突」，而冲突列表标题写「3 组冲突」，
+      //    老师会以为两个数对不上——同一个响应里的两个数字，放在一起才解释得清。
+      const groups = intOrNull(out.conflicts, 'count');
+      const suffix = (groups !== null && groups !== cnt.n && cnt.unit.indexOf('处') >= 0)
+        ? '（' + groups + ' 组）'
+        : '';
+      setStatus('ok', '本周 ', cnt.n, cnt.unit + suffix);
+    } else {
+      setStatus('error', '冲突数没取到（接口未返回 count / raw_count）');
+    }
   }
   // 顺序有讲究：renderConflicts 填 state.hitDates，周视图的撞车标红依赖它。
   renderConflicts(readCounts(out.conflicts));
