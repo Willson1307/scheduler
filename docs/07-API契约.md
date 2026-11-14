@@ -177,6 +177,55 @@
 
 ---
 
+### 4.2 POST /api/chat 的 `rule` 字段 + POST /api/resolve/explain（2026-11-15 纯追加，卡 rHrY9D）
+
+> 🔴 本节是 **v1.1 追加**，只新增字段与新路由，**不改动上面任何一条既有约定**。
+> `mode` 取值仍是 `llm` / `retrieval` / `template` 三态，没有新增枚举。
+
+**（1）POST /api/chat 响应新增两个字段（只增不改）**
+
+```json
+{"answer":"...","sources":[{"doc":"docs/30","section":"§3"}],
+ "mode":"llm","degraded":false,
+ "grounded":true,
+ "rule":{"intent_id":"conflict_why","slots":{"object":"高一(1)班","query":"conflicts"},
+         "source":"model"}}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `grounded` | bool | 恒 `true`。保留字段，只为兼容前端已有判断；含义是「本次答案的事实由后端查得，不是模型自由生成」 |
+| `rule.intent_id` | string \| null | 命中的意图 id（取意图表 29 条之一）。答不上来时可为 `null` |
+| `rule.slots` | object | 解析出的槽位，最多 4 个键：`object` / `date` / `period` / `query`（`query` ∈ `conflicts`/`slots`/`schedules`/`howto`，全部只读） |
+| `rule.source` | `model` \| `keyword` | 排查钥匙：`model` = 模型解析并通过三道校验；`keyword` = 关键词/检索兜底 |
+
+链路（两道门槛，任一不过即回退关键词，⛔ 不返 5xx）：
+
+1. **schema**：`intent_id` 在白名单；`slots` 只有 4 个键；`query` 在只读枚举内；类型正确。
+2. **取值**：`object` 必须对得上库内真实对象名；`date` 落在本周扫描窗口；`period` 在当天启用槽位内。
+3. **红线**：不得出现 `sch_`/`obj_` 等内部 ID；`reply` 不得含执行动作词；`slots` 不得带 `action` 等动作键。
+
+六条 `no_polish` 意图（`resolve_how` / `login_fail` / `propose_approve` /
+`how_to_use` / `what_is` / `count_meaning`）命中即返回写死文本，**不进模型**。
+
+**（2）POST /api/resolve/explain?snapshot_id=snap_x（新增只读路由）**
+
+| 项 | 内容 |
+|---|---|
+| 鉴权 | `Bearer`，未登录 401；`group` 越权 403；快照不属于本组织 → 404 |
+| 请求 | query `snapshot_id`（必填，缺失 400）；body 可空 |
+| 响应 200 | `{"snapshot_id":"snap_x","explanation":"...","source":"llm"\|"template","degraded":false}` |
+| 只读 | 不写任何表；事实 = 快照（消解前）与当前库逐字段 diff |
+| 失败 | 模型未配置 / 超时 / 数字不接地 → `source="template"` + `degraded=true`，**仍 200** |
+
+`explanation` 上限 120 字（提示词约束 + 服务端硬截断）。模型输出里的每个阿拉伯数字
+必须出现在输入事实中，否则整条丢弃改用模板句 —— 防「23 处」被写成「12 处」。
+
+调用约定：前端**先渲染** `POST /api/resolve` 的结果（数字与条目），再异步请求本接口补一句解释；
+3 秒拿不到就继续显示模板句。⛔ 不允许同步等待模型把结果区卡住。
+
+---
+
 ## 5. GET /api/conflicts?group=
 
 | 项 | 内容 |

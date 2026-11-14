@@ -1,11 +1,22 @@
 """L-17（rtFhoL）：问答层第 2 层 —— LLM 润色客户端（零路由、零落盘、零三方依赖）。
 
 用途与设计意图（答辩口径）：
-  1. **本模块是「问一下」问答链路里唯一对外发请求的一层**，被 api_chat /
-     b_ai_kernels 调用（契约签名冻结，双方已按此写，不得改）：
-         polish(question, passages, timeout_s=8.0) -> str | None
-     语义：拿手册段落把用户问题润色成一条模型回答。**调用方负责**挑选与
-     脱敏 passages；本模块不做也不假装做脱敏（卡面红线）。
+  0. 🔴 2026-11-15（卡 rHrY9D，v1.1）：本模块现在提供**两个**入口。
+
+     ```python
+     complete(system, user, timeout_s=8.0) -> str | None   # 纯底层，无业务
+     polish(question, passages, timeout_s=8.0) -> str | None  # complete 的薄封装
+     ```
+
+     `complete` 是「AI 只做翻译」的**唯一出网通道**：入向把老师的话翻成结构化
+     规则（intent_id + slots）、出向把求解器/审批的结构化事实翻成人话，都走它。
+     它**不含任何业务**——不知道什么是意图、不知道什么是冲突，只负责
+     「给 system + user，拿回一段文本」。这样两条翻译方向共用同一套失败语义、
+     同一份脱敏前置约定，不会各自漂移。
+     `polish` 的签名与行为**一字未变**（跨人契约，`tests/test_llm_client.py` 锁死）。
+  1. **本模块是问答链路里唯一对外发请求的一层**，被 api_chat /
+     b_ai_kernels 调用。**调用方负责**挑选与脱敏内容；本模块不做也不假装做脱敏
+     （卡面红线）。
   2. 🔴 **失败一律返 None、不抛、不 retry**。上层（api_chat 三层降级）拿
      None 就降级到下一层——这正是「不接 AI 也能答」的前提：云模型挂了、
      超时了、配错 URL 了，问答功能整体仍然可用，只是少了 AI 润色那一层。
@@ -36,6 +47,12 @@ import urllib.request
 _ENV_BASE = "SCHEDULER_LLM_BASE"     # 例：https://open.bigmodel.cn/api/paas/v4
 _ENV_KEY = "SCHEDULER_LLM_KEY"       # 例：sk-xxxx（真实 key 只存在于服务器 .env.local）
 _ENV_MODEL = "SCHEDULER_LLM_MODEL"   # 缺省 glm-4-flash（免费层主通道，docs/23）
+#: 🔴 2026-11-15（卡 rHrY9D）：总开关。`off/0/false/no` 任一（忽略大小写、
+#: 前后空白）→ 两个方向都直接返回 None，与「未配 env」完全等价。
+#: 现场只用一个变量就能把 AI 整个摘掉，不必去动 key/url（那会丢失配置）。
+_ENV_SWITCH = "SCHEDULER_LLM"
+
+_OFF_WORDS = frozenset({"off", "0", "false", "no", "disabled", "disable"})
 
 # --- 系统提示 -----------------------------------------------------------------
 # 🔴 2026-11-14 改写（原为卡面原文「资料里没有的，直接说『手册里没有这条，请找开发者确认』」）。
@@ -57,29 +74,46 @@ _SYSTEM_PROMPT = (
 )
 
 
-def polish(question: str, passages: list[str], timeout_s: float = 8.0) -> str | None:
-    """把问题 + 手册段落发给 LLM，拿回一条润色回答。
+def llm_off() -> bool:
+    """总开关是否为「关」。🔴 只读 env，不发请求、不打日志。
+
+    与「没配 key/url」等价地短路：现场执行 `SCHEDULER_LLM=off` 一处即可把
+    入向解析与出向解释同时摘掉，问答退回纯手册检索（不报错）。
+    """
+    raw = os.environ.get(_ENV_SWITCH, "")
+    return raw.strip().lower() in _OFF_WORDS
+
+
+def configured() -> bool:
+    """是否「该出网」：开关没关 + BASE 与 KEY 都在。⛔ 不读取其值、不拼 URL。"""
+    if llm_off():
+        return False
+    return bool(os.environ.get(_ENV_BASE, "")) and bool(os.environ.get(_ENV_KEY, ""))
+
+
+def complete(system: str, user: str, timeout_s: float = 8.0) -> str | None:
+    """纯底层通道：给 system + user，拿回模型的一段文本。**无任何业务语义**。
 
     返回：
-      None  —— 未配置 env / 超时 / 非 200 / 响应体非 JSON / 结构里取不出
-               content / content 是空串。任何失败都不抛、不 retry。
+      None  —— 开关关闭 / 未配置 env / 超时 / 非 200 / 响应体非 JSON / 结构里
+               取不出 content / content 是空串。任何失败都不抛、不 retry、不打日志。
       str   —— 模型回答（去首尾空白）。
 
-    🔴 timeout_s 真传给 urllib 的 timeout=（不是文档里写着 8 秒实际不限时）。
+    🔴 未配置 = 不启用：一个 socket 都不开（smoke --offline 外联为 0 的前提）。
+    🔴 `timeout_s` 真传给 urllib 的 `timeout=`（不是文档里写着却实际不限时）。
     """
     base = os.environ.get(_ENV_BASE, "")
     key = os.environ.get(_ENV_KEY, "")
-    if not base or not key:
-        return None  # 未配置 = 不启用：不开 socket，直接短路
+    if not base or not key or llm_off():
+        return None  # 未配置 / 已关闭：不开 socket，直接短路
 
     model = os.environ.get(_ENV_MODEL, "glm-4-flash")
-    content = question + "\n\n【资料】\n" + "\n".join(passages)
     body = json.dumps(
         {
             "model": model,
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": content},
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
             ],
             "temperature": 0.2,
         }
@@ -116,3 +150,16 @@ def polish(question: str, passages: list[str], timeout_s: float = 8.0) -> str | 
         return None
     answer = answer.strip()
     return answer if answer else None  # 空串视为失败
+
+
+def polish(question: str, passages: list[str], timeout_s: float = 8.0) -> str | None:
+    """把问题 + 手册段落发给 LLM，拿回一条润色回答。
+
+    🔴 2026-11-15 起本函数是 `complete()` 的**薄封装**，签名、请求体、失败语义
+    与改前逐字节一致（`tests/test_llm_client.py` 锁死了 URL / body / temperature /
+    系统提示片段），因此它只是「把 system 固定成手册口径的 complete」。
+    既有调用方（b_ai_kernels 的两条路径）一行都不用改。
+    """
+    content = question + "\n\n【资料】\n" + "\n".join(passages)
+    return complete(_SYSTEM_PROMPT, content, timeout_s=timeout_s)
+

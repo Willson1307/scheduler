@@ -463,8 +463,20 @@ class TestChatAPI(_EnvMixin, unittest.TestCase):
     def test_ok_shape_contract(self):
         result = self._call({"question": "怎么调课"}, {"authorization": self.teacher_token})
         self.assertIsInstance(result, dict)
-        self.assertEqual(set(result), {"answer", "sources", "mode", "degraded"},
-                         "响应体必须正好是卡面四个字段")
+        # 🔴 2026-11-15（卡 rHrY9D）：原断言是「正好四个字段」。
+        #    卡面 §4 明确要求**只增不改**地补 `grounded` + `rule`（旧前端不改也能跑），
+        #    所以这里改为「四个旧字段一个不少 + 允许新增」，语义是**收窄而不是放宽**
+        #    —— 旧契约仍然被逐字锁死，新字段另行断言形状。
+        self.assertTrue(
+            {"answer", "sources", "mode", "degraded"} <= set(result),
+            "响应体必须包含卡面四个旧字段（可新增字段，不可缺失）",
+        )
+        self.assertIn("grounded", result)
+        self.assertIs(result["grounded"], True)
+        rule = result["rule"]
+        self.assertEqual(set(rule), {"intent_id", "slots", "source"})
+        self.assertIn(rule["source"], ("model", "keyword"))
+        self.assertIsInstance(rule["slots"], dict)
         self.assertIn(result["mode"], ("llm", "retrieval", "template"))
         self.assertIsInstance(result["degraded"], bool)
         self.assertIsInstance(result["sources"], list)
@@ -585,6 +597,128 @@ class TestChatAPI(_EnvMixin, unittest.TestCase):
         self.assertIsInstance(result, dict, "手册缺失不得 500，必须回 200 + 说明")
         self.assertIn("手册未就绪", result["answer"])
         self.assertEqual(result["mode"], "template")
+
+
+# ---------------------------------------------------------------------------
+# 五、8 条常问胶囊回归（卡 rHrY9D：v1.1 改完不许变差）
+# ---------------------------------------------------------------------------
+
+#: 界面上「常问」那一排 8 个芯片（web/index.html #chatChips 的 data-q）。
+#: 每条都要给出「答案里必须出现的关键词」—— 只判 mode 不看内容，
+#: 是抓不到「答非所问」的。
+_CAPSULES = (
+    ("我想把周三下午的课调开，怎么弄", ("临时微调", "管理员批准")),
+    ("临时取消一节课怎么做", ("取消今天这节课",)),
+    ("调休那天按哪天的课表算", ("那一天",)),
+    ("谁能批准改课表", ("管理员批准",)),
+    ("教师能不能直接改永久课表", ("不能直接改永久课表", "提议")),
+    ("一键消解点了没变化", ("一次就生效",)),
+    ("登录失败了怎么办", ("区分大小写",)),
+    ("系统会记录我点什么吗", ("不记录姓名和班级",)),
+)
+
+
+class TestCapsuleRegression(_EnvMixin, unittest.TestCase):
+    """线上实测 8/8 正常的常问胶囊，v1.1 改完必须还是 8/8。
+
+    🔴 两遍都要跑：
+      · 关 LLM（本地/断网现场）→ 与改前**逐字同源**的手册速查；
+      · 开 LLM + 注入「好模型」→ 入向解析接管后答案内容不许走样。
+    只跑其中一遍会漏掉另一半的风险（模型误路由 / 降级后文案被改坏）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp(prefix="chat-capsule-")
+        cls.db_path = os.path.join(cls.tmpdir, "demo.db")
+        cfg = ServerConfig(db_path=cls.db_path, today=TODAY)
+        ensure_database(cfg)
+        cls._prev_cfg = config._current
+        config.set_current_config(cfg)
+        conn = connect(cls.db_path)
+        try:
+            cls.teacher_token = _issue_token(conn, "t01")
+        finally:
+            conn.close()
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._prev_cfg is not None:
+            config.set_current_config(cls._prev_cfg)
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def setUp(self):
+        self._save_env()
+        # 入向解析有进程内缓存（同句只调一次模型）—— 用例之间必须清，否则串味
+        from server import b_nl_kernels as NL
+
+        NL.reset_cache()
+
+    def tearDown(self):
+        self._restore_env()
+        from server import b_nl_kernels as NL
+
+        NL.reset_cache()
+
+    def _ask(self, question: str):
+        import json
+
+        body = json.dumps({"question": question}, ensure_ascii=False).encode("utf-8")
+        return api_chat.chat(
+            "POST", "/api/chat", {}, body, {"authorization": self.teacher_token}, None
+        )
+
+    def test_capsules_ok_without_llm(self):
+        """关 LLM：8/8 都必须答得出，且内容对得上（离线基线，现场主要靠这条）。"""
+        for question, must in _CAPSULES:
+            got = self._ask(question)
+            self.assertIn(got["mode"], ("retrieval", "template"), question)
+            self.assertNotEqual(got["mode"], "template", f"胶囊答不出：{question}")
+            for phrase in must:
+                self.assertIn(phrase, got["answer"], f"{question} → 缺「{phrase}」")
+            self.assertEqual(got["rule"]["source"], "keyword", question)
+
+    def test_capsules_ok_with_model(self):
+        """开 LLM + 注入好模型：入向解析不许把胶囊答歪。"""
+        os.environ["SCHEDULER_LLM_BASE"] = "https://llm.example.invalid/v4"
+        os.environ["SCHEDULER_LLM_KEY"] = "sk-xxxx"  # 假 key
+
+        from server import b_llm_client
+
+        # 每条胶囊的「正确 IR」：query=howto → 答案仍取意图表原文。
+        # 这正是卡面要的语义：模型只决定「问的是哪条」，内容仍由后端给。
+        mapping = {
+            "我想把周三下午的课调开，怎么弄": "reschedule",
+            "临时取消一节课怎么做": "cancel_once",
+            "调休那天按哪天的课表算": "makeup",
+            "谁能批准改课表": "propose_approve",
+            "教师能不能直接改永久课表": "propose_approve",
+            "一键消解点了没变化": "resolve_how",
+            "登录失败了怎么办": "login_fail",
+            "系统会记录我点什么吗": "privacy",
+        }
+
+        def fake_complete(system, user, timeout_s):
+            if "意图识别器" not in system:
+                return None  # 润色层不参与：本用例只验入向解析
+            for q, intent_id in mapping.items():
+                if q in user:
+                    import json
+
+                    return json.dumps(
+                        {"intent_id": intent_id, "slots": {"query": "howto"},
+                         "reply": ""},
+                        ensure_ascii=False,
+                    )
+            return None
+
+        with mock.patch.object(b_llm_client, "complete", fake_complete):
+            for question, must in _CAPSULES:
+                got = self._ask(question)
+                self.assertNotEqual(got["mode"], "template", question)
+                for phrase in must:
+                    self.assertIn(phrase, got["answer"],
+                                  f"开模型后 {question} → 缺「{phrase}」")
 
 
 if __name__ == "__main__":

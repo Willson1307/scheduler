@@ -29,11 +29,31 @@
     所以不拆成两档，避免前端为一个内部实现细节写分支。
   - `template` ：**固定模板文案**，即「暂时答不上来」「手册未就绪」「请先输入问题」。
     刻意与 `retrieval` 分开：不能让「答不出来」看起来像「检索结果」。
-  - `llm`      ：第 2 层模型润色成功。
+  - `llm`      ：第 2 层模型润色成功，**或** v1.1 的入向解析成功（见下）。
+
+---------------------------------------------------------------------------
+🔴 v1.1（卡 rHrY9D）：AI 只做翻译，两个方向，都不碰计算
+---------------------------------------------------------------------------
+
+    入向  老师的话 → {intent_id, slots} → 后端执行**只读查询** → 组装答案
+    出向  求解器 / 审批的结构化事实 → 人话（D1 在 api_resolve，D3 在 api_approvals）
+
+  · 入向解析在 `b_nl_kernels`（schema / 取值 / 红线三关），本文件只负责**接线**：
+    先看六条 `no_polish`（命中即返回写死文本，**连模型都不进**），再试模型路径，
+    失败就无缝退回原来的关键词路径 —— 两条路径产出**同一种信封**，下游一个渲染分支。
+  · 只读查询由调用方注入的 `facts(intent_id, slots)` 执行（api_chat 里用
+    `b3_kernels.conflict_payload`，与 `/api/conflicts` **同一口径**）。
+    ⛔ 本文件仍然一行 SQL 都没有 —— 这不是洁癖，是为了让内核能被完全离线单测。
+  · 返回体只增不改：`grounded`（恒 True）与 `rule`（`intent_id/slots/source`）是
+    v1.1 新字段；`rule.source` 是排查钥匙 —— 现场答歪时一眼看出是模型解析还是关键词命中。
 
 已知边界（如实，不夸大）：
   - 检索是**词面匹配**，不是语义匹配：同义但用词完全不同的问法会落到「没有这条」。
     这是刻意的取舍 —— 宁可说不知道，也不引入向量库/embedding（零依赖 + 断网可跑）。
+  - v1.1 入向解析**不支持模糊指代**（「我们班」「那个年级」）与多轮上下文：
+    `slots.object` 必须对得上库内真实对象名，否则整条丢弃回退关键词。第一版要求说全名。
+  - v1.1 `query=slots / schedules` 只做枚举合法，**不执行查询**（回退关键词）：
+    查空位要完整区间参数、查课表要周视图网格，都不属于「一句话问一句答」。
   - 语料只含 `docs/30` 与 `docs/07` 两个文件（卡面指定）。手册里没有的内容，
     本层一律答「没有这条」，即便系统确实有该能力（如 `/api/slots` 空位查询，
     文档尚未收录）——**能力存在 ≠ 手册里有**，不许拿实现细节冒充手册原文。
@@ -44,6 +64,9 @@ from __future__ import annotations
 import math
 import os
 import re
+
+from . import b_explain_kernels as X
+from . import b_nl_kernels as NL
 
 # ---------------------------------------------------------------------------
 # 语料与常量
@@ -72,6 +95,7 @@ MAX_PASSAGE_CHARS = 700
 #:    仍然不编答案：改写措辞 ≠ 放宽「没写的一律不猜」这条底线。
 NO_ANSWER = (
     "这个问题我暂时答不上来。\n"
+    "具体规定我不确定，请找开发团队确认。\n"
     "可以点上面的「常问」，或换个说法再问（例如「怎么调课」「看不到冲突」）。\n"
     "需要明确答复的话，点页面底部「关于」——反馈里有开发团队的微信。"
 )
@@ -833,13 +857,23 @@ _LLM_TIMEOUT_S = 15.0
 _LLM_INTENT_TIMEOUT_S = 10.0
 
 
+#: `SCHEDULER_LLM` 的「关」取值（与 `b_llm_client._OFF_WORDS` 同一份口径）。
+_OFF_WORDS = frozenset({"off", "0", "false", "no", "disabled", "disable"})
+
+
 def llm_enabled() -> bool:
     """是否配置了 LLM。🔴 **只判有无，不读取、不使用其值。**
 
     key/url 的读取与拼装全部在 `b_llm_client`（跨人契约），本层不碰 ——
     这里只是为了让 `degraded` 说实话：「本来能调 AI 但没调成」与
     「本来就没启用 AI」是两件不同的事，前端要能区分。
+
+    🔴 2026-11-15（卡 rHrY9D）：加了 `SCHEDULER_LLM=off` 总开关，
+    与 `b_llm_client` 同一份口径（`off/0/false/no`）。一处关掉**两个方向**
+    （入向解析 + 出向解释），问答整体退回纯手册检索，不报错。
     """
+    if os.environ.get("SCHEDULER_LLM", "").strip().lower() in _OFF_WORDS:
+        return False
     return bool(os.environ.get("SCHEDULER_LLM_BASE", "")) and bool(
         os.environ.get("SCHEDULER_LLM_KEY", "")
     )
@@ -874,34 +908,161 @@ def _call_polish(question: str, passages: list[str], polish=None,
 
 
 # ---------------------------------------------------------------------------
+# v1.1（卡 rHrY9D）入向接线：话 → 规则 IR → 只读查询 → 答案
+# ---------------------------------------------------------------------------
+
+def intent_ids() -> list[str]:
+    """意图 id 白名单（唯一事实来源 = 本文件的 `INTENTS`）。"""
+    return [item["id"] for item in INTENTS]
+
+
+def _envelope(answer: str, sources, mode: str, degraded: bool,
+              rule: dict | None = None) -> dict:
+    """统一返回体（🔴 只增不改：旧四字段一个不少，新字段只追加）。
+
+    `grounded` 恒 True：本层所有答案都由后端事实或手册原文支撑，
+    没有任何一句是模型自由生成后未经核对就放行的。字段保留是为了兼容
+    前端已有的判断（值恒 true，不改变任何分支）。
+    """
+    return {
+        "answer": answer,
+        "sources": list(sources or []),
+        "mode": mode,
+        "degraded": bool(degraded),
+        "grounded": True,
+        "rule": rule or {"intent_id": None, "slots": {}, "source": "keyword"},
+    }
+
+
+def _keyword_rule(intent: dict | None) -> dict:
+    return {
+        "intent_id": intent["id"] if intent else None,
+        "slots": {},
+        "source": "keyword",
+    }
+
+
+def _model_rule(rule: dict) -> dict:
+    return {
+        "intent_id": rule.get("intent_id"),
+        "slots": dict(rule.get("slots") or {}),
+        "source": "model",
+    }
+
+
+def _reply_ok(reply: str, fact_text: str, names) -> bool:
+    """模型那句开场白能不能用：数字接地 + 不出现事实里没有的对象名。
+
+    ⛔ 编一个数字或一个班名，就是现场事故 —— 宁可只用事实块。
+    """
+    if not reply:
+        return False
+    if not X.grounded(reply, fact_text):
+        return False
+    for name in names or ():
+        if name in reply and name not in fact_text:
+            return False
+    return True
+
+
+def _ir_path(text: str, complete, facts_fn, gate_ctx: dict | None,
+             vocab: dict[str, str] | None) -> dict | None:
+    """模型路径：令牌化 → parse_rule（三关）→ 只读查询 → 组装答案。
+
+    返回 None 表示「这条路不给答案」，调用方无缝退回关键词路径
+    （两条路径产出同一种信封，下游只有一个渲染分支）。
+    """
+    if facts_fn is None or gate_ctx is None:
+        return None
+
+    names = list(vocab) if vocab else []
+    try:
+        masked, mapping = X.tokenize(text, names)
+        # 兜底：令牌化只覆盖库内已知名字；库里没有的名字（例如打错的班名）
+        # 仍可能被原样送出去，所以再过一遍格式层脱敏。
+        masked = scrub(masked)
+    except Exception:  # noqa: BLE001
+        return None
+
+    ctx = dict(gate_ctx)
+    ctx["tokens"] = dict(mapping)
+
+    rule = NL.parse_rule(masked, intent_ids(), complete=complete, gate_ctx=ctx)
+    if rule is None:
+        return None
+
+    slots = dict(rule.get("slots") or {})
+    if slots.get("object"):
+        slots["object"] = X.untokenize(slots["object"], mapping)
+
+    try:
+        got = facts_fn(rule["intent_id"], slots)
+    except Exception:  # noqa: BLE001 —— 查询出错只降级，绝不 500
+        return None
+    if not got:
+        return None
+    fact_text = (got.get("text") or "").strip()
+    if not fact_text:
+        return None
+
+    body = fact_text
+    reply = X.untokenize(rule.get("reply") or "", mapping)
+    if _reply_ok(reply, fact_text, names):
+        body = reply + "\n\n" + fact_text
+    return _envelope(body, got.get("sources") or [], "llm", False, _model_rule(rule))
+
+
+# ---------------------------------------------------------------------------
 # 对外主入口
 # ---------------------------------------------------------------------------
 
-def answer(question: str, polish=None, vocab: dict[str, str] | None = None) -> dict:
-    """问答主入口：三层降级，返回 `{answer, sources, mode, degraded}`。
+def answer(question: str, polish=None, vocab: dict[str, str] | None = None,
+           complete=None, facts=None, gate_ctx: dict | None = None) -> dict:
+    """问答主入口：三层降级 + v1.1 入向翻译，返回答统一信封。
 
-    参数 `polish` 仅用于测试注入（真实调用走 `b_llm_client.polish`）。
+    参数（除 `vocab` 外都只为测试/接口层注入，生产走缺省）：
+      polish   —— 注入的润色函数（`b_llm_client.polish` 同签名）。
+      vocab    —— `{库内真实对象名: 占位符}`，用于脱敏（api_chat 从库里取）。
+      complete —— 注入的纯底层通道（`b_llm_client.complete` 同签名）；入向解析用。
+      facts    —— `facts(intent_id, slots) -> {"text","sources"} | None`：
+                  **本层唯一执行只读查询的入口**（本模块因此仍然一行 SQL 都没有）。
+      gate_ctx —— 取值关需要的事实（库内对象名 / 扫描窗口 / 当日启用槽位）。
 
-    `mode` 与 `degraded` 的口径见模块 docstring；要点复述：
-
-      - `mode`      ：`retrieval`（手册原文，含意图表命中）/ `llm`（模型润色）/
-                      `template`（固定文案：没有这条、手册未就绪、空问题）
-      - `degraded`  ：`True` = **本可以调 AI 但没调成**；`False` = 本来就没启用 AI
-                      （离线基线，不是故障）或 AI 调用成功。
+    `mode` / `degraded` 的口径见模块 docstring；`rule.source` 是排查钥匙：
+    现场答歪时一眼能看出走的是模型解析（`model`）还是关键词命中（`keyword`）。
 
     ⚠️ 回答里**不含任何「改哪条日程」的指令** —— 本层只解释，变更走现有接口。
+    🔴 六条 `no_polish` 意图**在进模型之前**就返回（卡面红线）：它们出错即现场事故。
     """
     corpus = load_corpus()
     if corpus is None:
-        return {"answer": CORPUS_MISSING, "sources": [], "mode": "template",
-                "degraded": False}
+        return _envelope(CORPUS_MISSING, [], "template", False)
 
     text = (question or "").strip()
     if not text:
-        return {"answer": EMPTY_QUESTION, "sources": [], "mode": "template",
-                "degraded": False}
+        return _envelope(EMPTY_QUESTION, [], "template", False)
 
     intent = match_intent(text)
+
+    # 🔴 六条 no_polish（操作清单 / 权限口径 / 数字口径）：命中即返回写死文本，
+    #    ⛔ 不进模型 —— 连入向解析也不进。理由：这六条改写一次就是现场事故，
+    #    且导览类润色实测要 9.2 秒，纯亏。
+    if intent is not None and intent.get("no_polish"):
+        return _envelope(
+            intent["answer"], [dict(s) for s in intent["sources"]],
+            "retrieval", False, _keyword_rule(intent),
+        )
+
+    enabled = llm_enabled()
+
+    # 🔴 v1.1 入向：模型把话翻成规则 → 三关 → 执行只读查询。
+    #    注入 `polish` 而没注入 `complete` 视为测试环境（老测试只为验润色层），
+    #    此时不触发入向解析，保持既有用例逐字不变、也不打真网。
+    if enabled and (complete is not None or polish is None):
+        got = _ir_path(text, complete, facts, gate_ctx, vocab)
+        if got is not None:
+            return got
+
     if intent is not None:
         # 🔴 2026-11-13 修：原先意图命中**直接返回、根本不调模型** —— 结果是
         #    老师问到的常见问题永远标「手册原文（未启用 AI）」，看起来像 AI 坏了。
@@ -909,42 +1070,24 @@ def answer(question: str, polish=None, vocab: dict[str, str] | None = None) -> d
         #    模型不可用/超时就原样返回速查文案，只是 mode 如实写 retrieval。
         base = intent["answer"]
         sources = [dict(s) for s in intent["sources"]]
-        # 🔴 `no_polish=True` 的意图（导览类操作清单）**直接返回原文**：
-        #    实测「怎么使用此系统」润色耗时 9.2 秒，且模型会把步骤压成一句、
-        #    丢掉「双击格子」这类关键动作。导览是清单，不是文案，不该被改写。
-        #    mode 如实写 retrieval（= 手册速查），不谎称 AI 答的。
-        if intent.get("no_polish"):
-            return {
-                "answer": base,
-                "sources": sources,
-                "mode": "retrieval",
-                "degraded": False,
-            }
-        if llm_enabled():
+        if enabled:
             polished = _call_polish(
                 scrub(text, vocab), [scrub(base, vocab)], polish=polish,
                 timeout_s=_LLM_INTENT_TIMEOUT_S,
             )
             if polished:
-                return {"answer": polished, "sources": sources,
-                        "mode": "llm", "degraded": False}
+                return _envelope(polished, sources, "llm", False,
+                                 _keyword_rule(intent))
             # 配了却没调成：degraded 如实为 True，让前端能说「AI 这次没响应」
-            return {"answer": base, "sources": sources,
-                    "mode": "retrieval", "degraded": True}
-        return {
-            "answer": base,
-            "sources": sources,
-            "mode": "retrieval",
-            "degraded": False,
-        }
+            return _envelope(base, sources, "retrieval", True, _keyword_rule(intent))
+        return _envelope(base, sources, "retrieval", False, _keyword_rule(intent))
 
     hits = retrieve(text)
     if not hits:
         # 🔴 不许编：没命中就说不知道，不拿邻近段落凑一个答案
-        return {"answer": NO_ANSWER, "sources": [], "mode": "template", "degraded": False}
+        return _envelope(NO_ANSWER, [], "template", False)
 
     sources = [{"doc": h["doc"], "section": h["section"]} for h in hits]
-    enabled = llm_enabled()
     polished = None
     if enabled:
         # 🔴 脱敏在**本层**做（卡面红线 4）：问题与段落一起过 scrub，再交给 b_llm_client。
@@ -956,10 +1099,12 @@ def answer(question: str, polish=None, vocab: dict[str, str] | None = None) -> d
             polish=polish,
         )
     if polished:
-        return {"answer": polished, "sources": sources, "mode": "llm", "degraded": False}
-    return {
-        "answer": _retrieval_answer(hits),
-        "sources": sources,
-        "mode": "retrieval",
-        "degraded": enabled,  # 配了却没调成 → 这才是「降级」
-    }
+        # D2 字数上限：检索层答案最多 300 字（卡面写死），服务端硬截断一次。
+        return _envelope(X._truncate(polished, X.MAX_D2_CHARS), sources, "llm", False)
+    return _envelope(
+        _retrieval_answer(hits),
+        sources,
+        "retrieval",
+        enabled,  # 配了却没调成 → 这才是「降级」
+    )
+

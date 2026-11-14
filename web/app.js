@@ -1503,7 +1503,54 @@ function renderResolveResult(body) {
       strip.appendChild(fix);
     }
     box.appendChild(strip);
+
+    /* ---- v1.1（卡 rHrY9D）D1：一句人话解释 ----
+     * 🔴 这里只插一个**占位块**就返回：结果卡片（数字、条目、撤销按钮）已经全部
+     *    渲染完，模型慢不慢都不影响它。解释由一个**独立请求**异步补进来，
+     *    3.5 秒没回来就换成上面这些数字拼的模板句，**不重排、不闪、不弹错**。
+     * ⛔ 绝不同步等待模型 —— 那会把整个结果区卡住（卡面硬要求）。
+     */
+    const why = el('div', { cls: 'banner why' });
+    why.appendChild(el('span', { text: '正在整理说明…' }));
+    box.appendChild(why);
+    loadResolveExplain(sid, why, { applied: applied, before: before, after: after });
   }
+}
+
+/**
+ * 异步取「为什么这样改」的那句话。
+ *
+ * 失败 / 超时 / 后端降级 → 一律退回本地模板句（数字全部来自本次响应，不编）。
+ * 🔴 只替换这一个 div 的文字，父节点与顺序都不动 —— 否则页面会跳一下。
+ */
+function loadResolveExplain(sid, box, nums) {
+  const fallback = '本次自动调整应用了 ' + (nums.applied === null ? '?' : String(nums.applied))
+    + ' 个方案，冲突从 ' + (nums.before === null ? '?' : String(nums.before))
+    + ' 处降到 ' + (nums.after === null ? '?' : String(nums.after)) + ' 处。';
+
+  function settle(text) {
+    clear(box);
+    box.appendChild(el('span', { text: text }));
+  }
+
+  function race(ms) {
+    // apiPost 没有超时参数（改它要动全部调用方）；这里在**调用侧**加一层超时，
+    // 超时后只是不再采用这个结果，不取消已发出的请求（只读，无副作用）。
+    return new Promise(function (resolve) {
+      let done = false;
+      const t = setTimeout(function () { if (!done) { done = true; resolve(null); } }, ms);
+      p.then(function (v) { if (!done) { done = true; clearTimeout(t); resolve(v); } },
+             function () { if (!done) { done = true; clearTimeout(t); resolve(null); } });
+    });
+  }
+
+  const p = apiPost('/api/resolve/explain', withGroup({ snapshot_id: sid }), {});
+  race(3500).then(function (body) {
+    const text = body ? str(body, 'explanation', '') : '';
+    settle(text || fallback);
+  }).catch(function () {
+    settle(fallback);
+  });
 }
 
 /** 当前登录身份是否管理员（仅用于决定「固化此版本」按钮是否显示）。
