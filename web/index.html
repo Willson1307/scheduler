@@ -17,7 +17,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/png" href="favicon.png?v=20261210">
+<link rel="icon" type="image/png" href="favicon.png?v=20261211">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -877,6 +877,71 @@
   }
   .tech-notes p { margin: 8px 0 0; font-size: var(--fs-xs); line-height: 1.8; }
   .tech-notes code { color: var(--c-text); }
+     ⛔ 不做全屏遮罩：不压暗页面，演示时不打断视线；点抽屉外或 Esc 关闭。
+     ⛔ 抽屉内的 #secChat 是同一份 DOM（id 不变），不是复制的第二套问答。 */
+  .fab {
+    position: fixed; right: 22px; bottom: 22px; z-index: 60;
+    display: flex; align-items: center; gap: 8px;
+    height: 52px; padding: 0 18px 0 14px; border-radius: 26px; border: 0;
+    background: var(--c-primary); color: #fff; cursor: pointer; font: inherit;
+    font-weight: 700; box-shadow: 0 6px 18px rgba(31, 78, 121, .28);
+  }
+  .fab:hover { background: #17405f; }
+  .fab-ico {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; border-radius: 50%;
+    background: rgba(255, 255, 255, .18); font-size: .72rem; letter-spacing: .5px;
+  }
+  .fab-txt { font-size: 1rem; }
+
+  .sheet {
+    position: fixed; right: 22px; bottom: 86px; z-index: 61;
+    width: 420px; max-height: min(72vh, 640px);
+    display: flex; flex-direction: column;
+    background: var(--c-surface); border: 1px solid var(--c-border-st);
+    border-radius: 10px; box-shadow: 0 18px 48px rgba(20, 30, 45, .28);
+    overflow: hidden;
+  }
+  .sheet[hidden] { display: none; }
+  .sheet-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; background: var(--c-primary); color: #fff;
+  }
+  .sheet-title { font-weight: 700; font-size: 1rem; }
+  .sheet-hint { flex: 1; font-size: .8rem; opacity: .82; }
+  .sheet-x {
+    background: none; border: 0; color: #fff; cursor: pointer;
+    font-size: 1.5rem; line-height: 1; padding: 0 4px;
+  }
+  .sheet-body { overflow: auto; padding: 12px; }
+  /* 抽屉里的 #secChat 去掉原区段外框，只留内容 */
+  .sheet-body #secChat { border: 0; padding: 0; background: none; }
+  .sheet-body #secChat .sec-head { margin-top: 0; }
+  /* 抽屉顶栏已有「问一下」，区段 h2 重复 → 只留状态字 */
+  .sheet-body #secChat .sec-head h2 { display: none; }
+  .sheet-body #chatBox { max-height: 34vh; overflow: auto; }
+
+  /* 二级区入口：替代原来那个折叠的「问一下」格 */
+  .chat-entry-btn {
+    display: flex; align-items: center; gap: 12px; width: 100%;
+    padding: 14px; border: 1px dashed var(--c-border-st); border-radius: 8px;
+    background: var(--c-primary-l); cursor: pointer; text-align: left; font: inherit;
+  }
+  .chat-entry-btn:hover { border-style: solid; border-color: var(--c-primary); }
+  .ce-ico {
+    flex: none; width: 34px; height: 34px; border-radius: 50%;
+    background: var(--c-primary); color: #fff;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: .8rem; font-weight: 700;
+  }
+  .ce-txt b { display: block; font-size: 1rem; color: var(--c-text); }
+  .ce-txt small { display: block; margin-top: 2px; font-size: .82rem; color: var(--c-text-dim); }
+
+  @media (max-width: 720px) {
+    .sheet { right: 8px; left: 8px; width: auto; bottom: 80px; max-height: 78vh; }
+    .fab { right: 12px; bottom: 12px; }
+  }
+=======
 
   /* ---------- 功能介绍悬停框（卡 rY3Bpn / F-12） ----------
      每个功能区块标题右侧一个 ⓘ：悬停 / 键盘聚焦 / 触屏点开时弹出「这是什么 · 怎么用」。
@@ -930,7 +995,7 @@
     margin: 0 0 4px; font-size: 0.95rem; line-height: 1.65; color: var(--c-text-dim);
   }
   .tip-box .tip-line:last-child { margin-bottom: 0; }
-</style>
+  /* ========== 问一下：常驻入口（FAB）+ 右下抽屉（2026-11-15） ===</style>
 </head>
 <body>
 
@@ -1182,16 +1247,7 @@
     </details>
   </section>
 
-  <!-- ---------- 问一下（rn6JxF 前端 / B-6 POST /api/chat） ----------
-       🔴 与周视图、「一键消解」同页（AGENTS §8：单页，不做多页跳转、不做前端路由）。
-       🔴 mode 必须露在界面上：llm → 「AI 回答」；retrieval / template →
-          「手册原文（未启用 AI）」。⛔ 不能让老师以为所有回答都是 AI 生成的 ——
-          这是诚信要求，也是答辩口径（AI 只做自然语言理解与结果解释）。
-       🔴 前端不拼 prompt、不存 key：问题原样 POST 给后端，模型调用只在后端 env 里决定。
-       🔴 「手册里没有这条」不是故障：后端返 200 + mode=template，照样按原文渲染。
-       🔴 卡 runQn7：本块默认收起（<details>）。h2 / 状态字 / 芯片 / 错误横幅都留在
-          details 外 —— 收起时也必须能看见「有没有答过、有没有失败」，也要能直接点问。 -->
-  <section id="secResult">
+<section id="secResult">
     <h2>消解结果 <span class="hint">消解前后对比</span>
       <span id="resSum" class="fold-state">尚未执行消解</span></h2>
     <details id="resDetails" class="fold">
@@ -1203,46 +1259,15 @@
   <!-- ---------- 变更请求（F7 / B8 审批流，卡 runQn7：默认收起） ----------
        🔴 刷新按钮与两条横幅（#reqMsg / #reqErr）都留在 <details> 外：
           放进 summary 会「刷新 + 开合」双触发；折进去则会「失败无声」。 -->
-  <section id="secChat">
+    <section id="secChatEntry" class="chat-entry-sec">
     <div class="sec-head">
       <h2>问一下 <span class="hint">问「这件事该怎么操作」，答案来自用户手册</span></h2>
       <span id="chatSum" class="fold-state">尚未提问</span>
     </div>
-    <!-- 预设问题芯片：一排灰底小按钮。点一下 = 预填 + 触发同一条 POST /api/chat。
-         🔴 data-q 里只放问题，⛔ 前端不内置任何答案文本（答案只能来自后端）。
-         这 8 条已实测命中手册检索层（mode=retrieval），不会答「手册里没有这条」。 -->
-    <div id="chatChips" class="q-chips" role="group" aria-label="常见问题">
-      <span class="q-chips-label">常问：</span>
-      <button type="button" class="q-chip" data-q="我想把周三下午的课调开，怎么弄">调课</button>
-      <button type="button" class="q-chip" data-q="临时取消一节课怎么做">临时取消</button>
-      <button type="button" class="q-chip" data-q="调休那天按哪天的课表算">调休</button>
-      <button type="button" class="q-chip" data-q="谁能批准改课表">谁能批准</button>
-      <button type="button" class="q-chip" data-q="教师能不能直接改永久课表">永久改课</button>
-      <button type="button" class="q-chip" data-q="一键消解点了没变化">消解没反应</button>
-      <button type="button" class="q-chip" data-q="登录失败了怎么办">登录失败</button>
-      <button type="button" class="q-chip" data-q="系统会记录我点什么吗">隐私</button>
-    </div>
-    <!-- 失败态：401 走 handle401（清 token + 弹登录栏）；其它错误原文展示后端 message
-         🔴 放在 <details> 之外：折起来还能看见失败 -->
-    <div id="chatErr" class="banner error" role="alert" aria-live="assertive" hidden></div>
-    <details id="chatDetails" class="fold">
-      <summary>展开输入框与回答</summary>
-      <div class="chat-form">
-        <div class="field grow">
-          <label for="chatQ">你的问题（≤500 字，回车即可提问）</label>
-          <input id="chatQ" type="text" maxlength="500" placeholder="例如：我想把周三下午的课调开">
-        </div>
-        <div class="field">
-          <label>&nbsp;</label>
-          <button id="chatBtn" class="primary" type="button">问一下</button>
-        </div>
-      </div>
-      <div id="chatBox"><div class="empty">尚未提问。</div></div>
-      <p class="note">
-        回答、来源标识与出处均由系统给出。标注「手册原文（未启用 AI）」时，
-        这句话来自手册，未经模型改写。问答只做解释，改课仍走下方「变更请求」审批流，不写入任何数据。
-      </p>
-    </details>
+    <button type="button" id="openChat" class="chat-entry-btn">
+      <span class="ce-ico">AI</span>
+      <span class="ce-txt"><b>打开问一下</b><small>试试「怎么调课」「高一(1)班周三第一节撞了吗」</small></span>
+    </button>
   </section>
 
 
@@ -1304,11 +1329,67 @@
     <div>时之交响 TimeSymphony · <button type="button" id="aboutBtn" class="footer-link">关于</button></div>
   </footer>
 </div>
+<!-- 问一下：常驻入口（FAB）+ 右下抽屉。不做全屏遮罩：不压暗页面，点外面或 Esc 关闭。
+     🔴 抽屉里放的是**同一份** #secChat DOM（id 不变），不是复制的第二套问答。 -->
+<button type="button" id="fabChat" class="fab" aria-label="问一下" title="问一下">
+  <span class="fab-ico">AI</span><span class="fab-txt">问一下</span>
+</button>
+
+<div id="chatSheet" class="sheet" hidden role="dialog" aria-label="问一下">
+  <div class="sheet-bar">
+    <span class="sheet-title">问一下</span>
+    <span class="sheet-hint">答案来自用户手册，只解释不写数据</span>
+    <button type="button" id="chatSheetClose" class="sheet-x" aria-label="关闭">×</button>
+  </div>
+  <div class="sheet-body">
+<section id="secChat">
+    <div class="sec-head">
+      <h2>问一下 <span class="hint">问「这件事该怎么操作」，答案来自用户手册</span></h2>
+      <span id="chatSum" class="fold-state">尚未提问</span>
+    </div>
+    <!-- 预设问题芯片：一排灰底小按钮。点一下 = 预填 + 触发同一条 POST /api/chat。
+         🔴 data-q 里只放问题，⛔ 前端不内置任何答案文本（答案只能来自后端）。
+         这 8 条已实测命中手册检索层（mode=retrieval），不会答「手册里没有这条」。 -->
+    <div id="chatChips" class="q-chips" role="group" aria-label="常见问题">
+      <span class="q-chips-label">常问：</span>
+      <button type="button" class="q-chip" data-q="我想把周三下午的课调开，怎么弄">调课</button>
+      <button type="button" class="q-chip" data-q="临时取消一节课怎么做">临时取消</button>
+      <button type="button" class="q-chip" data-q="调休那天按哪天的课表算">调休</button>
+      <button type="button" class="q-chip" data-q="谁能批准改课表">谁能批准</button>
+      <button type="button" class="q-chip" data-q="教师能不能直接改永久课表">永久改课</button>
+      <button type="button" class="q-chip" data-q="一键消解点了没变化">消解没反应</button>
+      <button type="button" class="q-chip" data-q="登录失败了怎么办">登录失败</button>
+      <button type="button" class="q-chip" data-q="系统会记录我点什么吗">隐私</button>
+    </div>
+    <!-- 失败态：401 走 handle401（清 token + 弹登录栏）；其它错误原文展示后端 message
+         🔴 放在 <details> 之外：折起来还能看见失败 -->
+    <div id="chatErr" class="banner error" role="alert" aria-live="assertive" hidden></div>
+    <details id="chatDetails" class="fold">
+      <summary>展开输入框与回答</summary>
+      <div class="chat-form">
+        <div class="field grow">
+          <label for="chatQ">你的问题（≤500 字，回车即可提问）</label>
+          <input id="chatQ" type="text" maxlength="500" placeholder="例如：我想把周三下午的课调开">
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button id="chatBtn" class="primary" type="button">问一下</button>
+        </div>
+      </div>
+      <div id="chatBox"><div class="empty">尚未提问。</div></div>
+      <p class="note">
+        回答、来源标识与出处均由系统给出。标注「手册原文（未启用 AI）」时，
+        这句话来自手册，未经模型改写。问答只做解释，改课仍走下方「变更请求」审批流，不写入任何数据。
+      </p>
+    </details>
+  </section>
+  </div>
+</div>
 
 <!-- 版本号唯一来源 = src/server/config.py 的 ASSET_VERSION；本文件三处 ?v= 必须与它一致。
      版本沿革写在 config.py 的注释里（服务端文件，不会随页面下发）。
      ⛔ 不要在这里记流水：这是 HTML 注释，闭合符写错一行就会整段漏到页面上（2026-11-13 已踩过）。 -->
-<script src="brand-icon.js?v=20261210"></script>
-<script src="app.js?v=20261210"></script>
+<script src="brand-icon.js?v=20261211"></script>
+<script src="app.js?v=20261211"></script>
 </body>
 </html>
