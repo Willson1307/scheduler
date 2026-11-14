@@ -142,10 +142,15 @@ class PolishEnvTestCase(unittest.TestCase):
         self.assertEqual(len(body["messages"]), 2)
         self.assertEqual(body["messages"][0]["role"], "system")
         self.assertEqual(body["messages"][1]["role"], "user")
-        # 系统提示卡面原文（一字不改）
-        self.assertIn("只根据下面提供的资料回答", body["messages"][0]["content"])
-        self.assertIn("手册里没有这条", body["messages"][0]["content"])
-        self.assertIn("不要推测、不要编步骤", body["messages"][0]["content"])
+        # 系统提示：契约意图不变（只依据资料、查不到要说不知道、不许编），
+        # 但 2026-11-14 改了判据与话术 —— 旧话术「资料里没有就直接说『手册里没有这条』」
+        # 让模型把「问法措辞不同」当成「资料里没有」，实测常问胶囊「调课」「永久改课」
+        # 点开即拒答。故断言改为：必须明确兜底行为，且**不得再出现旧的固定话术**。
+        sp = body["messages"][0]["content"]
+        self.assertIn("只根据下面提供的资料回答", sp)
+        self.assertIn("不要推测、不要编造步骤或数字", sp)
+        self.assertIn("确实找不到相关内容时", sp)
+        self.assertNotIn("请找开发者确认", sp)
         # user 内容 = question + 段落拼接
         self.assertEqual(
             body["messages"][1]["content"],
