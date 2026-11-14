@@ -2409,7 +2409,8 @@ function openAbout() {
   const verVal = addRow('版本', '读取中…');
   const dateVal = addRow('发布', '读取中…');
   addRow('团队', '王思勋（队长 · 后端）· 张晋嘉（后端）· 汤涵洋溢（前端）');
-  addRow('反馈', '王思勋（队长）· 微信 wsx130307');
+  // 2026-11-14：试用信息由全队共同发出，联系方式指向团队而非某一个人（微信保留）。
+  addRow('反馈', '时之交响开发团队 · 微信 wsx130307');
   addRow('数据', '页面为脱敏的试用数据，不含任何真实学生信息');
   box.appendChild(list);
 
