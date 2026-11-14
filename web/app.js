@@ -1379,18 +1379,38 @@ function renderSide(side) {
     box.appendChild(el('div', { cls: 'ti', text: title }));
   }
 
-  // 🔴 slots 一律原样显示，绝不做字符串比较（AGENTS §9b：长度不定，比字符串会静默漏匹配）
-  // 2026-11-12：节次编码与日期并成一行 —— 整行宽版里一条冲突原来要 4 行副信息，
-  // 并成 2 行后三条冲突合计省出 ~80px，第一屏能多露出一条。
+  // 2026-11-14（卡 rEz9Ms）：节次行改读后端 readable，**不再把 slots 掩码原文摆给老师**。
+  //
+  // 🔴 为什么不是「把 hex 转成十进制」：掩码是**位图**不是数值。
+  //    0x000a = 第 1+3 节，0x0018 = 第 3+4 节；写成 10 / 24 是错的，
+  //    写成二进制串也不是「节次」。所以这里**做一个 hex → 数字的换算都不做**，
+  //    只读同一响应里已有的 side.readable（契约 §5，后端 b3_kernels.readable() 已给全）。
+  //    AGENTS §8：前端不做位运算、不自拼 hex、不比较掩码字符串。
+  //
+  // 掩码原文降级到本行 title（悬停仍可核对），与 renderMasks() 的
+  // `title: '占用掩码 ' + raw` 是同一写法，两处口径一致。
+  //
+  // 2026-11-12：节次与日期并成一行（原 4 行副信息 → 2 行，第一屏多露出一条）——保留。
   const s = str(side, 'slots', '');
   const d = str(side, 'date', '');
-  if (s || d) {
-    const m = el('div', { cls: 'mt' });
-    if (s) {
-      m.appendChild(el('span', { text: '节次 ' }));
-      m.appendChild(el('code', { text: s }));
+  // 去重 + 升序：后端 readable 顺序不保证，重复值也不能重复显示（「第 1、1 节」很蠢）
+  const periods = [];
+  arr(side, 'readable').forEach(function (r) {
+    const p = readablePeriod(r);
+    if (p !== null && p >= 1 && periods.indexOf(p) < 0) periods.push(p);
+  });
+  periods.sort(function (a, b) { return a - b; });
+  if (s || d || periods.length) {
+    const m = el('div', { cls: 'mt', attrs: s ? { title: '占用掩码 ' + s } : null });
+    // 🔴 readable 缺失 / 空 / 全是非法值 → 显式说「节次未给出」，**绝不回退去打印 hex**：
+    //    回退等于没修，而且在数据异常时又把乱码塞回给老师。
+    if (periods.length) {
+      // 「节次 第 3、4 节」：与 conflictWhenText() 的「第N节」措辞同源，老师不用二次翻译
+      m.appendChild(el('span', { text: '节次 第 ' + periods.join('、') + ' 节' }));
+    } else {
+      m.appendChild(el('span', { text: '节次未给出' }));
     }
-    if (d) m.appendChild(el('span', { text: (s ? ' · ' : '') + d }));
+    if (d) m.appendChild(el('span', { text: ' · ' + d }));
     box.appendChild(m);
   }
   return box;
