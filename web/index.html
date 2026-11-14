@@ -17,7 +17,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/png" href="favicon.png?v=20261209">
+<link rel="icon" type="image/png" href="favicon.png?v=20261210">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -877,6 +877,51 @@
   }
   .tech-notes p { margin: 8px 0 0; font-size: var(--fs-xs); line-height: 1.8; }
   .tech-notes code { color: var(--c-text); }
+
+  /* ---------- 功能介绍悬停框（卡 rY3Bpn / F-12） ----------
+     每个功能区块标题右侧一个 ⓘ：悬停 / 键盘聚焦 / 触屏点开时弹出「这是什么 · 怎么用」。
+     🔴 为什么不用原生 title：title 只认鼠标悬停（键盘 Tab 不显示、手机没有 hover），
+        而且是单行纯文本，分不出「定位」与「操作」两层。
+     🔴 文本一律由 app.js 的 el() + textContent 生成（AGENTS §8 禁 innerHTML）。
+     ⛔ 不加 transition / animation（全站口径）；⛔ 不用 opacity 藏 ——
+        display:none 才是「看不见也不挡点击」，否则浮层会盖住下面的按钮。 */
+  .tip-wrap { position: relative; display: inline-flex; align-items: center; align-self: center; }
+  .tip-btn {
+    font: inherit; font-size: var(--fs-sm); line-height: 1;
+    padding: 2px 7px; margin-left: 2px;
+    border: 1px solid var(--c-border-st); border-radius: 999px;
+    background: var(--c-surface); color: var(--c-primary);
+    cursor: help;
+  }
+  .tip-btn:hover, .tip-btn:focus { border-color: var(--c-primary); color: var(--c-text); }
+  .tip-box {
+    display: none;
+    position: absolute; top: calc(100% + 6px); left: 0; z-index: 60;
+    width: max-content;
+    /* 🔴 768px 铁律：宽度按视口收口，浮层绝不把页面撑出横向滚动 */
+    max-width: min(340px, calc(100vw - 32px));
+    padding: 10px var(--sp);
+    background: var(--c-surface);
+    border: 1px solid var(--c-border-st);
+    border-left: 4px solid var(--c-primary);
+    border-radius: var(--radius);
+    box-shadow: 0 6px 18px rgba(31, 39, 51, .18);
+    font-family: var(--font-sans);
+    text-align: left; white-space: normal;
+  }
+  /* 三条缺一不可：悬停＝鼠标；focus-within＝键盘 Tab；is-open＝触屏点开 */
+  .tip-wrap:hover .tip-box,
+  .tip-wrap:focus-within .tip-box,
+  .tip-wrap.is-open .tip-box { display: block; }
+  /* 浮层里的字比正文小一档（0.95rem ≈ 16px），仍按「1 米可读」给行高 */
+  .tip-box .tip-title {
+    display: block; font-size: 0.95rem; font-weight: 700;
+    color: var(--c-text); margin-bottom: 4px;
+  }
+  .tip-box .tip-line {
+    margin: 0 0 4px; font-size: 0.95rem; line-height: 1.65; color: var(--c-text-dim);
+  }
+  .tip-box .tip-line:last-child { margin-bottom: 0; }
 </style>
 </head>
 <body>
@@ -1255,7 +1300,7 @@
 <!-- 版本号唯一来源 = src/server/config.py 的 ASSET_VERSION；本文件三处 ?v= 必须与它一致。
      版本沿革写在 config.py 的注释里（服务端文件，不会随页面下发）。
      ⛔ 不要在这里记流水：这是 HTML 注释，闭合符写错一行就会整段漏到页面上（2026-11-13 已踩过）。 -->
-<script src="brand-icon.js?v=20261209"></script>
-<script src="app.js?v=20261209"></script>
+<script src="brand-icon.js?v=20261210"></script>
+<script src="app.js?v=20261210"></script>
 </body>
 </html>
