@@ -77,9 +77,11 @@ from scheduler.seeds import seed_demo  # noqa: E402
 #:    改了 app.js 与 index.html，四处一起递增到 20261123。
 #:    🔴 20261114 在 11-12 已被 secSlots 用掉 —— 复用旧号等于没改，浏览器不会重拉。
 #: 2026-11-15（卡 rHrY9D，v1.1）：消解结果区加「一句人话解释」（async 拉
-#:    POST /api/resolve/explain），改了 app.js 与 index.html（新增 .banner.why 样式），
-#:    三处 ?v= 一起递增到 20261207。
-ASSET_VERSION = "20261207"
+#:    POST /api/resolve/explain），改了 app.js 与 index.html（新增 .banner.why 样式）。
+#:    🔴 20261207 已被 rEz9Ms（冲突列表节次改读 readable）占用 —— 两条分支各自取了
+#:    同一个号，合并后前端内容与任何一版都不同，必须重新取号，否则浏览器不重拉。
+#:    三处 ?v= 一起递增到 20261208。
+ASSET_VERSION = "20261208"
 
 #: 产品版本（**给人看**：关于弹层 / 材料 / 答辩口径）。
 #:
