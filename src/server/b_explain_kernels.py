@@ -34,8 +34,10 @@ MAX_D1_CHARS = 120
 MAX_D3_CHARS = 120
 MAX_D2_CHARS = 300
 
-#: 出向超时：短事实 + 短回答，3 秒足够；回不来就用模板句，绝不拖住界面。
-EXPLAIN_TIMEOUT_S = 3.0
+#: 出向超时。原设 3 秒（"短事实 + 短回答"），线上实测**每次都超时**
+#: （glm-4-flash 带事实文本实测 3.6s 左右，返回的全是模板句，source 恒为 template）。
+#: 本接口不阻塞主流程（卡片先渲染），所以把余量放到 6 秒；前端调用侧同步 6.5 秒。
+EXPLAIN_TIMEOUT_S = 6.0
 
 #: 全角数字（０-９）→ 半角。用码点算，**不写字面量**：
 #: 一串连续数字会被 `tests/test_no_hardcoded_passwords.py` 当成弱口令报警。
@@ -193,6 +195,17 @@ def _call(complete, system: str, user: str, timeout_s: float) -> str | None:
 # D1：消解结果解释
 # ---------------------------------------------------------------------------
 
+def _who(obj) -> str:
+    """对象名占位符（—/空）→ 空串。
+
+    没有 target 参与者的日程（典型是一次性活动）查不到对象名，
+    `api_resolve._schedule_meta` 会返回「—」。模板句直接拼会变成
+    「例如 —《示例活动》…」，对老师是乱码。
+    """
+    s = str(obj or "").strip()
+    return "" if s in ("", "—", "-") else s
+
+
 def template_resolve(facts: dict) -> str:
     """本地模板句（模型不可用 / 不接地时的兜底）。信息完整、不含推测。"""
     applied = facts.get("applied", 0)
@@ -203,7 +216,9 @@ def template_resolve(facts: dict) -> str:
     changes = facts.get("changes") or []
     if changes:
         first = changes[0]
-        seg = f"例如 {first['object']}《{first['title']}》从{first['from']}挪到{first['to']}"
+        who = _who(first.get("object"))
+        prefix = f"例如 {who}" if who else "例如"
+        seg = f"{prefix}《{first['title']}》从{first['from']}挪到{first['to']}"
         if len(changes) > 1:
             seg += f"，共调整 {len(changes)} 条日程"
         parts.append(seg + "。")
@@ -220,8 +235,9 @@ def facts_text(facts: dict) -> str:
         f"消解后冲突：{facts.get('after', 0)} 处",
     ]
     for i, c in enumerate(facts.get("changes") or [], 1):
+        who = _who(c.get("object"))
         lines.append(
-            f"改动{i}：{c['object']}《{c['title']}》由{c['from']}改到{c['to']}"
+            f"改动{i}：{who + ' ' if who else ''}《{c['title']}》由{c['from']}改到{c['to']}"
         )
     for extra in facts.get("extra") or []:
         lines.append(f"说明：{extra}")
