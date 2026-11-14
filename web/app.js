@@ -944,7 +944,7 @@ function showBanner(node, msg) {
  *     格子文字 = 查看对象名（/api/schedules 不返回课程名，契约 §4）
  *   · 冲突格（叠加层）← /api/conflicts 的 readable 定位，只在已有占用格上标红，
  *     不决定格子是否存在
- *   · 「每日占用」芯片 ← grid 的十六进制串原样透传（renderMasks，不反解）
+ *   · 「每日占用」芯片 ← grid 的掩码经 dayMaskPeriods() 反解成「第 N 节」
  *
  * 🔴 关于节次数：契约未给节次列表字段，AGENTS §1b 又要求「每天几节」属规则数据化。
  *    这里的处理是——若响应里带了 periods 数组就按它的 .length 渲染，
@@ -1147,13 +1147,17 @@ function renderWeek(schedules, conflicts) {
   box.appendChild(renderMasks(schedules, days));
 }
 
-/** 「每日占用」：把 grid 里的掩码原样透传出来给人看。 */
+/** 「每日占用」：把 grid 里的掩码**反解成节次**再显示（掩码原文降级为悬停 title）。 */
 function renderMasks(schedules, days) {
+  // 🔴 2026-11-14：节次数取自响应 periods，不写死 10（换作息库不用改这里）。
+  const _periods = arr(schedules, 'periods');
+  const maskLimit = _periods.length || DEMO_PERIODS;
   const wrap = el('div', { cls: 'masklist' });
   const grid = (schedules && typeof schedules.grid === 'object' && schedules.grid) ? schedules.grid : {};
   const objId = state.objectId;
   const objName = objectName(objId);
-  wrap.appendChild(el('span', { text: '每日占用（' + (objId ? objName + ' / ' + objId : '未选对象') + '）：' }));
+  // 🔴 2026-11-14：标题不再显示 obj_xxx 内部 ID —— 老师不知道那是什么，会当成乱码。
+  wrap.appendChild(el('span', { text: '每日占用（' + (objId ? objName : '未选对象') + '）：' }));
 
   if (!objId) {
     wrap.appendChild(el('span', { cls: 'chip', text: '请先在上方选择要查看的对象' }));
@@ -1172,8 +1176,11 @@ function renderMasks(schedules, days) {
   }
   found.forEach(function (pair) {
     const isHit = state.hitDates.indexOf(pair[0]) >= 0;
-    const chip = el('span', { cls: isHit ? 'chip hit' : 'chip' });
-    chip.appendChild(el('code', { text: pair[1] }));   // 十六进制串原样透传
+    const chip = el('span', { cls: isHit ? 'chip hit' : 'chip', attrs: { title: '占用掩码 ' + pair[1] } });
+    // 🔴 2026-11-14：不再把 0x000018 直接摆给老师看（像乱码）。只做**反解**（读位、不造值），
+    //    掩码原文降级到 title，悬停仍可核对。
+    const ps = dayMaskPeriods(pair[1], maskLimit);
+    chip.appendChild(el('span', { text: ps.length ? '第 ' + ps.join('、') + ' 节' : '无占用' }));
     chip.appendChild(el('span', { text: ' ' + dowLabel(dayIndexOf(pair[0], state.days) + 1) }));
     wrap.appendChild(chip);
   });

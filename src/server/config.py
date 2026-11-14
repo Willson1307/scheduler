@@ -76,7 +76,7 @@ from scheduler.seeds import seed_demo  # noqa: E402
 #: 2026-11-13（卡 r4kJEe）：登录态改 localStorage（12h 滑动 / 24h 上限）+ 退出登录按钮，
 #:    改了 app.js 与 index.html，四处一起递增到 20261123。
 #:    🔴 20261114 在 11-12 已被 secSlots 用掉 —— 复用旧号等于没改，浏览器不会重拉。
-ASSET_VERSION = "20261204"
+ASSET_VERSION = "20261205"
 
 #: 产品版本（**给人看**：关于弹层 / 材料 / 答辩口径）。
 #:
