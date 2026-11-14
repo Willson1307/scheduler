@@ -2368,6 +2368,7 @@ function mountBrandIcon() {
  */
 function boot() {
   mountBrandIcon();
+  mountFeatureTips();   // F-12：六个功能区块标题各挂一个ⓘ（只依赖 DOM，不依赖登录态）
   state.sessionId = newSessionId();   // F5：每次打开页面生成一个会话串（埋点时长统计用）
   // runQn7：首屏状态条初始态（未登录＝黄 Badge，不显示任何数字）
   setStatus('unauth', '登录后显示本周冲突数');
@@ -4418,6 +4419,148 @@ async function refreshWeekAndConflicts() {
   syncResolveDisabled();
   out.ok = true;
   return out;
+}
+
+/* =============================================================================
+ * 12. 功能介绍悬停框（卡 rY3Bpn / F-12）
+ * -----------------------------------------------------------------------------
+ * 做什么：给 6 个功能区块的标题各挂一个 ⓘ，悬停 / 键盘聚焦 / 触屏点开时
+ *         弹出「这是什么 · 怎么用」两段说明。
+ *
+ * 为什么不用原生 title 属性（已有按钮上的 title 保留，那些是补充信息）：
+ *   1. title 只认鼠标悬停 —— 键盘 Tab 到元素上不显示，键盘用户拿不到这条信息；
+ *   2. 手机 / 平板没有 hover，title 基本永远不出现，而教师试用很可能就是手机；
+ *   3. title 是单行纯文本，分不出「定位」与「操作」两层，长句在浮层里会被截。
+ *
+ * 🔴 文本一律走 el() + textContent（AGENTS §8 禁 innerHTML）。
+ * 🔴 文案口径承接 F-9（rrnyAA）：只说老师能操作的话。⛔ 不出现接口路径、
+ *    掩码、契约编号 —— 那些留在页面底部「实现原理与技术说明」的折叠区。
+ * 🔴 区块 id 与 index.html 一一对应；找不到就跳过，⛔ 不许抛异常打断整页脚本
+ *    （一个区块改名就让全站不加载，是比缺浮层严重得多的故障）。
+ * ========================================================================== */
+
+const FEATURE_TIPS = [
+  {
+    id: 'secWeek',
+    name: '周视图',
+    lines: [
+      '这一周里某人 / 某班 / 某间教室的课表：一格＝一天里的一节。',
+      '红格＝两件事撞在同一节，必须处理；灰格是已占用的正常课。',
+      '先选左侧「当前组」，再选「查看对象」；双击格子或点右上角「⋯」可临时微调某一天。'
+    ]
+  },
+  {
+    id: 'secConflict',
+    name: '冲突列表',
+    lines: [
+      '把这一周所有撞车按组列出来，硬冲突不处理就排不进去。',
+      '点「一键消解」，系统算出改动最少的方案并写入课表；不满意可在「消解结果」里撤销。',
+      '教室容量这类只是提醒，不会拦住排课。'
+    ]
+  },
+  {
+    id: 'secSlots',
+    name: '查空位',
+    lines: [
+      '反过来找时间：某段日期里连续 N 节都空着的位置。',
+      '选对象、起止日期、连排节数后点「查空位」；没有空位也会明说，不会留白。',
+      '「按此提议」不会立刻改课表 —— 它走审批，批准后才生效。'
+    ]
+  },
+  {
+    id: 'secResult',
+    name: '消解结果',
+    lines: [
+      '消解前后各有多少处冲突，用数字说清改了什么。',
+      '默认收起，点标题展开；可「撤销本次消解」，课表按应用前的记录逐项还原。',
+      '管理员还能「固化此版本」，固化后不可撤销。'
+    ]
+  },
+  {
+    id: 'secChat',
+    name: '问一下',
+    lines: [
+      '问「这件事该怎么操作」，答案取自用户手册。',
+      '点下面的常见问题，或自己输入后回车；手册里没有就照实说，不会瞎编。',
+      '标「手册原文（未启用 AI）」时是手册原话、未经模型改写。问答只解释，不改任何数据。'
+    ]
+  },
+  {
+    id: 'secRequests',
+    name: '变更请求',
+    lines: [
+      '永久性改动（比如长期改课）不能直接生效，要提请求、由别人批准。',
+      '提议后是「待批准」，批准才写进课表；自己不能批自己的请求。',
+      '已处理的请求只读留档。'
+    ]
+  }
+];
+
+/** 收起所有「点开」的浮层（悬停与聚焦由 CSS 的 :hover / :focus-within 管）。 */
+function closeFeatureTips() {
+  const open = document.querySelectorAll('.tip-wrap.is-open');
+  for (let i = 0; i < open.length; i++) {
+    open[i].classList.remove('is-open');
+    const btn = open[i].querySelector('.tip-btn');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  }
+}
+
+/** 造一个「ⓘ + 浮层」组合，返回外层 wrap（由 mountFeatureTips 挂到标题上）。 */
+function tipTrigger(tip) {
+  const wrap = el('span', { cls: 'tip-wrap' });
+
+  const box = el('div', {
+    cls: 'tip-box',
+    attrs: { role: 'tooltip', id: 'tip-' + tip.id }
+  });
+  box.appendChild(el('b', { cls: 'tip-title', text: tip.name }));
+  tip.lines.forEach(function (line) {
+    box.appendChild(el('p', { cls: 'tip-line', text: line }));
+  });
+
+  const btn = el('button', {
+    cls: 'tip-btn',
+    attrs: {
+      type: 'button',
+      'aria-describedby': 'tip-' + tip.id,
+      'aria-expanded': 'false',
+      'aria-label': '查看「' + tip.name + '」的说明'
+    }
+  });
+  btn.appendChild(el('span', { text: 'ⓘ', attrs: { 'aria-hidden': 'true' } }));
+
+  // 触屏没有 hover：点一下固定打开，再点收起；Esc 或点浮层外面自动收起。
+  // 🔴 这里不 stopPropagation：收起逻辑统一由 mountFeatureTips 的 document 监听判定
+  //    「点在 .tip-wrap 内部就忽略」，一处判断即可，避免两个机制互相抵消。
+  btn.addEventListener('click', function () {
+    const open = wrap.classList.toggle('is-open');
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+
+  wrap.appendChild(btn);
+  wrap.appendChild(box);
+  return wrap;
+}
+
+/** 把 6 个 ⓘ 挂到各区块标题上。boot() 里调用一次即可。 */
+function mountFeatureTips() {
+  FEATURE_TIPS.forEach(function (tip) {
+    const sec = $(tip.id);
+    if (!sec) return;
+    const h2 = sec.querySelector('h2');
+    if (!h2) return;
+    h2.appendChild(tipTrigger(tip));
+  });
+  // 点空白处收起，但点在浮层自身（想读、想选中正文）时不收起 ——
+  // 否则「点开 → 想读 → 一点就没了」，触屏上等于这个浮层没法读第二段。
+  document.addEventListener('click', function (ev) {
+    if (ev.target && ev.target.closest && ev.target.closest('.tip-wrap')) return;
+    closeFeatureTips();
+  });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') closeFeatureTips();
+  });
 }
 
 document.addEventListener('DOMContentLoaded', boot);
