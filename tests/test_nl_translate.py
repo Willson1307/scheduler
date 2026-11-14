@@ -486,10 +486,17 @@ class TestSpokenQuestions(_ChatCase):
         self._enable_llm()
         ok = 0
         failed = []
+        # no_polish 意图（操作清单 / 权限口径 / 数字口径）**设计上不进模型**，
+        # 命中即返回写死文本，source 恒为 keyword。判据因此按「意图是否走样」看，
+        # 不再要求这些条目必须由模型识别 —— 否则加一条 no_polish 就会误报回归。
+        no_polish_ids = {i["id"] for i in K.INTENTS if i.get("no_polish")}
         for question, want in _SPOKEN:
             NL.reset_cache()
             got = self._ask(question, complete=_complete_with(_ir(want, query="howto")))
-            if got["rule"]["source"] == "model" and got["rule"]["intent_id"] == want:
+            source = got["rule"]["source"]
+            if got["rule"]["intent_id"] != want:
+                failed.append((question, want, got["rule"]))
+            elif source == "model" or (source == "keyword" and want in no_polish_ids):
                 ok += 1
             else:
                 failed.append((question, want, got["rule"]))

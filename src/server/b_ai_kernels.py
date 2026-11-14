@@ -409,6 +409,10 @@ INTENTS: tuple[dict, ...] = (
     },
     {
         "id": "makeup",
+        # 🔴 2026-11-14：加 no_polish。线上实测 IR 会把它改判成一次「查询」，
+        #    答成「请告诉我调休的日期，我将帮你查询」——而这条本来就有准确答案。
+        #    no_polish 在 IR 之前返回，不受模型影响。
+        "no_polish": True,
         "strong": ["调休", "补课"],
         "keywords": ["补上", "顺延", "换一天上"],
         "answer": (
