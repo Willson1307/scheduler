@@ -2264,6 +2264,43 @@ function bindEvents() {
   $('resolveBtnTop').addEventListener('click', function () { doResolve(null); });
   // runQn7：预设问题芯片 —— 只做「预填 + 展开 + 调现有 askChat()」。
   // 🔴 不在前端拼答案、不内置答案文本；请求仍是同一条 POST /api/chat。
+  // ---------- 问一下：常驻入口（FAB）+ 右下抽屉（2026-11-15） ----------
+  // 抽屉里放的是**同一份** #secChat DOM（不是复制组件），所以问答逻辑一行都没改。
+  // 不做全屏遮罩：点抽屉外或按 Esc 关闭，不压暗页面。
+  (function () {
+    const fab = $('fabChat');
+    const sheet = $('chatSheet');
+    const openBtn = $('openChat');
+    const closeBtn = $('chatSheetClose');
+    if (!sheet) return;
+
+    function openSheet() {
+      sheet.hidden = false;
+      const d = $('chatDetails');
+      if (d) d.open = true;      // 展开输入框：少一次点击
+      const q = $('chatQ');
+      if (q) q.focus();
+    }
+    function closeSheet() { sheet.hidden = true; }
+
+    if (fab) {
+      fab.addEventListener('click', function () {
+        if (sheet.hidden) openSheet(); else closeSheet();
+      });
+    }
+    if (openBtn) openBtn.addEventListener('click', openSheet);
+    if (closeBtn) closeBtn.addEventListener('click', closeSheet);
+
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape' && !sheet.hidden) closeSheet();
+    });
+    document.addEventListener('click', function (ev) {
+      if (sheet.hidden) return;
+      const t = ev.target;
+      if (sheet.contains(t) || (fab && fab.contains(t))) return;
+      closeSheet();
+    });
+  })();
   const chipBox = $('chatChips');
   if (chipBox) {
     chipBox.addEventListener('click', async function (ev) {
