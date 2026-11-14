@@ -155,6 +155,47 @@ class TestGroundingGate(unittest.TestCase):
 # 二、路由：真打 /api/resolve/explain
 # ---------------------------------------------------------------------------
 
+class TestTemplateFormat(unittest.TestCase):
+    """模板句可读性：线上实测暴露的两处（对象名占位符、原始时间戳）。
+
+    这两条都是「不报错、只是难看」的类型 —— 单测不钉，改回去没人发现，
+    而现场演示时老师第一眼就看这句。
+    """
+
+    def test_placeholder_object_is_not_printed(self):
+        """没有 target 参与者的日程查不到对象名（占位「—」）→ 不能输出「例如 —《…》」。"""
+        facts = {
+            "applied": 1,
+            "before": 14,
+            "after": 0,
+            "changes": [{"object": "—", "title": "示例活动",
+                         "from": "11月11日 10:00", "to": "11月10日 09:50"}],
+            "extra": [],
+        }
+        text = X.template_resolve(facts)
+        self.assertNotIn("—", text)
+        self.assertIn("例如《示例活动》", text)
+
+    def test_named_object_is_still_printed(self):
+        """有对象名时不能把它吞掉 —— 上面那条修的是占位符，不是删除主语。"""
+        facts = {
+            "applied": 1,
+            "before": 23,
+            "after": 0,
+            "changes": [{"object": "高一(1)班", "title": "物理",
+                         "from": "周三第1节", "to": "周三第4节"}],
+            "extra": [],
+        }
+        self.assertIn("例如 高一(1)班《物理》", X.template_resolve(facts))
+
+    def test_iso_timestamp_is_formatted(self):
+        """一次性活动的 start_at 是 ISO 串，模板句里必须是「11月11日 10:00」。"""
+        self.assertEqual(api_resolve._fmt_when("2026-11-11T10:00"), "11月11日 10:00")
+        self.assertEqual(api_resolve._fmt_when("2026-11-10 09:50"), "11月10日 09:50")
+        self.assertEqual(api_resolve._fmt_when(None), "未设置")
+        self.assertEqual(api_resolve._fmt_when("未排定"), "未排定")
+
+
 class TestExplainRoute(_DbCase):
     def _snapshot(self) -> tuple[str, dict]:
         body = self._resolve()

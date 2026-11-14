@@ -1527,7 +1527,8 @@ function renderResolveResult(body) {
     /* ---- v1.1（卡 rHrY9D）D1：一句人话解释 ----
      * 🔴 这里只插一个**占位块**就返回：结果卡片（数字、条目、撤销按钮）已经全部
      *    渲染完，模型慢不慢都不影响它。解释由一个**独立请求**异步补进来，
-     *    3.5 秒没回来就换成上面这些数字拼的模板句，**不重排、不闪、不弹错**。
+     *    6.5 秒没回来就换成上面这些数字拼的模板句，**不重排、不闪、不弹错**。
+     *    （后端模型超时 6 秒 —— 原设 3 秒时线上每次都超时，解释永远是模板句。）
      * ⛔ 绝不同步等待模型 —— 那会把整个结果区卡住（卡面硬要求）。
      */
     const why = el('div', { cls: 'banner why' });
@@ -1565,7 +1566,7 @@ function loadResolveExplain(sid, box, nums) {
   }
 
   const p = apiPost('/api/resolve/explain', withGroup({ snapshot_id: sid }), {});
-  race(3500).then(function (body) {
+  race(6500).then(function (body) {
     const text = body ? str(body, 'explanation', '') : '';
     settle(text || fallback);
   }).catch(function () {

@@ -81,7 +81,7 @@ from scheduler.seeds import seed_demo  # noqa: E402
 #:    🔴 20261207 已被 rEz9Ms（冲突列表节次改读 readable）占用 —— 两条分支各自取了
 #:    同一个号，合并后前端内容与任何一版都不同，必须重新取号，否则浏览器不重拉。
 #:    三处 ?v= 一起递增到 20261208。
-ASSET_VERSION = "20261208"
+ASSET_VERSION = "20261209"
 
 #: 产品版本（**给人看**：关于弹层 / 材料 / 答辩口径）。
 #:

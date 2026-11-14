@@ -38,6 +38,7 @@ POST /api/resolve/explain?snapshot_id= → 把这次消解翻成一句人话（v
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from collections import deque
@@ -359,6 +360,25 @@ def _periods_of(bitmap: str) -> list[tuple[int, int]]:
     return [(dow, idx + 1) for dow, idx in decode_mask(mask)]
 
 
+_WHEN_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})")
+
+
+def _fmt_when(value) -> str:
+    """'2026-11-11T10:00' → '11月11日 10:00'。
+
+    一次性活动的事实里 `start_at` 是原始时间戳，直接塞进模板句会变成
+    「从2026-11-11T10:00挪到2026-11-10T09:50」——老师读不下去。
+    解析不了就原样返回，⛔ 不猜、不补格式。
+    """
+    s = str(value or "").strip()
+    if not s:
+        return "未设置"
+    m = _WHEN_RE.match(s)
+    if not m:
+        return s
+    return "%d月%d日 %s:%s" % (int(m.group(2)), int(m.group(3)), m.group(4), m.group(5))
+
+
 def _fmt_periods(items) -> str:
     if not items:
         return "不再占用"
@@ -445,8 +465,8 @@ def _diff_facts(conn, org_id: str, row) -> dict:
             changes.append({
                 "object": obj,
                 "title": title,
-                "from": str(old.get("start_at") or "未设置"),
-                "to": str(item.get("start_at") or "未设置"),
+                "from": _fmt_when(old.get("start_at")),
+                "to": _fmt_when(item.get("start_at")),
             })
 
     return {
