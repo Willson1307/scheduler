@@ -17,7 +17,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/png" href="favicon.png?v=20261218">
+<link rel="icon" type="image/png" href="favicon.png?v=20261219">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -414,6 +414,44 @@
   /* 「查看对象」下拉：不给最小宽度时宽度由内容撑，长名字被截成几十像素、
      点开也看不全。168px 够放「高一(1)班 · 10 人」这类最长的组合。 */
   .sec-head .field select { min-width: 168px; }
+
+  /* ---------- 一句话改课（周视图头部） ----------
+     与右下「问一下」并列但互不相干：这里会走审批改数据，「问一下」只回答。 */
+  .nl-bar {
+    display: flex; align-items: center; gap: 8px;
+    flex: 1 1 320px; max-width: 620px; margin: 0 12px;
+  }
+  .nl-label { font-size: var(--fs-xs); color: var(--c-text-dim); white-space: nowrap; }
+  .nl-bar input {
+    flex: 1 1 auto; min-width: 0; font: inherit;
+    padding: 6px 8px; border: 1px solid var(--c-border-st); border-radius: var(--radius);
+    background: var(--c-surface); color: var(--c-text);
+  }
+  .nl-bar input::placeholder { color: #9aa7b8; }
+  .nl-bar button { white-space: nowrap; }
+
+  .nl-panel {
+    margin: 4px 0 10px; padding: 10px 12px;
+    border: 1px solid var(--c-border-st); border-left: 3px solid var(--c-primary);
+    border-radius: var(--radius); background: var(--c-primary-l);
+  }
+  .nl-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; }
+  .nl-rule { font-size: var(--fs-sm); font-weight: 700; color: var(--c-text); }
+  .nl-src { font-size: var(--fs-xs); color: var(--c-text-dim); }
+  .nl-cands { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; align-items: center; }
+  .nl-cands .nl-tip { font-size: var(--fs-xs); color: var(--c-text-dim); }
+  .nl-cand {
+    font: inherit; font-size: var(--fs-sm); padding: 4px 10px; cursor: pointer;
+    border: 1px solid var(--c-primary); border-radius: 999px;
+    background: var(--c-surface); color: var(--c-primary);
+  }
+  .nl-cand:hover { background: var(--c-primary); color: #fff; }
+  .nl-panel .note { margin: 8px 0 0; }
+
+  @media (max-width: 1180px) {
+    .nl-bar { flex: 1 1 100%; margin: 4px 0 0; }
+  }
+
 
   /* ---------- 提示条 ---------- */
   .banner {
@@ -1163,10 +1201,30 @@
   <section id="secWeek">
     <div class="sec-head">
       <h2>周视图 <span class="hint">按当天作息（起第 1 节）</span></h2>
+      <!-- 2026-11-15：一句话入口。与右下「问一下」是**两件事**：
+           这里 → 解析成规则 → 交给求解器找位置（会改数据，需确认）；
+           「问一下」→ 只回答问题，不改任何数据。
+           🔴 独立成条，不塞进问一下抽屉，避免再次「两个功能一个入口」。 -->
+      <div class="nl-bar">
+        <label class="nl-label" for="nlText">一句话改课</label>
+        <input id="nlText" type="text" maxlength="200"
+               placeholder="例：高一(1)班周三第 1 节的课想换个时间">
+        <button id="nlBtn" class="primary" type="button">解析并求解</button>
+      </div>
       <div class="field">
         <label for="objSel">查看对象</label>
         <select id="objSel"></select>
       </div>
+    </div>
+    <div id="nlErr" class="banner error" role="alert" hidden></div>
+    <!-- 解析结果与求解器候选：只在用过之后出现，不占默认版面 -->
+    <div id="nlPanel" class="nl-panel" hidden>
+      <div class="nl-head">
+        <span id="nlRule" class="nl-rule"></span>
+        <span id="nlSrc" class="nl-src"></span>
+      </div>
+      <div id="nlCands" class="nl-cands"></div>
+      <p class="note">位置由求解器按当天作息与占用算出；点一个再确认，才走审批。</p>
     </div>
     <div id="weekErr" class="banner error" role="alert" hidden></div>
     <!-- rrr4vM：临时微调的一句话结果。成功用 status（读屏温和播报），
@@ -1431,7 +1489,7 @@
 <!-- 版本号唯一来源 = src/server/config.py 的 ASSET_VERSION；本文件三处 ?v= 必须与它一致。
      版本沿革写在 config.py 的注释里（服务端文件，不会随页面下发）。
      ⛔ 不要在这里记流水：这是 HTML 注释，闭合符写错一行就会整段漏到页面上（2026-11-13 已踩过）。 -->
-<script src="brand-icon.js?v=20261218"></script>
-<script src="app.js?v=20261218"></script>
+<script src="brand-icon.js?v=20261219"></script>
+<script src="app.js?v=20261219"></script>
 </body>
 </html>

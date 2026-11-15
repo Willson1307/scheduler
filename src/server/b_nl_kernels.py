@@ -401,3 +401,111 @@ def parse_rule(
 def reset_system_cache() -> None:
     """清提示词缓存（测试换意图表时用）。"""
     _SYSTEM_CACHE.clear()
+
+
+# ---------------------------------------------------------------------------
+# 本地规则解析（无模型兜底）
+# ---------------------------------------------------------------------------
+# 为什么要有它：`parse_rule` 走的是模型，**没配模型 / 断网时恒返回 None**
+# （线上实测：`rule.intent_id = null`，页面只能显示「没听懂」）。
+# 但「哪个班、周几、第几节」是**封闭格式**，正则就能抽，不需要模型。
+# 于是做一条本地通道：模型可用走模型，模型不可用走这里，两者输出同一结构。
+#
+# ⛔ 它不做推理、不算日期偏移、不产出动作：只把话里的三个词抽出来，
+#    剩下的（这天第几节能排）一律交给求解器（/api/slots）。
+# ⛔ 抽不全就返回 None，绝不猜——猜错班比答不上更糟。
+
+_DOW_WORDS = {
+    "周一": 1, "星期一": 1, "礼拜一": 1,
+    "周二": 2, "星期二": 2, "礼拜二": 2,
+    "周三": 3, "星期三": 3, "礼拜三": 3,
+    "周四": 4, "星期四": 4, "礼拜四": 4,
+    "周五": 5, "星期五": 5, "礼拜五": 5,
+    "周六": 6, "星期六": 6, "礼拜六": 6,
+    "周日": 7, "周天": 7, "星期日": 7, "星期天": 7, "礼拜日": 7, "礼拜天": 7,
+}
+
+#: 「第 3 节 / 3节 / 第三节课」——中文数字只认 1–12，够用且不会误伤。
+_CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
+           "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _period_from_text(text: str) -> int | None:
+    """抽「第 N 节」。认阿拉伯数字与 1–12 的中文数字；抽不到 → None。"""
+    m = re.search(r"第\s*(\d{1,2})\s*节", text)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(?<!\d)(\d{1,2})\s*节", text)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"第\s*([一二三四五六七八九十]{1,2})\s*节", text)
+    if not m:
+        return None
+    s = m.group(1)
+    if s == "十":
+        return 10
+    if s.startswith("十"):
+        return 10 + _CN_NUM.get(s[1:], 0)
+    if s.endswith("十"):
+        return _CN_NUM.get(s[:-1], 0) * 10
+    if "十" in s:
+        a, b = s.split("十", 1)
+        return _CN_NUM.get(a, 0) * 10 + _CN_NUM.get(b, 0)
+    return _CN_NUM.get(s)
+
+
+def parse_local(
+    text: str,
+    object_names,
+    dates_by_dow: dict[int, str],
+    enabled_periods: dict[str, list[int]],
+) -> dict | None:
+    """本地规则解析：话 → `{intent_id, slots, reply}`，**抽不全就 None**。
+
+    参数：
+      object_names   —— 该组织真实对象名（只认库内存在的名字，等价于取值关）
+      dates_by_dow   —— {1..7: 'YYYY-MM-DD'}，由调用方按扫描窗口给出
+      enabled_periods —— {iso: [节次]}，用于判定「第 N 节当天到底上不上」
+
+    只认三样东西：**哪个对象、周几、第几节**。任一抽不到 → None。
+    ⛔ 不抽「改到哪天」——那属于求解器要回答的问题，不是这句话能说清的。
+    """
+    s = (text or "").strip()
+    if not s:
+        return None
+
+    # ① 对象：取「出现在话里且最长」的名字，避免「高一(1)班」被「一班」抢先
+    hit = None
+    for name in object_names:
+        if name and name in s and (hit is None or len(name) > len(hit)):
+            hit = name
+    if not hit:
+        return None
+
+    # ② 周几 → 具体日期（同窗口内唯一，不做「下周」推断）
+    dow = None
+    for word, w in _DOW_WORDS.items():
+        if word in s:
+            dow = w
+            break
+    if dow is None:
+        return None
+    iso = dates_by_dow.get(dow)
+    if not iso:
+        return None
+
+    # ③ 第几节
+    period = _period_from_text(s)
+    if period is None:
+        return None
+
+    # ④ 取值关：当天到底有没有这一节（只上 8 节的学校说「第 9 节」要当场挡掉）
+    allowed = enabled_periods.get(iso) or []
+    if allowed and period not in allowed:
+        return None
+
+    return {
+        "intent_id": "reschedule",
+        "slots": {"object": hit, "date": iso, "period": period},
+        "reply": "听懂了：%s %s 第 %d 节" % (hit, iso, period),
+    }

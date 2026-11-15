@@ -2354,6 +2354,15 @@ function bindEvents() {
   [$('slotFrom'), $('slotTo')].forEach(function (inp) {
     inp.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') querySlots(); });
   });
+  // 一句话改课（POST /api/nl → /api/slots → 提议改期）。⛔ 与「问一下」是两套逻辑，别合并
+  const nlBtn = $('nlBtn');
+  if (nlBtn) nlBtn.addEventListener('click', function () { nlRun(); });
+  const nlText = $('nlText');
+  if (nlText) {
+    nlText.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter') { ev.preventDefault(); nlRun(); }
+    });
+  }
   // rn6JxF：问一下（POST /api/chat，只读问答；回车与按钮等效）
   $('chatBtn').addEventListener('click', function () { askChatWithStatus(); });
   $('chatQ').addEventListener('keydown', function (ev) {
@@ -4627,6 +4636,133 @@ async function refreshWeekAndConflicts() {
  *    （一个区块改名就让全站不加载，是比缺浮层严重得多的故障）。
  * ========================================================================== */
 
+/* =============================================================================
+ * 10.8 一句话改课（POST /api/nl → GET /api/slots → 提议改期）
+ * -----------------------------------------------------------------------------
+ * 与「问一下」的分工（⛔ 别再合并成一个入口）：
+ *   这里 = 解析成规则 + 让求解器算位置 + 人可以提交（会改数据，走审批）
+ *   问一下 = 只回答「怎么操作」，一个字都不写
+ *
+ * 链路（三步，每步失败都要说人话，不能静默）：
+ *   ① POST /api/nl       有模型走模型，没模型走本地正则；解析不出 → 明说没听懂
+ *   ② GET  /api/slots    把「源位置」交给求解器，问「这几天还能排在哪」
+ *                        🔴 位置全由后端算（含当天作息、调休、占用），前端不自算节次
+ *   ③ 点候选项 → openProposeModal(targets, {prefillDate})
+ *                        沿用原审批流，**AI 不直接改数据**
+ * ========================================================================== */
+
+var _DOW_CN = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+
+/** 'YYYY-MM-DD' + n 天。⛔ 不做时区运算，纯日期加减（与后端 date 同口径）。 */
+function addDaysIso(iso, n) {
+  var d = new Date(iso + 'T00:00:00');
+  if (isNaN(d.getTime())) return iso;
+  d.setDate(d.getDate() + n);
+  var m = d.getMonth() + 1, day = d.getDate();
+  return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
+}
+
+/** 一句话解析 → 求解器候选。所有异常都兜在这里，不冒泡到全局。 */
+async function nlRun() {
+  const inp = $('nlText'), btn = $('nlBtn'), err = $('nlErr'), panel = $('nlPanel');
+  if (!inp || !btn || !err || !panel) return;
+  const text = inp.value.trim();
+  showBanner(err, null);
+  if (!text) {
+    showBanner(err, '先写一句要改什么，例如「高一(1)班周三第 1 节的课想换个时间」。');
+    return;
+  }
+  if (USE_MOCK) {
+    showBanner(err, '当前是演示模式（没有后端），一句话改课不可用。');
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await apiPost('/api/nl', withGroup({}), { text: text });
+    if (!r || !r.intent || r.validated !== true) {
+      panel.hidden = true;
+      showBanner(err, '没听懂：' + ((r && r.reason) || '这句话里找不到「哪个班 / 周几 / 第几节」') +
+        '。换个说法试试，例如「高一(1)班周三第 1 节」。');
+      return;
+    }
+    const p = (r && typeof r.params === 'object' && r.params) ? r.params : {};
+    $('nlRule').textContent = '识别为：' + str(r, 'display', '');
+    // 🔴 来源如实标注：本地规则解析 ≠ 模型解析，不能都说成 AI
+    $('nlSrc').textContent = str(r, 'source', '') === 'model'
+      ? '模型解析' : '本地规则解析（这台机器未启用模型）';
+    panel.hidden = false;
+
+    const box = $('nlCands');
+    clear(box);
+    box.appendChild(el('span', { cls: 'nl-tip', text: '求解中…' }));
+    const slots = await apiGet('/api/slots', withGroup({
+      target: str(p, 'object_id', ''),
+      from: str(p, 'date', ''),
+      to: addDaysIso(str(p, 'date', ''), 4),
+      duration: '1',
+      limit: '6',
+    }));
+    renderNlCands(slots, p);
+  } catch (e) {
+    panel.hidden = true;
+    showBanner(err, '解析失败：' + (e && e.message ? e.message : e));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** 渲染求解器给出的候选位置（每个是一个按钮，点了才提议）。 */
+function renderNlCands(body, p) {
+  const box = $('nlCands');
+  if (!box) return;
+  clear(box);
+  const list = arr(body, 'candidates');
+  if (!list.length) {
+    box.appendChild(el('span', { cls: 'nl-tip', text: '这几天没有别的空位了（求解器已按当天作息与占用算过）。' }));
+    return;
+  }
+  box.appendChild(el('span', { cls: 'nl-tip', text: '可行位置：' }));
+  list.forEach(function (c) {
+    const periods = arr(c, 'periods');
+    const per = periods.length ? periods[0] : '';
+    const dow = str(c, 'day_of_week', '');
+    const label = (_DOW_CN[Number(dow) - 1] || '') + ' ' + str(c, 'date', '') + ' 第' + per + '节';
+    const b = el('button', { cls: 'nl-cand', text: label, attrs: { type: 'button' } });
+    b.addEventListener('click', function () {
+      nlPropose(p, { date: str(c, 'date', ''), label: label });
+    });
+    box.appendChild(b);
+  });
+}
+
+/** 候选 → 打开「提议改期」弹层（预填新起始日）。⛔ 不直接提交、不写库。 */
+async function nlPropose(p, cand) {
+  const err = $('nlErr');
+  try {
+    const d = await apiGet('/api/schedules/detail', withGroup({
+      object_id: str(p, 'object_id', ''),
+      date: str(p, 'date', ''),
+    }));
+    // 只把「周期日程 + 目标就是这个对象」的条目交给弹层：一次性活动没有 valid_from 可改
+    const targets = [];
+    arr(d, 'cells').forEach(function (cell) {
+      arr(cell, 'schedules').forEach(function (s) {
+        if (str(s, 'kind', '') === 'periodic' && str(s, 'role', '') === 'target') {
+          targets.push({ schedule_id: str(s, 'id', ''), title: str(s, 'title', '') });
+        }
+      });
+    });
+    openProposeModal(targets, {
+      prefillDate: cand.date,
+      note: '来自「' + str(p, 'object_name', '') + ' · ' + str(p, 'date', '') +
+        '」的一句话；求解器推荐的候选：' + cand.label,
+      emptyText: '（这一天没有可改期的周期日程）',
+    });
+  } catch (e) {
+    showBanner(err, '打开改期失败：' + (e && e.message ? e.message : e));
+  }
+}
+
 const FEATURE_TIPS = [
   {
     id: 'secWeek',
@@ -4634,7 +4770,9 @@ const FEATURE_TIPS = [
     lines: [
       '这一周里某人 / 某班 / 某间教室的课表：一格＝一天里的一节。',
       '红格＝两件事撞在同一节，必须处理；灰格是已占用的正常课。',
-      '先选左侧「当前组」，再选「查看对象」；双击格子或点右上角「⋯」可临时微调某一天。'
+      '先选左侧「当前组」，再选「查看对象」；双击格子或点右上角「⋯」可临时微调某一天。',
+      '标题右边的「一句话改课」：写「高一(1)班周三第 1 节的课想换个时间」，系统解析成规则，再由求解器算出这几天还能排在哪；点一个候选才会打开改期弹层，确认后才提交审批。',
+      '⚠️ 它和右下角「问一下」是两件事：「问一下」只回答问题、不改数据；「一句话改课」会走审批。'
     ]
   },
   {
