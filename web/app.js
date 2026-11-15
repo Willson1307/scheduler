@@ -64,6 +64,10 @@ const USE_MOCK = false;   // F3b：真实接口（mock 分支保留，供离线�
  *   exp = min(now + 12h, loginAt + 24h)   → 活跃即滑动，但登录满 24h 必须重登
  * ========================================================================== */
 const AUTH_KEY = 'sk_auth_v1';
+/** 上次登录名回填（2026-11-15 试用反馈：老师每次都要重新敲 trial_t01）。
+ *  ⛔ 只存**登录名**，绝不存口令 —— 口令永远只活在 input 里，
+ *     存了就等于把口令明文写到共用电脑的 localStorage（AGENTS §8 红线）。 */
+const LAST_LOGIN_KEY = 'sk_last_login';
 const AUTH_SLIDE_MS = 12 * 60 * 60 * 1000;   // 单次有效期（每次成功取数后续期）
 const AUTH_ABS_MS = 24 * 60 * 60 * 1000;     // 登录后的绝对上限
 
@@ -1790,6 +1794,21 @@ function showLogin(msg) {
   }
   // 无消息时也要清：否则上一轮的 401 红字会留在「未登录」旁边（静默过期尤其明显）
   showBanner($('loginErr'), msg || null);
+  // 上次登录名回填 + 焦点落到口令框：老师只需敲口令，少一次键盘。
+  // 🔴 只在输入框为空时回填，不覆盖老师已经改到一半的内容。
+  const nameInp = $('loginName');
+  const pwdInp = $('loginPwd');
+  if (nameInp && !nameInp.value) {
+    const ls = _ls();
+    let last = '';
+    try { last = (ls && ls.getItem(LAST_LOGIN_KEY)) || ''; } catch (e) { last = ''; }
+    if (last) nameInp.value = last;
+  }
+  if (pwdInp && nameInp && nameInp.value) {
+    // 只改类型回来，不碰 value —— 重登时不该把已输入的字符吞掉
+    pwdInp.type = 'password';
+    try { pwdInp.focus(); } catch (e) { /* 焦点失败无所谓 */ }
+  }
 }
 
 /** 登录成功：只收起表单行，loginSec 与身份提示保留（现场要能看出登录身份）。 */
@@ -1832,6 +1851,8 @@ async function doLogin() {
     hideLogin();
     delete $('groupSel').dataset.loaded;   // 换账号后授权组可能不同，强制重拉组列表
     ok = true;
+    // 记住登录名（只记名，不记口令）。存储被禁时静默跳过 —— 不影响本次登录。
+    try { const ls = _ls(); if (ls) ls.setItem(LAST_LOGIN_KEY, name); } catch (e) { /* 隐私模式 */ }
   } catch (e) {
     if (epoch !== state.authEpoch) return;
     // 🔴 2026-11-10 文案纠正：原文写「连续失败 5 次将锁定 15 分钟」——
@@ -2324,6 +2345,20 @@ function bindEvents() {
   $('loginBtn').addEventListener('click', function () { doLogin(); });  [$('loginName'), $('loginPwd')].forEach(function (inp) {
     inp.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') doLogin(); });
   });
+  // 2026-11-15 试用反馈「看不见自己敲的口令」：显示/隐藏开关。
+  // ⛔ 只切 input.type，不动 value；切完把焦点还给输入框，否则手机上要再点一次。
+  const pwdEye = $('pwdEye');
+  if (pwdEye) {
+    pwdEye.addEventListener('click', function () {
+      const inp = $('loginPwd');
+      if (!inp) return;
+      const show = inp.type === 'password';
+      inp.type = show ? 'text' : 'password';
+      pwdEye.textContent = show ? '隐藏密码' : '显示密码';
+      pwdEye.setAttribute('aria-pressed', show ? 'true' : 'false');
+      try { inp.focus(); } catch (e) { /* 焦点失败无所谓 */ }
+    });
+  }
   // r4kJEe：退出登录（⛔ 不叫「安全退出」——服务端令牌无吊销接口，只是本机丢弃）
   // 🔴 null 守卫：旧 HTML + 新 JS 时 $('logoutBtn') 为 null，不守卫会让 bindEvents
   //    在中途抛错 → 后面所有绑定（含登录按钮）全部失效，整页变砖。

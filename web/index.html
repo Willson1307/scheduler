@@ -17,7 +17,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/png" href="favicon.png?v=20261212">
+<link rel="icon" type="image/png" href="favicon.png?v=20261213">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -292,6 +292,12 @@
   .login-who { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
   /* r4kJEe 退出登录：与登录表单同一列宽，独立一行（768px 下也不挤） */
   .login-out { margin-top: 8px; }
+  /* 2026-11-15 试用反馈：口令看不见，敲错了也不知道错在哪一位。
+     做成右下角小字开关，不占版面、不抢登录按钮的视觉层级。 */
+  .login-eye { align-self: flex-end; margin-top: -4px; padding: 0 2px;
+               background: none; border: 0; color: var(--c-text-dim);
+               font-size: var(--fs-xs); cursor: pointer; }
+  .login-eye:hover, .login-eye:focus-visible { color: var(--c-primary); text-decoration: underline; }
 
   select, button, input {
     font: inherit;
@@ -1113,6 +1119,12 @@
         <div id="loginForm" class="login-row">
           <input id="loginName" type="text" autocomplete="username" placeholder="登录名">
           <input id="loginPwd" type="password" autocomplete="current-password" placeholder="密码">
+          <!-- 2026-11-15 试用反馈「口令看不见、也复制不了」→ 给一个显示开关。
+               ⛔ 默认仍是 password：教室里投影时明文口令不该一直挂在屏幕上。
+               ⛔ 不要在 oncopy/onpaste 上做任何拦截 —— 老师是要粘进来的那一方，
+                  拦粘贴只会让人多错几次（原本就没人拦，这里立此存照）。 -->
+          <button id="pwdEye" class="login-eye" type="button" aria-pressed="false"
+                  title="切换密码显示，方便核对有没有敲错">显示密码</button>
           <button id="loginBtn" class="primary block" type="button">登录</button>
         </div>
       </div>
@@ -1390,7 +1402,7 @@
 <!-- 版本号唯一来源 = src/server/config.py 的 ASSET_VERSION；本文件三处 ?v= 必须与它一致。
      版本沿革写在 config.py 的注释里（服务端文件，不会随页面下发）。
      ⛔ 不要在这里记流水：这是 HTML 注释，闭合符写错一行就会整段漏到页面上（2026-11-13 已踩过）。 -->
-<script src="brand-icon.js?v=20261212"></script>
-<script src="app.js?v=20261212"></script>
+<script src="brand-icon.js?v=20261213"></script>
+<script src="app.js?v=20261213"></script>
 </body>
 </html>

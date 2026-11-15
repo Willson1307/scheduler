@@ -90,7 +90,11 @@ from scheduler.seeds import seed_demo  # noqa: E402
 #:    改了 app.js 与 index.html。
 #:    🔴 20261210 已被 F-12（rY3Bpn）用掉 —— 两条分支各自取到同一个号，合并后前端内容
 #:    与任何一版都不同，复用等于没改。重新取号到 **20261211**，四处 ?v= 一起改。
-ASSET_VERSION = "20261212"
+#: 2026-11-15（卡 LOGIN-EASY）：试用反馈「口令看不见 / 每次都要重敲登录名」，
+#:    登录框加「显示密码」开关 + 回填上次登录名（只存名，不存口令），
+#:    改了 app.js（pwdEye 绑定 + LAST_LOGIN_KEY）与 index.html（.login-eye 样式）。
+#:    三处 ?v= 一起递增到 **20261213**。
+ASSET_VERSION = "20261213"
 
 #: 产品版本（**给人看**：关于弹层 / 材料 / 答辩口径）。
 #:
