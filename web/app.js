@@ -1457,7 +1457,6 @@ function renderResolveResult(body) {
   const before = intOrNull(body, 'remaining_before');
   const after = intOrNull(body, 'remaining_after');
   const applied = intOrNull(body, 'applied');
-  const rounds = intOrNull(body, 'rounds');
   const filtered = intOrNull(body, 'filtered_out_count');
   const term = body.termination;
 
@@ -1472,10 +1471,16 @@ function renderResolveResult(body) {
   box.appendChild(banner);
 
   // 明细行：某个数没给出来就不显示那一行（不把「字段缺失」这种开发期信息写上屏幕）
+  /* 🔴 2026-11-15：**删掉「迭代轮数」这一行**（响应字段 `rounds` 仍然保留，只是不上屏幕）。
+   *    原因：后端 `api_resolve.py:257` 写的是 `"rounds": applied` —— 两者**恒等**。
+   *    同屏并排显示「已应用方案数 4 / 迭代轮数 4」，看着像 bug，评委会追着问；
+   *    而它本来也不提供任何额外信息（每轮只应用 1 个方案，轮数必然等于方案数）。
+   *    要恢复这一行，得先让后端真的记轮数（`b4_kernels.resolve_and_apply` 的
+   *    `max_rounds` 循环里累计），否则别把两个相同的数字摆在一起。
+   */
   const kv = el('div', { cls: 'kv' });
   [
     ['已应用方案数', applied],
-    ['迭代轮数', rounds],
     ['因不在你的可改范围而未尝试', filtered],
   ].forEach(function (pair) {
     if (pair[1] === null) return;
