@@ -144,6 +144,17 @@ def nl(method, path, query, body, headers, context=None):
         except Exception:
             rule = None  # 模型层任何异常都不影响本地通道
 
+        # ①.5 模型给了「空壳规则」也要丢回本地：
+        #      线上实测（2026-11-16）：模型返回 intent=reschedule 但 slots 为空
+        #      （reply 是「好的，请告诉我具体的时间安排。」），之前直接采信 →
+        #      界面显示「没听懂」，而本地正则本来能解出来。
+        #      🔴 这是「AI 静默失效」的标准形态：不报错、只是默默不对。
+        #      判定只看结构化槽位齐不齐，不看 reply 写得多像人话。
+        if rule:
+            sl = rule.get("slots") or {}
+            if not (sl.get("object") and sl.get("date") and sl.get("period")):
+                rule = None
+
         # ② 模型没给 → 本地正则
         if not rule:
             rule = NL.parse_local(text, names, dates_by_dow, enabled_periods)
