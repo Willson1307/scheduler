@@ -11,6 +11,8 @@
      b8_kernels.require_approve_in_org（approve 档以上）。
   4. 🔴 审批流的灵魂：自己批准自己的请求 → 403（requester_id ==
      context["user_id"]，与 level 无关）；teacher 天花板 propose ⇒ 老师批不了。
+     rCMOFk 缺陷2：同级也批不了——批准人档位必须**严格高于**提出人
+     （K.require_higher_level，两个 admin 互批 → 403）。
   5. 数据合规（AGENTS §7）：纯本地 SQLite 读写，不外发任何内容。
 
 🔴 URL 形态：现有路由是**精确匹配**（无 path 参数），按 id 操作的端点
@@ -26,6 +28,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 
 from . import auth, config
 from . import b3_kernels as B3
@@ -85,6 +88,16 @@ def submit_request(method, path, query, body, headers, context=None):
         )
         # 目标必须存在且属于本组织（404 不泄露存在性；非周期 → 400）。
         target = B9.load_target(conn, org_id, target_id)
+
+        # 🔴 倒置区间拦截（rCMOFk 缺陷3）：after.valid_from 晚于目标 valid_to
+        #    时不能放行——落库后区间反转（valid_from > valid_to）。原实现提交、
+        #    批准都放行，坏数据静默入库。这里在提交时就拦（400 零写入）。
+        if date.fromisoformat(new_valid_from) > date.fromisoformat(target["valid_to"]):
+            raise ApiError(
+                400,
+                f"区间倒置：新起始日 {new_valid_from} 晚于目标结束日"
+                f" {target['valid_to']}（须满足 valid_from <= valid_to）",
+            )
 
         before = K.capture_before(conn, target)
         payload_json = json.dumps(
@@ -200,9 +213,27 @@ def approve_request(method, path, query, body, headers, context=None):
 
         K.require_approve_in_org(conn, context["user_id"], req["org_id"])
 
+        # 🔴 只批下级（rCMOFk 缺陷2，docs/06 §1「approve = 批准/拒绝自己
+        #    **下级**提出的请求」）：批准人在该组织的有效档必须**严格高于**
+        #    提出人（view<propose<approve<own，沿用 authz.effective_level
+        #    口径：admin 本组织短路 own，teacher 天花板 propose）。
+        #    同级或更低 → 403（两个 admin 互批也拦：own == own 不严格高于）。
+        K.require_higher_level(
+            conn, context["user_id"], req["requester_id"], req["org_id"]
+        )
+
         # 批准时重跑校验：按 after.valid_from 重新展开，撞车 → 409 零写入。
         target = B9.load_target(conn, req["org_id"], req["target_id"])  # 已删 → 404
         new_valid_from = K.request_payload(req)["after"]["valid_from"]
+
+        # 🔴 竞态覆盖拦截（rCMOFk 缺陷4）：同目标两条 pending 先后批准时，
+        #    第二条必须 409，不能静默覆盖第一条的落库结果。以提交时抓的
+        #    before 快照为凭：目标当前 valid_from 已不是提议时记录的
+        #    before.valid_from → 数据被他人改动 → 409「请重新提议」，零写入。
+        before = K.request_payload(req)["before"]
+        if target["valid_from"] != before.get("valid_from"):
+            raise ApiError(409, "数据已被他人改动，请重新提议")
+
         slot_cfg = B9.load_slot_config(conn, req["org_id"])
         problems = K.validate_apply(conn, req["org_id"], target, new_valid_from, slot_cfg)
         if problems:
@@ -238,11 +269,15 @@ def approve_request(method, path, query, body, headers, context=None):
             )
             conn.commit()
         except Exception:
-            # 🔴 落库失败 → 回滚 + 状态回 approved + 记 fail，同一事务，不留半改状态。
+            # 🔴 落库失败 → 回滚 + 状态回 pending（rCMOFk 缺陷1：原实现回滚成
+            #    approved，请求就此僵死——approve/reject/withdraw 都只认
+            #    pending，全部 409）。fail 审计事件照记。事务语义不变：
+            #    校验→落库→转 applied→记事件仍是原子的，失败零半改
+            #    （approved/applied 的 UPDATE 已随 rollback 一并撤销，
+            #    approver_id/decided_at 也未落库，这里把状态显式钉回 pending）。
             conn.rollback()
             conn.execute(
-                "UPDATE change_requests SET status='approved',"
-                " decided_at = datetime('now') WHERE id = ?",
+                "UPDATE change_requests SET status='pending' WHERE id = ?",
                 (req["id"],),
             )
             K.record_event(conn, req["id"], user_id, "fail")
@@ -282,6 +317,10 @@ def reject_request(method, path, query, body, headers, context=None):
         if req["requester_id"] == context["user_id"]:
             raise ApiError(403, "不能拒绝自己提出的请求")
         K.require_approve_in_org(conn, context["user_id"], req["org_id"])
+        # 🔴 只拒下级（rCMOFk 缺陷2，与 approve 同口径）：同级或更低 → 403。
+        K.require_higher_level(
+            conn, context["user_id"], req["requester_id"], req["org_id"]
+        )
 
         conn.execute(
             "UPDATE change_requests SET status='rejected', approver_id = ?,"
