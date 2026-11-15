@@ -625,6 +625,13 @@ function endSession(opts) {
  * 401 统一处理：先断开持久化，再清 token / 已渲染的私有数据，弹出登录栏。
  * 🔴 绝不静默当成「空数据」——那会把「没登录」伪装成「没有冲突」。
  * 🔴 403 不走这里：403 是「这个组没权限」，回退组即可（见 loadAll 的组失效回退）。
+ *
+ * ⚠️ 2026-11-15 补（卡 rH36le）：**不是所有 401 都是「会话失效」**。
+ *     `POST /api/login` 密码错时按契约返回 401 + `code=bad_credentials`
+ *     （api_login.py）。那条 401 的含义是「这次凭证不对」，不是「你掉线了」。
+ *     ⇒ 进本函数前必须先过 `isSessionExpiry401()`，否则老师敲错密码会看到
+ *     「登录已过期」、表单被清场、反复重登，真实原因永远不出现。
+ *     ⛔ 不要在这里改文案来「区分」两种情况——判据是状态，不是措辞。
  */
 function handle401(body) {
   // 首行断开持久化：否则刷新后又拿同一个废 token「恢复」→ 弹登录 ⇄ 又登录的死循环
@@ -633,6 +640,48 @@ function handle401(body) {
   throw new Error(extractMessage(body) || 'HTTP 401 未登录');
 }
 
+
+/**
+ * 这次 401 是不是「会话失效」？（卡 rH36le）
+ *
+ * 401 只有两种含义，判据**只看状态，不看文案**：
+ *   ① 请求**带了** token 却被拒 → 这个 token 废了 → 会话失效，走 `handle401` 清场；
+ *   ② 请求**没带** token（登录接口本来就无 token）或后端明确回 `bad_credentials`
+ *      → 是「这次凭证不对」，交给调用方按后端 message 原文展示。
+ *
+ * ⛔ 别改成「浏览器内存里有没有 token」：登录在途时可能刚被别的标签清掉，
+ *    那样会把一次真实的会话失效当成密码错。判据必须是**这一次请求发出去时**
+ *    带没带 token —— 由调用方在 fetch 前捕获后传进来。
+ * @param {object|null} body 错误响应体
+ * @param {boolean} sentToken 本次请求是否带了 Authorization
+ */
+function isSessionExpiry401(body, sentToken) {
+  if (!sentToken) return false;                        // ② 本来就没凭证，谈不上过期
+  if (extractCode(body) === 'bad_credentials') return false;   // ② 后端点明是凭证错
+  return true;                                          // ① 带票被拒 = 票废了
+}
+
+/**
+ * 统一的 HTTP 错误出口（apiGet / apiPost / apiDelete 共用）。
+ *
+ * 🔴 抽出来的理由：这三处的错误处理原先各写一份，注释里反复写「必须一致」——
+ *    靠注释维持一致性就是等着分叉。401 的判据只有一处，才不会出现「DELETE 忘了
+ *    走 handle401」或「登录接口也被当成过期」这类偏差。
+ * @param {Response} res
+ * @param {object|null} body
+ * @param {boolean} sentToken
+ */
+function throwHttpError(res, body, sentToken) {
+  if (res.status === 401 && isSessionExpiry401(body, sentToken)) {
+    handle401(body);   // handle401 内部必 throw
+  }
+  const err = new Error(extractMessage(body) || ('HTTP ' + res.status + ' ' + res.statusText));
+  err.status = res.status;   // F7：审批动作要能区分 403/404/409，如实提示
+  // rrr4vM：把原始响应体挂上——409 的结构化 exception_id 在里面，
+  // 前端不必再从 message 字符串里正则抠（抠法留作兜底）。
+  err.body = body;
+  throw err;
+}
 
 /** 取查询串里的 group（可空＝隐式模式，走服务端默认）。 */
 function withGroup(params) {
@@ -653,20 +702,13 @@ async function apiGet(pathname, params) {
   Object.keys(params || {}).forEach(function (k) {
     if (params[k] !== '' && params[k] != null) url.searchParams.set(k, params[k]);
   });
+  const sentToken = !!state.token;   // 卡 rH36le：401 判据要用「发请求那一刻」的状态
   const res = await fetch(url.toString(), {
     method: 'GET',
     headers: authHeaders({ Accept: 'application/json' }),
   });
   const body = await readBody(res);
-  if (!res.ok) {
-    if (res.status === 401) handle401(body);   // handle401 内部必 throw
-    const err = new Error(extractMessage(body) || ('HTTP ' + res.status + ' ' + res.statusText));
-    err.status = res.status;   // F7：审批动作要能区分 403/404/409，如实提示
-    // rrr4vM：把原始响应体挂上——409 的结构化 exception_id 在里面，
-    // 前端不必再从 message 字符串里正则抠（抠法留作兜底）。
-    err.body = body;
-    throw err;
-  }
+  if (!res.ok) throwHttpError(res, body, sentToken);
   return body;
 }
 
@@ -682,21 +724,14 @@ async function apiPost(pathname, params, payload) {
   Object.keys(params || {}).forEach(function (k) {
     if (params[k] !== '' && params[k] != null) url.searchParams.set(k, params[k]);
   });
+  const sentToken = !!state.token;   // 卡 rH36le：登录接口不带 token，401 是密码错不是过期
   const res = await fetch(url.toString(), {
     method: 'POST',
     headers: authHeaders({ 'Content-Type': 'application/json', Accept: 'application/json' }),
     body: JSON.stringify(payload || {}),
   });
   const body = await readBody(res);
-  if (!res.ok) {
-    if (res.status === 401) handle401(body);   // handle401 内部必 throw
-    const err = new Error(extractMessage(body) || ('HTTP ' + res.status + ' ' + res.statusText));
-    err.status = res.status;   // F7：审批动作要能区分 403/404/409，如实提示
-    // rrr4vM：把原始响应体挂上——409 的结构化 exception_id 在里面，
-    // 前端不必再从 message 字符串里正则抠（抠法留作兜底）。
-    err.body = body;
-    throw err;
-  }
+  if (!res.ok) throwHttpError(res, body, sentToken);
   return body;
 }
 
@@ -720,18 +755,13 @@ async function apiDelete(pathname, params) {
   Object.keys(params || {}).forEach(function (k) {
     if (params[k] !== '' && params[k] != null) url.searchParams.set(k, params[k]);
   });
+  const sentToken = !!state.token;   // 卡 rH36le：与 GET/POST 同一条 401 判据
   const res = await fetch(url.toString(), {
     method: 'DELETE',
     headers: authHeaders({ Accept: 'application/json' }),
   });
   const body = await readBody(res);
-  if (!res.ok) {
-    if (res.status === 401) handle401(body);   // handle401 内部必 throw
-    const err = new Error(extractMessage(body) || ('HTTP ' + res.status + ' ' + res.statusText));
-    err.status = res.status;
-    err.body = body;           // 同上：DELETE 的错误也可能是结构化的
-    throw err;
-  }
+  if (!res.ok) throwHttpError(res, body, sentToken);
   return body;
 }
 
@@ -750,6 +780,18 @@ function extractMessage(body) {
   const e = body.error;
   if (typeof e === 'string') return e;
   if (e && typeof e === 'object' && typeof e.message === 'string') return e.message;
+  return null;
+}
+
+/**
+ * 取错误体里的业务码（契约嵌套格式的 `error.code`）。
+ * 只用于区分「401 是凭证错还是会话过期」（卡 rH36le），不做文案用途——
+ * 给用户看的永远用 `extractMessage()` 拿后端原文，⛔ 不要在前端翻译错误码。
+ */
+function extractCode(body) {
+  if (!body || typeof body !== 'object') return null;
+  const e = body.error;
+  if (e && typeof e === 'object' && typeof e.code === 'string') return e.code;
   return null;
 }
 
