@@ -8,11 +8,14 @@
   1. 永久类改动（改周期日程的 valid_from）不直接生效，走「提出请求 → 批准
      → 落库」五态 + 审计日志（docs/06 §3/§4 冻结）。
   2. 🔴 draft 与 pending 一律**绝不碰任何业务数据**；只有 approved 才落库，
-     落库成功才转 applied；落库失败回滚到 approved + 记 fail 事件。
-  3. 🔴 批准时必须重跑硬约束（scheduler.solver.constraints.hard_violations）：
+     落库成功才转 applied；落库失败回滚到 pending + 记 fail 事件
+     （rCMOFk：回 approved 会让请求僵死——approve/reject/withdraw 只认 pending）。
+  3. 🔴 只批下级（docs/06 §1）：批准/拒绝前批准人在该组织的档位必须
+     **严格高于**提出人（require_higher_level），同级或更低 → 403。
+  4. 🔴 批准时必须重跑硬约束（scheduler.solver.constraints.hard_violations）：
      提议时合法 ≠ 批准时合法（期间别人可能改了课表），「批准后才发现撞车」
      是审批流最典型的翻车点。校验通过才 UPDATE，不通过 409 零写入。
-  4. 数据合规（AGENTS §7）：纯本地 SQLite 读写，不外发任何内容。
+  5. 数据合规（AGENTS §7）：纯本地 SQLite 读写，不外发任何内容。
 
 落库范围（本卡最窄的一条，docs/06 §2 永久改的最小代表）：
   target_type='schedule' + op='update' + 改 schedule_periodic.valid_from 一列。
@@ -155,6 +158,56 @@ def require_org_access(
     """查看审计轨迹前：用户在 org_id 内有 view 级授权，否则 403（组织隔离）。"""
     if not _has_level_in_org(conn, user_id, org_id, "view"):
         raise ApiError(403, "无权访问该组织的请求")
+
+
+# ---------------------------------------------------------------------------
+# 只批下级（rCMOFk 缺陷2：批准人档位必须严格高于提出人）
+# ---------------------------------------------------------------------------
+
+
+def max_level_in_org(conn: sqlite3.Connection, user_id: str, org_id: str) -> str | None:
+    """用户在 org_id 全部组上的最高有效档（None = 该组织内无任何授权）。
+
+    口径与 _has_level_in_org 同源：按「请求所在组织」判权，不按默认组。
+    沿 authz.effective_level：admin 本组织短路 own，teacher 天花板 propose。
+    """
+    rows = conn.execute(
+        "SELECT id FROM objects WHERE org_id = ? AND kind = 'group'", (org_id,)
+    ).fetchall()
+    best: str | None = None
+    for g in rows:
+        eff = authz.effective_level(conn, user_id, g["id"])
+        if eff is None:
+            continue
+        if best is None or authz.LEVEL_ORDER[eff] > authz.LEVEL_ORDER[best]:
+            best = eff
+    return best
+
+
+def require_higher_level(
+    conn: sqlite3.Connection,
+    approver_id: str,
+    requester_id: str,
+    org_id: str,
+) -> None:
+    """批准/拒绝前：批准人在 org 内的档位必须**严格高于**提出人，否则 403。
+
+    docs/06 §1：approve = 批准/拒绝**自己下级**提出的请求。同级或更低 → 403
+    （两个 admin 互批也拦：本组织短路算 own，own == own 不满足严格高于；
+    teacher 天花板 propose，propose <= propose 同样拦）。
+    比较用 authz.LEVEL_ORDER 整数映射（勘误2：禁字符串字典序）。
+    提出人无档（提交时已过 resolve_authorized_org，理论不可达）→ 视为
+    低于 view，任何达到 approve 档的批准人都满足严格高于。
+    自己批自己由 handler 更早的 requester == approver 判定拦，本函数不重复。
+    """
+    approver = max_level_in_org(conn, approver_id, org_id)
+    requester = max_level_in_org(conn, requester_id, org_id)
+    a_rank = authz.LEVEL_ORDER[approver] if approver is not None else -1
+    r_rank = authz.LEVEL_ORDER[requester] if requester is not None else -1
+    if a_rank <= r_rank:
+        raise ApiError(
+            403, "只能批准/拒绝自己下级的请求（批准人档位须严格高于提出人）"
+        )
 
 
 # ---------------------------------------------------------------------------
