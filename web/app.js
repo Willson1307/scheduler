@@ -2354,6 +2354,10 @@ function bindEvents() {
   [$('slotFrom'), $('slotTo')].forEach(function (inp) {
     inp.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') querySlots(); });
   });
+  // 新建日程（POST /api/schedules）。⛔ 建完不拦撞车，撞了让冲突列表显示
+  const newBtn = $('newBtn');
+  if (newBtn) newBtn.addEventListener('click', function () { openNewScheduleModal(); });
+
   // 一句话改课（POST /api/nl → /api/slots → 提议改期）。⛔ 与「问一下」是两套逻辑，别合并
   const nlBtn = $('nlBtn');
   if (nlBtn) nlBtn.addEventListener('click', function () { nlRun(); });
@@ -4761,6 +4765,99 @@ async function nlPropose(p, cand) {
   } catch (e) {
     showBanner(err, '打开改期失败：' + (e && e.message ? e.message : e));
   }
+}
+
+/* =============================================================================
+ * 10.9 新建日程（POST /api/schedules）
+ * -----------------------------------------------------------------------------
+ * 为什么补：全系统只有「改」（临时微调 / 提议改期 / 消解），**没有「建」**——
+ * 演示库里的课和活动都是脚本预置的，评委问「现在加一场活动怎么加」就露馅。
+ *
+ * 🔴 落库由后端调领域层 create_periodic / create_once，前端只送参数。
+ * 🔴 建完**不拦撞车**：撞了正好让冲突列表把它显示出来，老师自己决定改不改。
+ * 🔴 目标对象 = 当前「查看对象」，不让人在这里再选一次（少一个错的地方）。
+ * ========================================================================== */
+
+/** 打开「新建日程」弹层。targets 取当前查看对象，取不到就提示先选。 */
+function openNewScheduleModal() {
+  const targetId = state.objectId;
+  if (!targetId) {
+    showBanner($('excErr'), '先在右上角「查看对象」里选一个班或场地，再新建日程。');
+    return;
+  }
+  const md = modalOverlay();
+  md.box.appendChild(el('h3', { text: '新建日程（建完不拦撞车，撞了会在冲突列表里出现）' }));
+
+  // 类型
+  const fKind = el('div', { cls: 'field' });
+  fKind.appendChild(el('label', { text: '类型' }));
+  const selKind = el('select');
+  selKind.appendChild(el('option', { text: '一次性活动（只这一天）', attrs: { value: 'once' } }));
+  selKind.appendChild(el('option', { text: '每周课（这天起每周都上）', attrs: { value: 'periodic' } }));
+  fKind.appendChild(selKind);
+  md.box.appendChild(fKind);
+
+  // 标题
+  const fTitle = el('div', { cls: 'field' });
+  fTitle.appendChild(el('label', { text: '名称（这节课 / 这场活动叫什么）' }));
+  const inTitle = el('input', { attrs: { type: 'text', maxlength: '60' } });
+  fTitle.appendChild(inTitle);
+  md.box.appendChild(fTitle);
+
+  // 日期
+  const fDate = el('div', { cls: 'field' });
+  fDate.appendChild(el('label', { text: '日期' }));
+  const inDate = el('input', { attrs: { type: 'date' } });
+  inDate.value = (state.days && state.days[0]) || '';
+  fDate.appendChild(inDate);
+  md.box.appendChild(fDate);
+
+  // 节次
+  const fPer = el('div', { cls: 'field' });
+  fPer.appendChild(el('label', { text: '第几节' }));
+  const selPer = el('select');
+  for (let i = 1; i <= 8; i += 1) {
+    selPer.appendChild(el('option', { text: '第 ' + i + ' 节', attrs: { value: String(i) } }));
+  }
+  fPer.appendChild(selPer);
+  md.box.appendChild(fPer);
+
+  const errBox = el('div', { cls: 'banner error', attrs: { role: 'alert' } });
+  errBox.hidden = true;
+  md.box.appendChild(errBox);
+
+  const actions = el('div', { cls: 'actions' });
+  const btnOk = el('button', { cls: 'primary', text: '创建', attrs: { type: 'button' } });
+  const btnCancel = el('button', { text: '取消', attrs: { type: 'button' } });
+  btnCancel.addEventListener('click', function () { closeModal(md.ov); });
+  actions.appendChild(btnOk);
+  actions.appendChild(btnCancel);
+  md.box.appendChild(actions);
+
+  btnOk.addEventListener('click', async function () {
+    const title = inTitle.value.trim();
+    const dateIso = inDate.value.trim();
+    if (!title) { showBanner(errBox, '给这节课 / 这场活动起个名字。'); return; }
+    if (!dateIso) { showBanner(errBox, '选一个日期。'); return; }
+    btnOk.disabled = true;
+    try {
+      const body = await apiPost('/api/schedules', withGroup({}), {
+        kind: selKind.value,
+        title: title,
+        date: dateIso,
+        periods: [Number(selPer.value)],
+        targets: [targetId],
+      });
+      closeModal(md.ov);
+      showBanner($('excMsg'), '已创建：' + title + '（' + dateIso + ' 第 ' +
+        selPer.value + ' 节）' + (body && body.kind === 'periodic' ? '，每周生效' : ''));
+      await loadAll();   // 周视图 + 冲突列表一起刷新，撞没撞由界面显示
+    } catch (e) {
+      showBanner(errBox, '创建失败：' + (e && e.message ? e.message : e));
+    } finally {
+      btnOk.disabled = false;
+    }
+  });
 }
 
 const FEATURE_TIPS = [

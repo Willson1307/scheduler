@@ -105,7 +105,8 @@ from scheduler.occupancy import (
     load_exceptions,
     occupancy_map,
 )
-from scheduler.slots import decode_mask, load_slot_config
+from scheduler.schedules import NewSchedule, create_once, create_periodic
+from scheduler.slots import bit, decode_mask, load_slot_config
 from scheduler.solver import m2
 
 # ---------------------------------------------------------------------------
@@ -523,7 +524,174 @@ def schedule_detail(method, path, query, body, headers, context=None):
         conn.close()
 
 
+
+# ---------------------------------------------------------------------------
+# 新建日程（POST /api/schedules）—— 2026-11-15 补
+# ---------------------------------------------------------------------------
+# 为什么补它：全系统只有「改」（临时微调 / 提议改期 / 一键消解），**没有「建」**。
+# 演示库里的课和活动都是脚本预置的，评委问「我现在加一场活动怎么加」会当场露馅。
+#
+# 🔴 落库全部走领域层已批的函数（`scheduler.schedules.create_periodic` /
+#    `create_once`），本文件**不自己拼 INSERT**：掩码位序、参与者角色、
+#    周期/一次性的表结构都由领域层负责，外围重复实现必错（本项目踩过）。
+# 🔴 权限：只有对该组有 `own` 档的人能建（查看/提请求两档不行）。
+#    建完**不拦撞车**——撞了正是产品要暴露的东西，冲突数随响应返回，
+#    前端提示「已创建，本周冲突 N 处」，让老师自己决定改不改。
+
+MAX_TITLE = 60
+MAX_PERIODS = 16
+
+
+def _ids(data: dict, key: str) -> list[str]:
+    """取 body 里的 id 列表；缺省 → 空列表；非字符串一律剔除。"""
+    raw = data.get(key)
+    if not isinstance(raw, list):
+        return []
+    return [x for x in raw if isinstance(x, str) and x.strip()]
+
+
+@auth.require_auth
+def create_schedule(method, path, query, body, headers, context=None):
+    """POST /api/schedules → 201 {"id","kind","conflicts"}。
+
+    body：
+      kind        "periodic" | "once"
+      title       1–60 字
+      date        "YYYY-MM-DD"（一次性活动就是那天；周期性日程是开始生效那天）
+      periods     [1..16] 节次列表（当天）
+      targets     对象 id 列表（班级 / 场地），至少一个
+      teachers    （可选）教师对象 id 列表
+      resources   （可选）场地对象 id 列表
+      group       （可选）用于鉴权与组织定位
+      valid_to    （可选，周期）默认 +119 天
+      week_parity （可选，周期）0 每周 / 1 单周 / 2 双周
+
+    400 参数问题；403 无 own 权限 / 跨组织；404 对象不存在。
+    """
+    from .http_api import json_body
+
+    data = json_body(body) or {}
+    kind = str(data.get("kind") or "").strip()
+    if kind not in ("periodic", "once"):
+        raise ApiError(400, "kind 只能是 periodic 或 once")
+
+    title = str(data.get("title") or "").strip()
+    if not title:
+        raise ApiError(400, "缺少 title（这节课 / 这场活动叫什么）")
+    if len(title) > MAX_TITLE:
+        raise ApiError(400, f"title 不能超过 {MAX_TITLE} 字")
+
+    iso = str(data.get("date") or "").strip()
+    try:
+        day = date.fromisoformat(iso)
+    except ValueError:
+        raise ApiError(400, "date 必须是 YYYY-MM-DD")
+
+    raw_periods = data.get("periods")
+    if not isinstance(raw_periods, list) or not raw_periods:
+        raise ApiError(400, "periods 至少要有一节")
+    periods: list[int] = []
+    for p in raw_periods:
+        if not isinstance(p, int) or not 1 <= p <= MAX_PERIODS:
+            raise ApiError(400, f"节次必须是 1..{MAX_PERIODS} 的整数")
+        if p not in periods:
+            periods.append(p)
+    periods.sort()
+
+    targets = _ids(data, "targets")
+    if not targets:
+        raise ApiError(400, "targets 至少要有一个对象（哪个班 / 哪个场地）")
+
+    user_id = context["user_id"]
+    # 🔴 query 里的值可能是 list（?group=a&group=b），dict.get 直接取会拿到列表 →
+    #    resolve_authorized_org 判成越权（实测报「无权访问该组织」）。用 K.parse_group 归一。
+    group = data.get("group") or K.parse_group(query)
+
+    conn = config.open_db()
+    try:
+        _gid, org_id = K.resolve_authorized_org(conn, user_id, group)
+
+        # 对象必须真实存在且属于本组织（跨组织建日程是最危险的越权）
+        for oid in targets + _ids(data, "teachers") + _ids(data, "resources"):
+            row = conn.execute(
+                "SELECT id, org_id FROM objects WHERE id = ?", (oid,)
+            ).fetchone()
+            if row is None:
+                raise ApiError(404, f"对象不存在：{oid}")
+            if row["org_id"] != org_id:
+                raise ApiError(403, "不能给别的组织建日程")
+
+        # 权限：必须对「目标组」有 own 档
+        from scheduler import authz
+
+        level = None
+        for oid in targets:
+            level = authz.effective_level(conn, user_id, oid)
+            if level:
+                break
+        if level != "own":
+            raise ApiError(403, "只有能改本组排课的人才能新建日程")
+
+        spec = NewSchedule(
+            title=title,
+            org_id=org_id,
+            created_by=None,
+            participants={
+                "target": targets,
+                "teacher": _ids(data, "teachers"),
+                "participant": [],
+            },
+            resources=_ids(data, "resources"),
+        )
+
+        cfg = load_slot_config(conn, org_id)
+        if kind == "periodic":
+            bitmap = 0
+            for p in periods:
+                bitmap |= bit(day.isoweekday(), p)
+            valid_to = str(data.get("valid_to") or "").strip() or (
+                day + timedelta(days=119)
+            ).isoformat()
+            try:
+                parity = int(data.get("week_parity") or 0)
+            except (TypeError, ValueError):
+                raise ApiError(400, "week_parity 必须是 0/1/2")
+            sid = create_periodic(
+                conn, spec,
+                slot_bitmap=bitmap,
+                week_parity=parity,
+                valid_from=day.isoformat(),
+                valid_to=valid_to,
+            )
+        else:
+            # 时间从作息里取：所选第一节的开始 ~ 最后一节的结束。
+            # 🔴 字段名是 start_time / end_time（见 slots.SlotConfig.slots 的 dict），
+            #    写成 start/end 会取到 None 并**静默回落到 08:00**——课就落到第 1 节，
+            #    表面看「创建成功」，实际时间全错（2026-11-15 实测踩到）。
+            first = cfg.get(day.isoweekday(), periods[0]) or {}
+            last = cfg.get(day.isoweekday(), periods[-1]) or {}
+            start_time = first.get("start_time")
+            end_time = last.get("end_time")
+            if not start_time or not end_time:
+                raise ApiError(
+                    400,
+                    f"这一天没有第 {periods[0]} 节（当天作息里未启用），换个节次再建",
+                )
+            start_at = f"{day.isoformat()}T{start_time}"
+            end_at = f"{day.isoformat()}T{end_time}"
+            sid = create_once(conn, spec, start_at=start_at, end_at=end_at)
+
+        # 🔴 不返回冲突数：org 级 scan 与界面上「当前组」的口径不同（实测 45 vs 23），
+        #    两个数字同时出现会让人以为系统算错。建完让前端刷新周视图与冲突列表，
+        #    撞没撞由界面自己显示。
+        return 201, {"id": sid, "kind": kind,
+                     "date": day.isoformat(), "periods": periods}
+    finally:
+        conn.close()
+
+
 ROUTES = {
     ("GET", "/api/schedules"): list_schedules,
     ("GET", "/api/schedules/detail"): schedule_detail,
+    ("POST", "/api/schedules"): create_schedule,
 }
