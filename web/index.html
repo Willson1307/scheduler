@@ -17,7 +17,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/png" href="favicon.png?v=20261213">
+<link rel="icon" type="image/png" href="favicon.png?v=20261214">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -128,8 +128,10 @@
     .col-rail { position: sticky; top: var(--sp); align-self: start; }
   }
 
-  /* ---------- 二级区 2×2（查空位 / 问一下 / 消解结果 / 变更请求） ----------
-     这四块「偶尔用一次」，不跟顶部同频；单独成带宽版排，顶部三栏就不会留半屏空白。 */
+  /* ---------- 二级区（查空位 / 消解结果 / 变更请求） ----------
+     这三块「偶尔用一次」，不跟顶部同频；单独成带宽版排，顶部三栏就不会留半屏空白。
+     🔴 2026-11-15：原来是 2×2 四块（含「问一下」入口卡），那张卡与右下 FAB 重复已删，
+        剩三块 → 第三块独占整行（否则第二行右边留一块空白 + 一条没来由的竖线）。 */
   .layout-bottom {
     display: grid;
     grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
@@ -157,6 +159,12 @@
   .layout-bottom > section:nth-of-type(odd) { padding-right: var(--sp); border-right: 1px solid var(--c-border-st); }
   .layout-bottom > section:nth-of-type(even) { padding-left: var(--sp); }
   .layout-bottom > section:nth-of-type(n+3) { border-top: 1px solid var(--c-border-st); margin-top: var(--sp); padding-top: var(--sp); }
+  /* 只剩三块：第三块（变更请求）跨满整行，右侧不留空位与悬空竖线 */
+  .layout-bottom > section:nth-of-type(3) {
+    grid-column: 1 / -1;
+    padding-right: var(--sp);
+    border-right: 0;
+  }
 
   @media (max-width: 1180px) {
     .layout { grid-template-columns: minmax(0, 1fr); }
@@ -921,6 +929,20 @@
     font-size: 1.5rem; line-height: 1; padding: 0 4px;
   }
   .sheet-body { overflow: auto; padding: 12px; }
+  /* 抽屉顶部的分工提示条：一句话说清「问一下 ≠ 改课」。
+     ⛔ 不要做成需要点开才看得到（折叠 = 等于没写）；它就常驻在抽屉里。 */
+  .sheet-tip {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 6px 10px; padding: 8px 12px;
+    background: var(--c-warn-l); color: var(--c-warn);
+    font-size: var(--fs-xs); border-bottom: 1px solid var(--c-border-st);
+  }
+  .sheet-tip button {
+    background: none; border: 0; padding: 0; cursor: pointer;
+    color: var(--c-primary); font: inherit; font-size: var(--fs-xs);
+    font-weight: 700; text-decoration: underline;
+  }
+  .sheet-tip button:hover { color: var(--c-primary); text-decoration-thickness: 2px; }
   /* 抽屉里的 #secChat 去掉原区段外框，只留内容 */
   .sheet-body #secChat { border: 0; padding: 0; background: none; }
   .sheet-body #secChat .sec-head { margin-top: 0; }
@@ -928,21 +950,8 @@
   .sheet-body #secChat .sec-head h2 { display: none; }
   .sheet-body #chatBox { max-height: 34vh; overflow: auto; }
 
-  /* 二级区入口：替代原来那个折叠的「问一下」格 */
-  .chat-entry-btn {
-    display: flex; align-items: center; gap: 12px; width: 100%;
-    padding: 14px; border: 1px dashed var(--c-border-st); border-radius: 8px;
-    background: var(--c-primary-l); cursor: pointer; text-align: left; font: inherit;
-  }
-  .chat-entry-btn:hover { border-style: solid; border-color: var(--c-primary); }
-  .ce-ico {
-    flex: none; width: 34px; height: 34px; border-radius: 50%;
-    background: var(--c-primary); color: #fff;
-    display: inline-flex; align-items: center; justify-content: center;
-    font-size: .8rem; font-weight: 700;
-  }
-  .ce-txt b { display: block; font-size: 1rem; color: var(--c-text); }
-  .ce-txt small { display: block; margin-top: 2px; font-size: .82rem; color: var(--c-text-dim); }
+  /* 二级区入口卡样式已随「问一下」入口卡一起删除（2026-11-15），
+     ⛔ 不要为新的入口再抄一份 —— 入口只在右下 FAB 一处。 */
 
   @media (max-width: 720px) {
     .sheet { right: 8px; left: 8px; width: auto; bottom: 80px; max-height: 78vh; }
@@ -1211,7 +1220,7 @@
        DOM 顺序 = 阅读顺序；<1180px 时仍是单列，顺序为 查空位 → 问一下 → 结果 → 请求。
        ========================================================================== -->
   <div class="layout-bottom">
-    <div class="belt-title">工具与记录 <span class="hint">查空位 / 问一下 / 消解结果 / 变更请求</span></div>
+    <div class="belt-title">工具与记录 <span class="hint">查空位 / 消解结果 / 变更请求（「问一下」在右下角）</span></div>
   <!-- ---------- 空位查询（F7 前端 / B 批 GET /api/slots） ----------
        🔴 与周视图同页、紧随其后，不做前端路由（AGENTS §8：单页 idx）。
        🔴 空结果必须说话：「这段时间没有连排 N 节的空位」是正常业务结论，
@@ -1269,19 +1278,12 @@
     </details>
   </section>
 
-  <!-- ---------- 变更请求（F7 / B8 审批流，卡 runQn7：默认收起） ----------
-       🔴 刷新按钮与两条横幅（#reqMsg / #reqErr）都留在 <details> 外：
-          放进 summary 会「刷新 + 开合」双触发；折进去则会「失败无声」。 -->
-    <section id="secChatEntry" class="chat-entry-sec">
-    <div class="sec-head">
-      <h2>问一下 <span class="hint">问「这件事该怎么操作」，答案来自用户手册</span></h2>
-      <span id="chatSum" class="fold-state">尚未提问</span>
-    </div>
-    <button type="button" id="openChat" class="chat-entry-btn">
-      <span class="ce-ico">AI</span>
-      <span class="ce-txt"><b>打开问一下</b><small>试试「怎么调课」「高一(1)班周三第一节撞了吗」</small></span>
-    </button>
-  </section>
+  <!-- ---------- 2026-11-15：删掉这里的「问一下」入口卡 ----------
+       原因（队长指示）：「工具与记录」里这张卡点开就是右下角同一个抽屉，
+       等于给同一个东西配了两个入口，还和「变更请求」并排，老师分不清谁管什么。
+       现在**只留右下角常驻 FAB**（页面任何位置都在，比藏在二级区更好找）；
+       抽屉顶部有常驻提示条写清「只答怎么做、不改课表」+「去提变更请求」直达。
+       ⛔ 不要再把入口卡加回来：多入口 = 多一个要解释的东西。 -->
 
 
   <!-- ---------- 消解前后对比（卡 runQn7：默认收起） ----------
@@ -1289,7 +1291,7 @@
        app.js 在写结果或写错误后一律 details.open = true，绝不让「消解完了但看不见」。 -->
   <section id="secRequests">
     <div class="cl-head">
-      <h2>变更请求 <span class="hint">永久改期走审批：批准后才生效</span></h2>
+      <h2>变更请求 <span class="hint">真改课走这里：提请求 → 别人批准 → 才写进课表</span></h2>
       <div class="req-tools">
         <span id="reqSum" class="fold-state">登录后显示</span>
         <button id="reqReloadBtn" type="button">刷新请求</button>
@@ -1300,7 +1302,8 @@
     <details id="reqDetails" class="fold">
       <summary>展开查看变更请求</summary>
       <div id="reqBox"></div>
-      <p class="note">已处理的只读；批准时会再查一遍冲突。</p>
+      <p class="note">提新请求的两个入口：<b>双击课表格子</b>（临时微调当天）或「查空位」结果里的<b>按此提议</b>。
+        已处理的只读；批准时会再查一遍冲突。</p>
     </details>
   </section>
 
@@ -1354,6 +1357,14 @@
     <span class="sheet-hint">答案来自用户手册，只解释不写数据</span>
     <button type="button" id="chatSheetClose" class="sheet-x" aria-label="关闭">×</button>
   </div>
+  <!-- 2026-11-15 队长指出：「问一下」和「提要求」是同一个入口、界面上没解释。
+       两个功能确实是**两个**地方，但长得很像，所以在这里用一句话把边界写死：
+       本抽屉只回答「怎么做」，一个字都不会写进课表；真改课必须走审批。
+       右边给直达按钮，省得老师自己去页面底部找。 -->
+  <div class="sheet-tip">
+    <span>这里只答「怎么做」，不会改课表。</span>
+    <button type="button" id="chatToRequest">要真改课？去提变更请求 →</button>
+  </div>
   <div class="sheet-body">
 <section id="secChat">
     <div class="sec-head">
@@ -1402,7 +1413,7 @@
 <!-- 版本号唯一来源 = src/server/config.py 的 ASSET_VERSION；本文件三处 ?v= 必须与它一致。
      版本沿革写在 config.py 的注释里（服务端文件，不会随页面下发）。
      ⛔ 不要在这里记流水：这是 HTML 注释，闭合符写错一行就会整段漏到页面上（2026-11-13 已踩过）。 -->
-<script src="brand-icon.js?v=20261213"></script>
-<script src="app.js?v=20261213"></script>
+<script src="brand-icon.js?v=20261214"></script>
+<script src="app.js?v=20261214"></script>
 </body>
 </html>

@@ -2291,7 +2291,6 @@ function bindEvents() {
   (function () {
     const fab = $('fabChat');
     const sheet = $('chatSheet');
-    const openBtn = $('openChat');
     const closeBtn = $('chatSheetClose');
     if (!sheet) return;
 
@@ -2309,8 +2308,21 @@ function bindEvents() {
         if (sheet.hidden) openSheet(); else closeSheet();
       });
     }
-    if (openBtn) openBtn.addEventListener('click', openSheet);
     if (closeBtn) closeBtn.addEventListener('click', closeSheet);
+
+    // 2026-11-15：「要真改课？去提变更请求」——
+    // 关抽屉 → 展开变更请求区 → 滚到可见。⛔ 只做跳转，不替用户提交任何东西。
+    // 用 scrollIntoView 而不是改 location.hash：改 hash 会插历史记录，返回键会莫名跳回。
+    const toReq = $('chatToRequest');
+    if (toReq) {
+      toReq.addEventListener('click', function () {
+        closeSheet();
+        const d = $('reqDetails');
+        if (d) d.open = true;
+        const sec = $('secRequests');
+        if (sec && sec.scrollIntoView) sec.scrollIntoView({ block: 'center' });
+      });
+    }
 
     document.addEventListener('keydown', function (ev) {
       if (ev.key === 'Escape' && !sheet.hidden) closeSheet();
@@ -4554,7 +4566,8 @@ const FEATURE_TIPS = [
     lines: [
       '问「这件事该怎么操作」，答案取自用户手册。',
       '点下面的常见问题，或自己输入后回车；手册里没有就照实说，不会瞎编。',
-      '标「手册原文（未启用 AI）」时是手册原话、未经模型改写。问答只解释，不改任何数据。'
+      '标「手册原文（未启用 AI）」时是手册原话、未经模型改写。问答只解释，不改任何数据。',
+      '⚠️ 真要让课表变，别在这里——去「变更请求」提请求，批准后才写进课表。'
     ]
   },
   {
