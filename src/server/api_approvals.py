@@ -136,7 +136,9 @@ def submit_request(method, path, query, body, headers, context=None):
 def list_requests(method, path, query, body, headers, context=None):
     """GET /api/approvals?status=&group=
 
-    只返回调用者所在组织的请求（跨组织一律不可见）。
+    只返回调用者所在组织的请求（跨组织一律不可见），且只返回
+    **本人 + 档位严格高于提出人**的请求（rRK0Q5 读取侧可见性，
+    详见 b8_kernels.can_view_request 与 docs/07 §14）。
     """
     status = (query.get("status") or [""])[0]
     group = (query.get("group") or [""])[0] or None
@@ -158,6 +160,13 @@ def list_requests(method, path, query, body, headers, context=None):
             params.append(status)
         sql += " ORDER BY created_at, id"
         rows = conn.execute(sql, params).fetchall()
+        # 🔴 rRK0Q5 读取侧越权：SQL 只有 org 过滤是不够的——同组织内
+        # 教师B 也能看到教师A 的申请（requester_id / reason / payload
+        # 前后快照全泄露）。SQL 拿完行后按 can_view_request 过滤
+        # （本人 或 档位严格高于提出人，与 require_higher_level 同一口径）；
+        # count 是**过滤后**的数。两个 admin 互不可见是已知且可接受的
+        # 副作用（own == own），见 b8_kernels.can_view_request 注释。
+        rows = [r for r in rows if K.can_view_request(conn, context["user_id"], r)]
     finally:
         conn.close()
 
@@ -382,7 +391,9 @@ def list_events(method, path, query, body, headers, context=None):
     """GET /api/approvals/events?id=cr_x
 
     查看某条请求的完整审计轨迹（submit→approve→apply…）。
-    调用者须能访问该请求所在组织（view 级即可）。
+    可见性与列表同口径（rRK0Q5）：本人 或 档位严格高于提出人
+    （can_view_request）；不可见 → 403。原先只查 view 档组织隔离，
+    任何本组织 view 档用户都能读他人请求的完整轨迹，同源越权。
     """
     request_id = (query.get("id") or [""])[0]
 
@@ -392,6 +403,11 @@ def list_events(method, path, query, body, headers, context=None):
         K.ensure_change_tables(conn)
         req = K.load_request(conn, request_id)
         K.require_org_access(conn, context["user_id"], req["org_id"])
+        # 🔴 rRK0Q5：组织隔离之上再叠同一可见性判据——view 档不够，
+        # 必须「本人 或 严格高于提出人」（教师B 读教师A 的轨迹 → 403）。
+        # 错误体沿用 ApiError 扁平 {"error": msg}，不换风格。
+        if not K.can_view_request(conn, context["user_id"], req):
+            raise ApiError(403, "无权查看该请求（仅本人或档位高于提出人可见）")
 
         rows = conn.execute(
             "SELECT * FROM change_events WHERE request_id = ? ORDER BY rowid",

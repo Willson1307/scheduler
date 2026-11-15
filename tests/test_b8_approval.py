@@ -191,6 +191,19 @@ class ApiFixture(unittest.TestCase):
         cls.admin_b_uid = og.create_user(cls.conn, admin_b_obj, "admin_b", "pw", role="admin")
         cls.admin_b_token = auth.issue_token(cls.admin_b_uid, "admin_b", "admin", "obj_ab")
         cls.admin_b_headers = {"authorization": f"Bearer {cls.admin_b_token}"}
+
+        # 本组织第二个教师（rRK0Q5 读取侧可见性用例）：同为 propose 档，
+        # 与教师甲（teacher_a）同级 → 互相看不到对方的申请。
+        # 登录名不能再用 teacher_b（已被乙校占用，users.login 唯一）。
+        teacher_b2_obj = og.create_object(cls.conn, cls.org, "user", "教师乙")
+        cls.teacher_b2_uid = og.create_user(
+            cls.conn, teacher_b2_obj, "teacher_c", "pw", role="teacher"
+        )
+        authz.grant_role(cls.conn, cls.org, cls.cls, cls.teacher_b2_uid, "propose")
+        cls.teacher_b2_token = auth.issue_token(
+            cls.teacher_b2_uid, "teacher_c", "teacher", "obj_tc"
+        )
+        cls.teacher_b2_headers = {"authorization": f"Bearer {cls.teacher_b2_token}"}
         cls.conn.commit()
 
     @classmethod
@@ -215,6 +228,8 @@ class ApiFixture(unittest.TestCase):
             return self.admin_headers
         if uid == self.admin_b_uid:
             return self.admin_b_headers
+        if uid == self.teacher_b2_uid:
+            return self.teacher_b2_headers
         return self.teacher_headers
 
     def _submit(self, uid, target_id="sch_a", valid_from="2026-09-28", group=None, **extra):
@@ -597,6 +612,49 @@ class TestSameLevelApproval(ApiFixture):
         rid = self._submit(self.teacher_uid)["request_id"]
         payload = self._approve(self.admin_uid, rid)
         self.assertEqual(payload["status"], "applied")
+
+
+# ===========================================================================
+# 十一b、rRK0Q5 读取侧越权：列表与审计轨迹的可见性
+# ===========================================================================
+
+
+class TestReadVisibility(ApiFixture):
+    """rRK0Q5：可见 = 本人 + 档位严格高于提出人（与 require_higher_level 同口径）。
+
+    原缺陷：list_requests 只有 org 过滤、list_events 只要 view 档 → 同组织
+    教师B 能看到教师A 的改课申请（requester_id / reason / payload 前后快照
+    全泄露），跨用户隐私越权。已知且可接受的副作用：两个 admin 互不可见
+    （own == own，与「只能批自己下级」同语义，不是 bug）。
+    """
+
+    def test_teacher_b_cannot_see_teacher_a_request(self):
+        """🔴 教师B（propose）看不到教师A（propose）的申请：同级不可见。"""
+        rid = self._submit(self.teacher_uid)["request_id"]
+        payload = self._list(self.teacher_b2_uid)
+        self.assertEqual(payload["count"], 0)
+        self.assertNotIn(rid, [r["id"] for r in payload["requests"]])
+
+    def test_teacher_a_sees_own_request(self):
+        """教师A 看得到自己提交的申请（本人的永远可见）。"""
+        rid = self._submit(self.teacher_uid)["request_id"]
+        payload = self._list(self.teacher_uid)
+        self.assertEqual(payload["count"], 1)
+        self.assertIn(rid, [r["id"] for r in payload["requests"]])
+
+    def test_admin_sees_teacher_request(self):
+        """admin（own > propose）看得到教师的申请——没误杀审批路径。"""
+        rid = self._submit(self.teacher_uid)["request_id"]
+        payload = self._list(self.admin_uid)
+        self.assertEqual(payload["count"], 1)
+        self.assertIn(rid, [r["id"] for r in payload["requests"]])
+
+    def test_teacher_b_read_a_events_403(self):
+        """🔴 教师B 读教师A 请求的审计轨迹 → 403（events 与列表同判据）。"""
+        rid = self._submit(self.teacher_uid)["request_id"]
+        with self.assertRaises(Exception) as cm:
+            self._events(self.teacher_b2_uid, rid)
+        self.assertEqual(cm.exception.status, 403)
 
 
 # ===========================================================================

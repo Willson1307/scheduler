@@ -210,6 +210,34 @@ def require_higher_level(
         )
 
 
+def can_view_request(
+    conn: sqlite3.Connection, viewer_id: str, req_row: sqlite3.Row
+) -> bool:
+    """读取侧可见性（rRK0Q5）：本人 或 档位严格高于提出人 → 可见。
+
+    口径与 require_higher_level 同源（只批下级的读取侧对偶）：提交/批准侧
+    鉴权早就有，读取侧原来只有 org 过滤 → 本组织内教师B 能看到教师A 的
+    改课申请（requester_id / reason / payload 前后快照全泄露），跨用户隐私
+    越权。判据：
+      - requester_id == 调用者 → 可见（自己的申请当然能看）；
+      - 否则 max_level_in_org(调用者) **严格高于** max_level_in_org(提出人)
+        （authz.LEVEL_ORDER 整数比较，🔴 禁字符串字典序）→ 可见；
+      - 其余（同级或更低，如教师B 看教师A：propose == propose）→ 不可见。
+
+    ⚠️ 已知且可接受的副作用（与「只能批自己下级」语义一致，不是 bug）：
+    两个 admin 在本组织的有效档都短路成 own，own > own 不成立 →
+    admin 之间互相看不到对方的申请。演示「提议→批准」请用
+    「教师提议 + 管理员批准」组合（自批本来就 403）。
+    """
+    if req_row["requester_id"] == viewer_id:
+        return True
+    viewer = max_level_in_org(conn, viewer_id, req_row["org_id"])
+    requester = max_level_in_org(conn, req_row["requester_id"], req_row["org_id"])
+    v_rank = authz.LEVEL_ORDER[viewer] if viewer is not None else -1
+    r_rank = authz.LEVEL_ORDER[requester] if requester is not None else -1
+    return v_rank > r_rank
+
+
 # ---------------------------------------------------------------------------
 # 快照（提交时抓 before；落库后抓 after）
 # ---------------------------------------------------------------------------
