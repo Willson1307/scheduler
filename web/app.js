@@ -1471,17 +1471,23 @@ function renderResolveResult(body) {
   box.appendChild(banner);
 
   // 明细行：某个数没给出来就不显示那一行（不把「字段缺失」这种开发期信息写上屏幕）
-  /* 🔴 2026-11-15：**删掉「迭代轮数」这一行**（响应字段 `rounds` 仍然保留，只是不上屏幕）。
-   *    原因：后端 `api_resolve.py:257` 写的是 `"rounds": applied` —— 两者**恒等**。
-   *    同屏并排显示「已应用方案数 4 / 迭代轮数 4」，看着像 bug，评委会追着问；
-   *    而它本来也不提供任何额外信息（每轮只应用 1 个方案，轮数必然等于方案数）。
+  /* 🔴 2026-11-15（口径复核，见项目留言）：这块显示的是**三种不同的量**，单位不能混。
+   *    · `remaining_before/after` = **冲突处数**（消解后重扫全库得出）→ 单位「处」；
+   *    · `applied` = **调整方案数**（每轮只应用 1 个最优方案）→ 单位「个方案」；
+   *    · `filtered_out_count` = 被跳过的**候选方案数**（方案要动的日程不在可改范围），
+   *      **不是冲突处数** → 单位「个候选方案」。
+   *    一个方案能同时解开多处冲突（把一场活动挪走，它和 3 个班撞的 3 处一起消失），
+   *    所以「4 个方案解掉 30 处冲突」是正常结果，把 4 写成「4 处」就是在把方案数当处数。
+   * 🔴 另外**删掉「迭代轮数」这一行**（响应字段 `rounds` 仍然返回，只是不上屏幕）：
+   *    后端 `api_resolve.py:257` 写的是 `"rounds": applied` —— 两者**恒等**，
+   *    同屏并排显示「已应用方案数 4 / 迭代轮数 4」看着像 bug，且不提供任何额外信息。
    *    要恢复这一行，得先让后端真的记轮数（`b4_kernels.resolve_and_apply` 的
    *    `max_rounds` 循环里累计），否则别把两个相同的数字摆在一起。
    */
   const kv = el('div', { cls: 'kv' });
   [
     ['已应用方案数', applied],
-    ['因不在你的可改范围而未尝试', filtered],
+    ['因涉及无权改动的课程而跳过的候选方案', filtered],
   ].forEach(function (pair) {
     if (pair[1] === null) return;
     kv.appendChild(el('div', { text: pair[0] + '：' + String(pair[1]) }));
@@ -1491,7 +1497,8 @@ function renderResolveResult(body) {
   if (filtered !== null && filtered > 0) {
     box.appendChild(el('div', {
       cls: 'banner warn',
-      text: '其中 ' + filtered + ' 处因不在你的可改范围，系统未尝试求解——不是消解失败，是权限边界。',
+      // 🔴 这里说的是**候选方案**，不是冲突处数 —— 写成「N 处」会让人以为还有 N 处冲突没解。
+      text: '另有 ' + filtered + ' 个候选方案因涉及你无权改动的课程而跳过，系统未尝试求解——不是消解失败，是权限边界。',
     }));
   }
   if (after !== 0) {
@@ -1504,7 +1511,9 @@ function renderResolveResult(body) {
   /* ---- 闭环（卡 rvdL9a）：撤销本次消解 / 固化此版本 ----
    * 为什么必须有：apply_plan 是原地 UPDATE，点一次就回不去了。
    * 现场敢点「一键消解」的前提是「能撤回」，所以按钮紧贴结果条，
-   * 文案带上真实数字（N 处 / 23 → 0），不写死。
+   * 文案带上真实数字（N 个方案 / 冲突 23 → 0），不写死。
+   * 🔴 2026-11-15 修单位：这条横幅里的 `applied` 是**调整方案数**，不是冲突处数。
+   *    旧文案「已消解 4 处（30 → 0）」自相矛盾（4 处怎么从 30 变 0），评委追一句就要解释。
    * 🔴 只有 applied > 0 才显示撤销（没改动就没有可撤销的东西）。
    * 🔴 固化只对 admin 显示前端按钮；真正的权限判定在后端（teacher → 403）。
    */
@@ -1513,9 +1522,9 @@ function renderResolveResult(body) {
     const strip = el('div', { cls: 'banner ok' });
     const canUndo = applied !== null && applied > 0;
     strip.appendChild(el('span', {
-      text: '已消解 ' + (applied === null ? '?' : String(applied)) + ' 处（'
+      text: '已应用 ' + (applied === null ? '?' : String(applied)) + ' 个调整方案（冲突 '
         + (before === null ? '?' : String(before)) + ' → '
-        + (after === null ? '?' : String(after)) + '）' + (canUndo ? '｜' : ''),
+        + (after === null ? '?' : String(after)) + ' 处）' + (canUndo ? '｜' : ''),
     }));
     if (canUndo) {
       const undo = el('button', {

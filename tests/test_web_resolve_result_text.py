@@ -1,4 +1,4 @@
-"""消解结果卡片的文案口径验收测试（迭代轮数那一行必须消失）。
+"""消解结果卡片的文案口径验收测试（处数 / 方案数不许混，迭代轮数不许出现）。
 
 ## 为什么有这条断言
 
@@ -17,15 +17,17 @@
 一个方案能同时解开多处冲突（把一场活动挪走，它和 3 个班撞的 3 处一起消失），
 所以「4 个方案解掉 30 处」是正常结果。
 
-`rounds` 与 `applied` 恒等 → 同屏并排显示两个一样的数字，评委会当成 bug 追着问。
-**这一行删掉**（响应字段 `rounds` 仍返回，只是前端不上屏幕）。
+## 钉死什么（2026-11-15 三处文案，一次改完）
 
-## 钉死什么
-
-1. `renderResolveResult()` 的代码里不再出现「迭代轮数」，也不再读 `rounds` 字段；
-2. 明细里另外两行**不许一起被删**：删多了等于把「方案数」和「跳过数」两个真实
-   信息也丢了，老师就只剩一个冲突变化数字，看不懂发生了什么；
-3. 注释里可以写「迭代轮数」来解释为什么删（去注释后再断言，否则逼人删注释）。
+1. **删掉「迭代轮数」**：它与 `applied` 恒等，同屏两个一样的数字会被当成 bug。
+   代码里不得再出现「迭代轮数」，也不得再读 `rounds` 字段（响应字段仍返回，兼容旧客户端）。
+2. **撤销条不许把方案数说成处数**：`applied` 只能以「已应用 N 个调整方案」出现，
+   不得再出现「已消解 N 处」这种自相矛盾的写法。
+3. **跳过数不许带「处」**：`filtered_out_count` 是候选方案数，
+   明细行与提示句都必须说「个候选方案」，不能写成「N 处」。
+4. 明细里「已应用方案数」与「跳过候选方案」两行**不许一起被删** —— 删多了等于把
+   「方案数」和「跳过数」两个真实信息也丢了，老师只剩一个冲突变化数字。
+5. 注释里可以写「迭代轮数」「处」来解释为什么改（去注释后再断言，否则逼人删注释）。
 
 ## 为什么读源码而不是起浏览器
 
@@ -117,6 +119,49 @@ class TestRoundsRowRemoved(unittest.TestCase):
             self.code, r"(可改范围|无权改动)",
             "renderResolveResult 里「因权限边界而跳过的候选方案」那一行不见了 —— "
             "少了它，屏幕上的数字就只剩冲突变化，老师看不出系统试过多少",
+        )
+
+
+class TestPlanCountVsConflictCount(unittest.TestCase):
+    """`applied` / `filtered_out_count` 都是**方案数**，不许说成「处」。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.body = _function_body(_read(os.path.join("web", "app.js")), "renderResolveResult")
+        cls.code = _strip_comments(cls.body)
+
+    def test_undo_strip_says_plans(self):
+        """撤销条必须是「已应用 N 个调整方案（冲突 30 → 0 处）」。
+
+        旧写法「已消解 N 处（30 → 0）」自相矛盾 —— 4 处怎么从 30 变 0？
+        """
+        self.assertNotIn(
+            "已消解", self.code,
+            "撤销条又写成「已消解 N 处」了 —— applied 是方案数，"
+            "说成「处」会和右边「30 → 0 处」直接打架",
+        )
+        self.assertIn("个调整方案", self.code, "撤销条没有说明「N 是个方案数」")
+
+    def test_applied_unit_is_plan(self):
+        """`applied` 后面跟的单位只能是「个方案/个调整方案」，不许是「处」。"""
+        self.assertIsNone(
+            re.search(r"String\(\s*applied\s*\)[\s\S]{0,30}?['\"]\s*处", self.code),
+            "applied 又被当成冲突处数显示了",
+        )
+
+    def test_filtered_unit_is_plan(self):
+        """`filtered_out_count` 是候选方案数 —— 拼「处」会让老师以为还有 N 处冲突没解。"""
+        self.assertIsNone(
+            re.search(r"filtered\s*\+\s*['\"]\s*处", self.code),
+            "filtered_out_count 又被拼成「N 处」了（它是候选方案数，不是冲突处数）",
+        )
+
+    def test_filtered_worded_as_candidate_plans(self):
+        """明细行与提示句都要出现「候选方案」（两处，少一处就是单位又混了）。"""
+        self.assertGreaterEqual(
+            self.code.count("候选方案"), 2,
+            "「候选方案」出现不足 2 次 —— 明细行标签与下方提示句至少各要一次，"
+            "否则 filtered_out_count 又被当成冲突处数讲了",
         )
 
 
