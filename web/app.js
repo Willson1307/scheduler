@@ -3007,11 +3007,103 @@ function isSelfRequest(req) {
   return !!(state.user && state.user.id && req.requester_id === state.user.id);
 }
 
-/** 按「后端状态 × 身份」决定动作按钮（返回动作名数组，终态只读）。 */
+/* =============================================================================
+ * 10.6 审批按钮的权限判据（卡 rrMot2）
+ * -----------------------------------------------------------------------------
+ * 🔴 为什么前端要判权限：原来 reqActions 只看「是不是我提的」，
+ *    于是任何登录用户看到别人提的 pending 都出「同意/拒绝」，一点就 403。
+ *    演示时最伤：教师看到按钮 → 点 → 红字「无权批准」，看着像系统坏了。
+ * 🔴 判据必须与后端**同源**，不能自己发明：
+ *    · b8_kernels.require_approve_in_org：用户在 req.org_id 内**任一组**达到
+ *      approve 档即可批（不是「当前组」）；
+ *    · authz.ROLE_CEILING：teacher 天花板 propose ⇒ 教师永远批不了，即便被授 own；
+ *    · authz.effective_level：admin 本组织短路到 own。
+ *    state.groupLevels 正是 /api/groups 给的**有效档位**（含继承与天花板），
+ *    所以这里按「任一组 ∈ {approve, own}」判，与后端同口径、不多也不少。
+ * 🔴 档位比较用 LEVEL_RANK 整数，不用字符串字典序
+ *    （'own' 的字典序 < 'view'，靠字典序会得出反结果 —— authz.py 勘误2 同款坑）。
+ * ⚠️ 前端判权限只决定「按钮出不出现」，**不是安全边界**：
+ *    groupLevels 还没加载时 fail-closed（不出按钮），真正拦截永远在后端。
+ * ========================================================================== */
+
+/** 档位 → 排序权重。与 authz.LEVEL_ORDER 同序，禁改顺序。 */
+const LEVEL_RANK = { view: 0, propose: 1, approve: 2, own: 3 };
+
+/** 档位 → 中文。只用于给用户读的说明句，不参与任何判断。
+ *  ⚠️ 命名口径（待确认，已上报）：view/own 取 docs/06 冻结表（查看 / 拥有）；
+ *     propose/approve 沿用本页既有说法（提议 / 审批，见「提议改期」「待审批」），
+ *     而 docs/06 表格里这两档写作「提出 / 批准」。两处不一致，等队长定一个口径。
+ *  注：`reqNoActionNote` 只在**没有审批档**时才会用到本表，所以此处实际只会命中
+ *     view / 未授权；approve、own 用不到（前面 `canApproveHere()` 已短路）。 */
+const LEVEL_CN = { view: '查看', propose: '提议', approve: '审批', own: '拥有' };
+
+/** 我在所有已授权组里的最高有效档位（没有授权 → ''）。 */
+function maxGroupLevel() {
+  const lv = state.groupLevels || {};
+  const ids = Object.keys(lv);
+  let best = '';
+  let rank = -1;
+  for (let i = 0; i < ids.length; i++) {
+    const r = LEVEL_RANK[lv[ids[i]]];
+    if (typeof r === 'number' && r > rank) { rank = r; best = lv[ids[i]]; }
+  }
+  return best;
+}
+
+/** 我是不是本组织的最高档（admin 短路，或有效档 own）。
+ *  决定「自己提的请求还有没有人能批」—— 后端 require_higher_level 要求
+ *  批准人档位**严格高于**提出人，own 已是顶格，同级不能批。 */
+function isTopLevelHere() {
+  if (state.user && state.user.global_role === 'admin') return true;
+  return maxGroupLevel() === 'own';
+}
+
+/** 本组织是否具备「审批」档（approve 或 own）—— 与 b8.require_approve_in_org 同源。
+ *  admin 先短路：后端 admin 走全组织短路，不看 group_roles 行。 */
+function canApproveHere() {
+  if (state.user && state.user.global_role === 'admin') return true;
+  const lv = state.groupLevels || {};
+  const ids = Object.keys(lv);
+  for (let i = 0; i < ids.length; i++) {
+    const L = lv[ids[i]];
+    if (L === 'approve' || L === 'own') return true;
+  }
+  return false;
+}
+
+/** 按「后端状态 × 身份 × 权限档」决定动作按钮（返回动作名数组，终态只读）。 */
 function reqActions(req) {
   if (req.status !== 'pending') return [];
-  if (isSelfRequest(req)) return ['withdraw'];   // 自己提的 → 只撤回
-  return ['approve', 'reject'];                   // 别人提的 → 同意/拒绝
+  if (isSelfRequest(req)) return ['withdraw'];   // 自己提的 → 只撤回（后端也不许自批）
+  if (!canApproveHere()) return [];               // 无审批档 → 同意/拒绝一律不出（点了必 403）
+  return ['approve', 'reject'];                   // 有审批档 + 别人提的 → 同意/拒绝
+}
+
+/** 为什么没有「同意/拒绝」——写进卡片一行；终态返回 ''（只读，无需解释）。
+ *  🔴 触发条件不是「一个按钮都没有」，而是「**没有同意/拒绝**」：
+ *     自己提的请求仍有「撤回」按钮，但用户照样会问「我怎么不能直接批」，
+ *     所以自提的情况也必须出说明。
+ *  🔴 三种情况必须分开说，否则用户只看到缺按钮、不知道卡在哪：
+ *     ① 自提 + 我是最高档  → 没人能批（后端要求批准人档位严格高于提出人）；
+ *     ② 自提 + 普通档      → 要更高档账号批；
+ *     ③ 非自提 + 无审批档  → 权限不够，不是数据没加载出来。 */
+function reqNoActionNote(req) {
+  if (str(req, 'status', '') !== 'pending') return '';
+  if (isSelfRequest(req)) {
+    if (isTopLevelHere()) {
+      return '这是你自己提出的请求，不能自己批准。你已是本组织最高权限，没有账号能批准这条——演示时请用教师账号提请求，再由管理员批准。';
+    }
+    return '这是你自己提出的请求，不能自己批准。需要级别比你高的账号（管理员）批准。';
+  }
+  if (!canApproveHere()) {
+    const lv = maxGroupLevel();
+    if (lv === 'propose') return '你当前的权限档位是「提议」，批准需要「审批」档及以上。';
+    // 档位不是「提议」时如实说档位：写死「提议」会把「查看」档也说成能提议，
+    // 又是一条看着合理、实则误导的文案（本项目最怕的静默失效）。
+    // 一个授权组都没有时 groupLevels 是空的 → 说「未授权」，不假称有提议权。
+    return '你当前的权限档位是「' + (LEVEL_CN[lv] || '未授权') + '」，批准需要「审批」档及以上。';
+  }
+  return '';
 }
 
 function renderRequestItem(req) {
@@ -3067,6 +3159,12 @@ function renderRequestItem(req) {
       if (btn) bar.appendChild(btn);
     });
     li.appendChild(bar);
+  }
+  // 「同意/拒绝」没出 → 必须写明原因（自提只有「撤回」时也要说清为什么不能自批）。
+  // ⛔ 不要在这里补「灰色按钮」：灰按钮会诱导点击，后端照样 403。
+  if (acts.indexOf('approve') === -1) {
+    const why = reqNoActionNote(req);
+    if (why) li.appendChild(el('div', { cls: 'req-why', text: why }));
   }
   return li;
 }

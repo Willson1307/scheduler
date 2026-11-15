@@ -17,7 +17,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/png" href="favicon.png?v=20261217">
+<link rel="icon" type="image/png" href="favicon.png?v=20261218">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -653,6 +653,18 @@
   .req-diff { margin: 6px 0; font-weight: 700; }
   .req-reason { font-size: var(--fs-sm); color: var(--c-text-dim); margin: 4px 0; }
   .req-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  /* 无按钮时的原因说明（卡 rrMot2）：pending 但被「自提不能自批 / 档位不够」挡住时，
+     把原因写在按钮原来的位置。🔴 只加一条说明行，不动 .req-item 的布局与间距。
+     用左竖线而不是整框：与 .req-actions 同宽，视觉上接在操作区，不抢状态徽标。 */
+  .req-why {
+    margin-top: 8px;
+    padding: 6px 10px;
+    font-size: var(--fs-sm);
+    color: var(--c-text-dim);
+    background: #f7f8fa;
+    border-left: 3px solid var(--c-border-st);
+    border-radius: 0 var(--radius) var(--radius) 0;
+  }
   /* 变更请求标题行右侧：状态字 + 刷新按钮（都在 <details> 外，收起时可刷新、可看状态） */
   .req-tools { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 
@@ -1419,7 +1431,7 @@
 <!-- 版本号唯一来源 = src/server/config.py 的 ASSET_VERSION；本文件三处 ?v= 必须与它一致。
      版本沿革写在 config.py 的注释里（服务端文件，不会随页面下发）。
      ⛔ 不要在这里记流水：这是 HTML 注释，闭合符写错一行就会整段漏到页面上（2026-11-13 已踩过）。 -->
-<script src="brand-icon.js?v=20261217"></script>
-<script src="app.js?v=20261217"></script>
+<script src="brand-icon.js?v=20261218"></script>
+<script src="app.js?v=20261218"></script>
 </body>
 </html>
