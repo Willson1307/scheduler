@@ -4591,6 +4591,96 @@ function closeFeatureTips() {
   }
 }
 
+/* 浮层与 ⓘ 之间的固定 6px 间隙（与 CSS 的 `top: calc(100% + 6px)` 同一口径），
+   以及浮层到边界的最小留白（队长口径 8~12px，取 10）。 */
+const TIP_GAP = 6;
+const TIP_MARGIN = 10;
+
+/** 浮层真正能显示的区域 = 视口 ∩ 最近一个会裁剪的祖先。
+ *
+ * 为什么要「最近的裁剪祖先」：`position: absolute` 的后代照样会被 `overflow: auto|hidden`
+ * 的祖先裁掉。「问一下」抽屉的正文 `.sheet-body` 就是这种滚动容器 —— 只按视口夹取会得到
+ * 「夹在视口内、却被抽屉切掉一半」，等于没修。
+ *
+ * 🔴 宽度一律用 `documentElement.clientWidth` 而不是 `window.innerWidth`：
+ *    窄屏上内容一溢出，移动端布局视口会被撑大（375 档实测 innerWidth 变成 565），
+ *    拿它当右边界就会「夹了还是溢出」。
+ */
+function tipBounds(box) {
+  const de = document.documentElement;
+  const b = { left: 0, top: 0, right: de.clientWidth, bottom: de.clientHeight };
+  let node = box.parentElement;
+  while (node && node !== document.body) {
+    const cs = getComputedStyle(node);
+    if (/(auto|scroll|hidden)/.test(cs.overflowX + ' ' + cs.overflowY)) {
+      const r = node.getBoundingClientRect();
+      b.left = Math.max(b.left, r.left);
+      b.top = Math.max(b.top, r.top);
+      b.right = Math.min(b.right, r.right);
+      b.bottom = Math.min(b.bottom, r.bottom);
+      break;
+    }
+    node = node.parentElement;
+  }
+  return b;
+}
+
+/** 把浮层摆到 ⓘ 旁边（卡 rw5IzQ）。三件事：向下优先 / 空间不足向上翻 / 左右越界夹取。
+ *
+ * 为什么非要 JS 算一遍：CSS 只能写死 `position: absolute; left: 0`，也就是「永远贴按钮
+ * 左上、永远向下」。装不下时浏览器既不会翻面也不会夹取，于是：
+ *   · 右栏标题上的 ⓘ（「消解结果」在最右一栏）会把 340px 宽的浮层推出视口右沿
+ *     → 整页被撑出横向滚动条（375 档实测页面宽度被撑到 575）；
+ *   · 页面最底部的 ⓘ（「变更请求」）下方没有一屏浮层的高度 → 下半截落到视口外，读不全。
+ *
+ * 做法全是**相对 `.tip-wrap` 的位移**，不改文档流、不改 z-index、不加动画：
+ *   ① 竖直：默认向下（按钮底边 + TIP_GAP）；下方装不下且上方更宽裕 → 翻到按钮上方；
+ *   ② 水平：左右任一侧越界 → 整体平移夹进边界，两侧各留 TIP_MARGIN；
+ *   ③ 兜底：极端矮视口两侧都装不下时，至少把整块压回边界内（宁可离按钮远一点）。
+ * ⛔ 不加 transition（全站口径）：位置一次算完直接落，不做过渡动画。
+ */
+function placeTip(wrap) {
+  const box = wrap.querySelector('.tip-box');
+  const btn = wrap.querySelector('.tip-btn');
+  if (!box || !btn) return;
+
+  // 每次先归零：同一个函数服务 6 个 ⓘ，上一次的翻转与位移绝不能带到下一次。
+  box.style.left = '';
+  box.style.top = '';
+  wrap.classList.remove('tip-flip-up');
+
+  const bounds = tipBounds(box);
+  const btnRect = btn.getBoundingClientRect();
+  let boxRect = box.getBoundingClientRect();
+  const roomBelow = bounds.bottom - btnRect.bottom - TIP_GAP - TIP_MARGIN;
+  const roomAbove = btnRect.top - bounds.top - TIP_GAP - TIP_MARGIN;
+
+  // ① 竖直。btnRect.height 就是 .tip-wrap 的高度（wrap 里只有按钮参与布局），
+  //    所以「按钮底边 + 6px」与 CSS 的 calc(100% + 6px) 等价。
+  let topPx = btnRect.height + TIP_GAP;
+  if (boxRect.height > roomBelow && roomAbove > roomBelow) {
+    topPx = -(boxRect.height + TIP_GAP);
+    // 翻到上方后间隙跑到浮层下边，透明接桥得跟着挪（CSS 的 .tip-flip-up 只管这一步）。
+    wrap.classList.add('tip-flip-up');
+  }
+  box.style.top = topPx + 'px';
+
+  // ② 水平夹取。left 相对 .tip-wrap 的 padding box，位移量直接叠加即可。
+  boxRect = box.getBoundingClientRect();
+  let dx = 0;
+  if (boxRect.right > bounds.right - TIP_MARGIN) dx = (bounds.right - TIP_MARGIN) - boxRect.right;
+  if (boxRect.left + dx < bounds.left + TIP_MARGIN) dx = (bounds.left + TIP_MARGIN) - boxRect.left;
+  if (dx !== 0) box.style.left = dx + 'px';
+
+  // ③ 兜底：两侧都装不下（极矮视口）时，把越界量补回去，保证整块可读。
+  boxRect = box.getBoundingClientRect();
+  if (boxRect.top < bounds.top + TIP_MARGIN) {
+    box.style.top = (topPx + (bounds.top + TIP_MARGIN - boxRect.top)) + 'px';
+  } else if (boxRect.bottom > bounds.bottom - TIP_MARGIN) {
+    box.style.top = (topPx - (boxRect.bottom - (bounds.bottom - TIP_MARGIN))) + 'px';
+  }
+}
+
 /** 造一个「ⓘ + 浮层」组合，返回外层 wrap（由 mountFeatureTips 挂到标题上）。 */
 function tipTrigger(tip) {
   const wrap = el('span', { cls: 'tip-wrap' });
@@ -4621,7 +4711,14 @@ function tipTrigger(tip) {
   btn.addEventListener('click', function () {
     const open = wrap.classList.toggle('is-open');
     btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    // 触屏只有这一条路径会显示浮层，必须在这里算一次位置；
+    // 顺序不能反：先加 is-open（display 变 block）再量，否则量到的高度是 0。
+    if (open) placeTip(wrap);
   });
+
+  // 鼠标进入（同时 CSS :hover 生效）与键盘 Tab 进来（:focus-within 生效）都算一次位置。
+  wrap.addEventListener('mouseenter', function () { placeTip(wrap); });
+  wrap.addEventListener('focusin', function () { placeTip(wrap); });
 
   wrap.appendChild(btn);
   wrap.appendChild(box);
@@ -4645,6 +4742,12 @@ function mountFeatureTips() {
   });
   document.addEventListener('keydown', function (ev) {
     if (ev.key === 'Escape') closeFeatureTips();
+  });
+  // 旋屏 / 改窗口宽度后，点开的浮层可能又越界了 —— 只重算「点开」的那几个
+  // （悬停中的那几个下次 mouseenter 会自己重算，不必在 resize 里逐个量）。
+  window.addEventListener('resize', function () {
+    const open = document.querySelectorAll('.tip-wrap.is-open');
+    for (let i = 0; i < open.length; i++) placeTip(open[i]);
   });
 }
 

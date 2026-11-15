@@ -17,7 +17,7 @@
 <title>时之交响 TimeSymphony · 课表与活动调度</title>
 <!-- 标签页图标：相对路径 + 同一版本号（与 app.js 一起被 ASSET_VERSION 驱动）。
      带 type="image/svg+xml" 让浏览器直接按 SVG 解析，不必靠嗅探。 -->
-<link rel="icon" type="image/png" href="favicon.png?v=20261214">
+<link rel="icon" type="image/png" href="favicon.png?v=20261215">
 <style>
   /* ===== 设计令牌：集中在此，页面其余处只引用变量 =====
      中文学术风格：白底、深蓝主色、红色系标冲突；无动画（现场投影可能不稳）。 */
@@ -957,7 +957,6 @@
     .sheet { right: 8px; left: 8px; width: auto; bottom: 80px; max-height: 78vh; }
     .fab { right: 12px; bottom: 12px; }
   }
-=======
 
   /* ---------- 功能介绍悬停框（卡 rY3Bpn / F-12） ----------
      每个功能区块标题右侧一个 ⓘ：悬停 / 键盘聚焦 / 触屏点开时弹出「这是什么 · 怎么用」。
@@ -1001,6 +1000,13 @@
   .tip-box::before {
     content: '';
     position: absolute; left: 0; right: 0; top: -7px; height: 7px;
+  }
+  /* 向上翻时（卡 rw5IzQ）：浮层跑到按钮上方，6px 间隙由「浮层底边 ↔ 按钮顶边」构成，
+     接桥必须跟着换到底边下方，否则鼠标从按钮往上移时跨过那段空白，:hover 断掉。
+     🔴 位置本身由 app.js 的 placeTip() 用行内 top 决定，这里有且只有接桥方向一件事 ——
+        不要再往这条规则里加 top/bottom 位移，行内样式与它同时生效会把浮层拉变形。 */
+  .tip-wrap.tip-flip-up .tip-box::before {
+    top: auto; bottom: -7px;
   }
   /* 浮层里的字比正文小一档（0.95rem ≈ 16px），仍按「1 米可读」给行高 */
   .tip-box .tip-title {
@@ -1413,7 +1419,7 @@
 <!-- 版本号唯一来源 = src/server/config.py 的 ASSET_VERSION；本文件三处 ?v= 必须与它一致。
      版本沿革写在 config.py 的注释里（服务端文件，不会随页面下发）。
      ⛔ 不要在这里记流水：这是 HTML 注释，闭合符写错一行就会整段漏到页面上（2026-11-13 已踩过）。 -->
-<script src="brand-icon.js?v=20261214"></script>
-<script src="app.js?v=20261214"></script>
+<script src="brand-icon.js?v=20261215"></script>
+<script src="app.js?v=20261215"></script>
 </body>
 </html>
